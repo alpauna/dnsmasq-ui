@@ -1,0 +1,20 @@
+{
+  "dns01": {
+    "ip": "192.168.0.231",
+    "hostname": "dns01",
+    "port": 22,
+    "status": "online"
+  },
+  "dns02": {
+    "ip": "192.168.0.232",
+    "hostname": "dns02",
+    "port": 22,
+    "status": "online"
+  },
+  "dns03": {
+    "ip": "192.168.0.233",
+    "hostname": "dns03",
+    "port": 22,
+    "status": "online"
+  }
+}

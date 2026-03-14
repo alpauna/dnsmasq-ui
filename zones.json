@@ -1,0 +1,109 @@
+{
+  "zones": [
+    {
+      "name": "ad.alshowto.com",
+      "description": "Active Directory domain",
+      "type": "local",
+      "soa": {
+        "ns": "dns03.ad.alshowto.com",
+        "contact": "admin.alshowto.com",
+        "serial": 2026031400,
+        "refresh": 3600,
+        "retry": 1800,
+        "expire": 604800,
+        "ttl": 3600
+      },
+      "records": [
+        {
+          "domain": "10g-sw01.ad.alshowto.com",
+          "type": "AAAA",
+          "value": "2604:7a00:ea40:5630:5ea6:e6ff:fe27:417c"
+        },
+        {
+          "domain": "10g-sw02.ad.alshowto.com",
+          "type": "AAAA",
+          "value": "2604:7a00:ea40:5630:56af:97ff:fe8f:c7a7"
+        },
+        {
+          "domain": "dns01.ad.alshowto.com",
+          "type": "A",
+          "value": "192.168.0.231"
+        },
+        {
+          "domain": "dns02.ad.alshowto.com",
+          "type": "A",
+          "value": "192.168.0.232"
+        },
+        {
+          "domain": "dns03.ad.alshowto.com",
+          "type": "A",
+          "value": "192.168.0.233"
+        },
+        {
+          "domain": "middle-01.ad.alshowto.com",
+          "type": "A",
+          "value": "192.168.0.250"
+        },
+        {
+          "domain": "esphome.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "frigate.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "ha.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "portainer.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "proxmox.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        }
+      ]
+    },
+    {
+      "name": "internal.alshowto.com",
+      "description": "Internal services",
+      "type": "local",
+      "records": []
+    }
+  ],
+  "servers": {
+    "dns01": {
+      "ip": "192.168.0.231",
+      "hostname": "dns01",
+      "port": 22,
+      "enabled": true
+    },
+    "dns02": {
+      "ip": "192.168.0.232",
+      "hostname": "dns02",
+      "port": 22,
+      "enabled": true
+    },
+    "dns03": {
+      "ip": "192.168.0.233",
+      "hostname": "dns03",
+      "port": 22,
+      "enabled": true
+    }
+  },
+  "global": {
+    "upstream_dns": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "keepalive_vip": "192.168.0.250",
+    "keepalive_interval": 300
+  }
+}

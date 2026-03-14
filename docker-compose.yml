@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  dnsmasq-ui:
+    build: .
+    container_name: dnsmasq-ui
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - DNSMASQ_UI_CONFIG=/etc/dnsmasq-ui/servers.json
+      - DNSMASQ_RECORDS_FILE=/etc/dnsmasq.d/local-records.conf
+      - SSH_KEY=/root/.ssh/id_rsa
+      - SSH_USER=debian
+    volumes:
+      - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
+      - ./servers.json:/etc/dnsmasq-ui/servers.json:ro
+    networks:
+      - dnsmasq
+    restart: unless-stopped
+
+networks:
+  dnsmasq:
+    driver: bridge
