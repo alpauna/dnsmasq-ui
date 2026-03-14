@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ zone.name }} - dnsmasq-ui</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        .breadcrumb {
+            background: white;
+            border-radius: 8px;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            font-size: 13px;
+        }
+
+        .breadcrumb a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .breadcrumb a:hover {
+            text-decoration: underline;
+        }
+
+        .header {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .header-actions {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .section {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .section h2 {
+            color: #333;
+            font-size: 22px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .btn-danger {
+            background: #f44336;
+            color: white;
+            padding: 8px 12px;
+            font-size: 12px;
+        }
+
+        .btn-danger:hover {
+            background: #d32f2f;
+        }
+
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            color: #333;
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+        }
+
+        .add-record-form {
+            background: #f9f9f9;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+
+        .table-wrapper {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        table thead {
+            background: #f5f5f5;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        table th {
+            padding: 12px;
+            text-align: left;
+            color: #333;
+            font-weight: 600;
+        }
+
+        table td {
+            padding: 12px;
+            border-bottom: 1px solid #e0e0e0;
+            color: #333;
+        }
+
+        table tr:hover {
+            background: #f9f9f9;
+        }
+
+        .record-type {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-weight: 500;
+            font-size: 11px;
+        }
+
+        .record-type.aaaa {
+            background: #2196f3;
+        }
+
+        .record-type.cname {
+            background: #ff9800;
+        }
+
+        .record-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #666;
+        }
+
+        .empty-state p {
+            margin-bottom: 20px;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            font-size: 13px;
+        }
+
+        .alert-success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border: 1px solid #c8e6c9;
+        }
+
+        .alert-error {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+
+            .header {
+                padding: 20px;
+            }
+
+            .section {
+                padding: 20px;
+            }
+
+            table {
+                font-size: 12px;
+            }
+
+            table th,
+            table td {
+                padding: 8px;
+            }
+
+            .record-actions {
+                flex-direction: column;
+            }
+
+            .record-actions .btn {
+                width: 100%;
+            }
+        }
+
+        .zone-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .info-item {
+            padding: 10px;
+            background: #f9f9f9;
+            border-radius: 4px;
+        }
+
+        .info-item label {
+            display: block;
+            color: #666;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+
+        .info-item value {
+            display: block;
+            color: #333;
+            font-weight: 500;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/">← Dashboard</a> / <strong>{{ zone.name }}</strong>
+        </div>
+
+        <div class="header">
+            <h1>{{ zone.name }}</h1>
+            <p>{{ zone.description or 'No description' }}</p>
+            <div class="zone-info">
+                <div class="info-item">
+                    <label>Zone Type</label>
+                    <value>{{ zone.type }}</value>
+                </div>
+                <div class="info-item">
+                    <label>Total Records</label>
+                    <value id="record-count">{{ zone.records|length }}</value>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button class="btn btn-secondary" onclick="location.reload()">Refresh</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Add New Record</h2>
+            <form class="add-record-form" onsubmit="addRecord(event)">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="domain">Domain Name</label>
+                        <input type="text" id="domain" placeholder="e.g., www.{{ zone.name }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="record-type">Record Type</label>
+                        <select id="record-type">
+                            <option value="A">A (IPv4)</option>
+                            <option value="AAAA">AAAA (IPv6)</option>
+                            <option value="CNAME">CNAME (Alias)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="record-value">Value</label>
+                        <input type="text" id="record-value" placeholder="192.168.0.100 or 2604:7a00::100 or target.com" required>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Add Record</button>
+            </form>
+            <div id="add-status"></div>
+        </div>
+
+        <div class="section">
+            <h2>DNS Records</h2>
+            {% if zone.records %}
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Domain</th>
+                            <th>Type</th>
+                            <th>Value</th>
+                            <th style="width: 150px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="records-table">
+                        {% for record in zone.records %}
+                        <tr>
+                            <td>{{ record.domain }}</td>
+                            <td>
+                                <span class="record-type {% if record.type == 'AAAA' %}aaaa{% elif record.type == 'CNAME' %}cname{% endif %}">
+                                    {{ record.type }}
+                                </span>
+                            </td>
+                            <td><code>{{ record.value }}</code></td>
+                            <td>
+                                <div class="record-actions">
+                                    <button class="btn btn-secondary btn-sm" onclick="editRecord('{{ record.domain }}', '{{ record.type }}', '{{ record.value }}')">Edit</button>
+                                    <button class="btn btn-danger btn-sm" onclick="deleteRecord('{{ record.domain }}', '{{ record.type }}')">Delete</button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <p>No DNS records in this zone yet.</p>
+                <p>Add your first record above to get started.</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="section" style="text-align: center;">
+            <button class="btn btn-primary" onclick="deployChanges()">
+                <span id="deploy-text">Deploy Changes</span>
+                <span id="deploy-spinner" style="display: none;" class="loading"></span>
+            </button>
+            <div id="deploy-status" style="margin-top: 20px;"></div>
+        </div>
+    </div>
+
+    <script>
+        const zoneName = "{{ zone.name }}";
+
+        function addRecord(event) {
+            event.preventDefault();
+
+            const domain = document.getElementById('domain').value.trim();
+            const type = document.getElementById('record-type').value;
+            const value = document.getElementById('record-value').value.trim();
+
+            if (!domain || !value) {
+                alert('Domain and value are required');
+                return;
+            }
+
+            fetch(`/api/zones/${zoneName}/records`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    domain: domain,
+                    type: type,
+                    value: value
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                const statusDiv = document.getElementById('add-status');
+                if (data.success) {
+                    statusDiv.innerHTML = '<div class="alert alert-success">Record added successfully!</div>';
+                    document.getElementById('domain').value = '';
+                    document.getElementById('record-value').value = '';
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    statusDiv.innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
+                }
+            })
+            .catch(error => {
+                document.getElementById('add-status').innerHTML = `<div class="alert alert-error">Error: ${error.message}</div>`;
+            });
+        }
+
+        function deleteRecord(domain, type) {
+            if (!confirm(`Are you sure you want to delete the ${type} record for "${domain}"?`)) {
+                return;
+            }
+
+            const encodedDomain = encodeURIComponent(domain);
+            fetch(`/api/zones/${zoneName}/records/${encodedDomain}/${type}`, {
+                method: 'DELETE'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to delete record');
+            });
+        }
+
+        function editRecord(domain, type, value) {
+            // Populate the form with existing record data for editing
+            document.getElementById('domain').value = domain;
+            document.getElementById('record-type').value = type;
+            document.getElementById('record-value').value = value;
+
+            // Scroll to form
+            document.querySelector('.add-record-form').scrollIntoView({ behavior: 'smooth' });
+
+            // Change button text
+            const form = document.querySelector('form');
+            const submitBtn = form.querySelector('button[type="submit"]');
+            submitBtn.textContent = 'Update Record';
+
+            // Store original values for update
+            form.dataset.editDomain = domain;
+            form.dataset.editType = type;
+
+            // Replace form submission
+            form.onsubmit = function(event) {
+                event.preventDefault();
+                const newValue = document.getElementById('record-value').value.trim();
+                const newType = document.getElementById('record-type').value;
+
+                if (newValue === value && newType === type) {
+                    alert('No changes made');
+                    return;
+                }
+
+                fetch(`/api/zones/${zoneName}/records/${encodeURIComponent(domain)}/${type}`, {
+                    method: 'DELETE'
+                })
+                .then(() => {
+                    return fetch(`/api/zones/${zoneName}/records`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            domain: document.getElementById('domain').value.trim(),
+                            type: newType,
+                            value: newValue
+                        })
+                    });
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    alert('Error updating record: ' + error.message);
+                });
+            };
+        }
+
+        function deployChanges() {
+            const deployText = document.getElementById('deploy-text');
+            const spinner = document.getElementById('deploy-spinner');
+            const statusDiv = document.getElementById('deploy-status');
+
+            deployText.style.display = 'none';
+            spinner.style.display = 'inline-block';
+
+            fetch('/api/deploy', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                deployText.style.display = 'inline';
+                spinner.style.display = 'none';
+
+                let html = '<div class="alert alert-success"><strong>Deployment successful!</strong><br>';
+                for (const [server, result] of Object.entries(data.results)) {
+                    if (result.success) {
+                        html += `<br>✓ ${server}: ${result.message}`;
+                    } else {
+                        html += `<br>✗ ${server}: ${result.message}`;
+                    }
+                }
+                html += '</div>';
+                statusDiv.innerHTML = html;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                deployText.style.display = 'inline';
+                spinner.style.display = 'none';
+                statusDiv.innerHTML = '<div class="alert alert-error"><strong>Deployment failed:</strong> ' + error.message + '</div>';
+            });
+        }
+
+        // Reset form when page loads
+        window.addEventListener('load', function() {
+            const form = document.querySelector('form');
+            form.onsubmit = addRecord;
+            form.querySelector('button[type="submit"]').textContent = 'Add Record';
+        });
+    </script>
+</body>
+</html>

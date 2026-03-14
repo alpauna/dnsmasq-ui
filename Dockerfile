@@ -20,5 +20,5 @@ RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
 # Expose port
 EXPOSE 5000
 
-# Run Flask app
-CMD ["python", "-u", "app.py"]
+# Run Flask app (multi-zone version)
+CMD ["python", "-u", "app-multi-zone.py"]
