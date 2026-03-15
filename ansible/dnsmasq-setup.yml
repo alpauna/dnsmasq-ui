@@ -39,7 +39,6 @@
           global_defs {
             router_id DNS_CLUSTER
             script_user root
-            enable_script_security
           }
 
           vrrp_instance DNS_VIP {
@@ -58,38 +57,12 @@
             track_processes {
               dnsmasq
             }
-
-            # Script to run when becoming MASTER
-            notify_master "/usr/local/bin/keepalived-master.sh"
-
-            # Script to run when becoming BACKUP
-            notify_backup "/usr/local/bin/keepalived-backup.sh"
           }
         dest: /etc/keepalived/keepalived.conf
         owner: root
         group: root
         mode: '0644'
       notify: restart keepalived
-
-    - name: Create keepalived MASTER notification script
-      copy:
-        content: |
-          #!/bin/bash
-          echo "[$(date)] $(hostname) became MASTER for VIP {{ keepalive_vip }}" >> /var/log/keepalived-transitions.log
-        dest: /usr/local/bin/keepalived-master.sh
-        owner: root
-        group: root
-        mode: '0755'
-
-    - name: Create keepalived BACKUP notification script
-      copy:
-        content: |
-          #!/bin/bash
-          echo "[$(date)] $(hostname) became BACKUP for VIP {{ keepalive_vip }}" >> /var/log/keepalived-transitions.log
-        dest: /usr/local/bin/keepalived-backup.sh
-        owner: root
-        group: root
-        mode: '0755'
 
     - name: Enable and start keepalived
       systemd:
