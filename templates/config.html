@@ -655,11 +655,28 @@
                 .then(response => response.json())
                 .then(data => {
                     let html = '';
-                    for (const [name, info] of Object.entries(data)) {
+                    const servers = data.servers || {};
+                    const vip = data.vip || 'N/A';
+
+                    // Add VIP status at top
+                    html += `<div class="server-item" style="grid-column: 1/-1; background: #e8f5e9; border-color: #4caf50;">
+                        <h4>🔷 Keepalived VIP</h4>
+                        <p><strong>VIP Address:</strong> ${vip}</p>
+                    </div>`;
+
+                    for (const [name, info] of Object.entries(servers)) {
+                        const statusIcon = info.online ? '🟢' : '🔴';
+                        const statusText = info.online ? 'Online' : 'Offline';
+                        const ka = info.keepalived || {};
+                        const kaIcon = ka.status === 'MASTER' ? '🔴' : (ka.status === 'STANDBY' ? '🟠' : '⚫');
+                        const kaStatus = ka.status || 'INACTIVE';
+
                         html += `<div class="server-item">
                             <h4>${name}</h4>
                             <p><strong>IP:</strong> ${info.ip}</p>
-                            <p><strong>Status:</strong> ${info.online ? '🟢 Online' : '🔴 Offline'}</p>
+                            <p><strong>Hostname:</strong> ${info.hostname || 'N/A'}</p>
+                            <p><strong>DNS Status:</strong> ${statusIcon} ${statusText}</p>
+                            <p><strong>Keepalived:</strong> ${kaIcon} ${kaStatus}</p>
                         </div>`;
                     }
                     document.getElementById('server-status').innerHTML = html;
