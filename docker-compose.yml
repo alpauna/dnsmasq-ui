@@ -14,7 +14,7 @@ services:
       - SSH_KEY=/root/.ssh/id_rsa
       - SSH_USER=root
     volumes:
-      - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
+      - /home/debian/.ssh/id_rsa:/root/.ssh/id_rsa:ro
       - ./zones.json:/etc/dnsmasq-ui/zones.json
       - ./wireguard-keys.json:/etc/dnsmasq-ui/wireguard-keys.json
     networks:

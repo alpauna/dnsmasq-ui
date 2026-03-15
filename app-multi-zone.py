@@ -234,7 +234,8 @@ class ZoneManager:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
-            stdin, stdout, stderr = ssh.exec_command("sudo systemctl is-active dnsmasq")
+            # Use pgrep instead of systemctl for Docker/non-systemd containers
+            stdin, stdout, stderr = ssh.exec_command("pgrep -x dnsmasq > /dev/null && echo active || echo inactive")
             output = stdout.read().decode()
             ssh.close()
             return 'active' in output.lower()
@@ -252,22 +253,21 @@ class ZoneManager:
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
 
-            # Check if keepalived is running
-            stdin, stdout, stderr = ssh.exec_command("sudo systemctl is-active keepalived 2>/dev/null")
+            # Check if keepalived is running using pgrep (Docker-compatible)
+            stdin, stdout, stderr = ssh.exec_command("pgrep -x keepalived > /dev/null && echo running || echo stopped")
             keepalived_status = stdout.read().decode().strip()
-            # Must be exactly "active", not "inactive" (substring match bug)
-            keepalived_running = keepalived_status.lower() == 'active'
+            keepalived_running = keepalived_status.lower() == 'running'
 
             if not keepalived_running:
                 ssh.close()
                 return False, False
 
-            # Check if this is the master (MASTER state in keepalived)
-            stdin, stdout, stderr = ssh.exec_command("sudo systemctl status keepalived 2>/dev/null | grep -i master")
+            # Check if this is the master by checking VIP assignment
+            stdin, stdout, stderr = ssh.exec_command("ip addr show | grep -q 172.20.0.252 && echo MASTER || echo BACKUP")
             output = stdout.read().decode().strip()
             ssh.close()
 
-            is_master = len(output) > 0 and 'MASTER' in output.upper()
+            is_master = 'MASTER' in output.upper()
             return is_master, keepalived_running
         except:
             return False, False
