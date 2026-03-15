@@ -9,29 +9,48 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 - 📊 **Server Status**: Real-time monitoring of dnsmasq service health
 - ❤️ **Keepalive Tracking**: Automatic health checks and status logging
 - 🤖 **Ansible Automation**: Full deployment and configuration management
-- 🐳 **Docker Support**: Easy containerized deployment
+- 🐳 **Docker Support**: Easy containerized deployment on all servers
 - 🔐 **SSH Key Management**: Generate, upload, and distribute SSH keys to servers
 - 🔑 **Password-based SSH Auth**: Initial setup with user passwords, fallback to key auth
 - 🔀 **Reverse Proxy Support**: X-Forwarded headers for deployment behind nginx/Traefik/HAProxy
 - 📋 **Configuration Dashboard**: Manage SSH keys and server settings from web UI
 - 🔀 **Flexible Zone View**: Toggle between card and grid layouts with smart recommendations
 - 💾 **Backup & Restore**: Export/import complete DNS configuration with auto-deployment
+- **🚀 HA UI Deployment**: Run dnsmasq-ui on all servers with GlusterFS shared storage for automatic failover
+- **📁 GlusterFS Replication**: zones.json automatically replicated across all servers (replica-3)
+- **⚡ Single VIP**: Same keepalived VIP serves both DNS (port 53) and UI (port 5000)
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────┐
-│      dnsmasq-ui (Web Dashboard)         │
-│  Running on 192.168.0.250 (VIP)         │
-└────────┬────────────────────────────────┘
-         │
-         ├─→ dns01 (192.168.0.231)
-         ├─→ dns02 (192.168.0.232)
-         └─→ dns03 (192.168.0.233)
+### HA Deployment (Recommended)
 
-All three DNS servers run dnsmasq with synchronized
-local DNS records and upstream forwarding.
 ```
+┌──────────────────────────────────────────────────┐
+│  192.168.0.250 (Keepalived VIP)                  │
+│  ├─ :53   → dnsmasq DNS (MASTER)                │
+│  └─ :5000 → dnsmasq-ui (MASTER)                 │
+└──────────────┬───────────────────────────────────┘
+               │
+     ┌─────────┼─────────┐
+     │         │         │
+  dns01     dns02     dns03
+ (MASTER)  (BACKUP)  (BACKUP)
+  - dnsmasq      - dnsmasq      - dnsmasq
+  - keepalived   - keepalived   - keepalived
+  - dnsmasq-ui   - dnsmasq-ui   - dnsmasq-ui
+  (Docker)       (Docker)       (Docker)
+
+GlusterFS replica-3 volume
+  └─ /opt/dnsmasq-ui-data/zones.json
+     (Replicated across all 3 servers)
+```
+
+**Key Features:**
+- All three servers run dnsmasq-ui in Docker containers
+- zones.json is shared via GlusterFS (replica-3 means 3 copies)
+- Single keepalived VIP manages both DNS and UI failover
+- If any server fails, VIP moves to next MASTER within seconds
+- UI remains accessible via same VIP even if one server goes down
 
 ## Quick Start
 
@@ -78,24 +97,34 @@ The **setup.sh** script provides an interactive way to configure DNS clusters of
   - `ansible/dnsmasq-setup.yml` (Dynamic playbook with keepalived)
   - Updated `zones.json` (New server definitions)
 
-### Quick Setup
+### Quick Setup (HA with GlusterFS)
 
 ```bash
-# Run interactive setup wizard
+# 1. Run interactive setup wizard
 ./setup.sh
 
 # Follow the prompts:
 #   1. SSH user (default: debian)
 #   2. Number of servers (e.g., 3)
 #   3. Server addresses (e.g., 192.168.0.231-233)
-#   4. Confirm configuration
+#   4. VIP address (default: 192.168.0.250)
+#   5. Confirm configuration
 
-# Deploy with Ansible
+# 2. Deploy DNS servers and keepalived
 cd ansible
 ansible-playbook -i inventory.ini dnsmasq-setup.yml
 
-# Or use the deployment script
-./deploy-keepalived.sh all
+# 3. Deploy HA UI with GlusterFS and Docker
+ansible-playbook -i inventory.ini dnsmasq-ui-ha.yml
+
+# 4. Verify UI is accessible on all servers
+curl http://192.168.0.250:5000/api/status     # Via VIP
+curl http://192.168.0.231:5000/api/status     # Direct to dns01
+curl http://192.168.0.232:5000/api/status     # Direct to dns02
+curl http://192.168.0.233:5000/api/status     # Direct to dns03
+
+# 5. Access dashboard in browser
+# http://192.168.0.250:5000
 ```
 
 ### Setup Examples
@@ -158,6 +187,99 @@ See [SETUP_GUIDE.md](SETUP_GUIDE.md) for comprehensive setup documentation inclu
 - Troubleshooting guide
 - Advanced configuration options
 - Best practices for production deployments
+
+## High Availability UI Deployment
+
+The dnsmasq-ui dashboard itself can run on all DNS servers with automatic failover using GlusterFS for shared storage.
+
+### What is HA UI Deployment?
+
+Instead of running the UI on a single management server, you can:
+- **Run dnsmasq-ui in Docker on all three DNS servers**
+- **Share zones.json via GlusterFS** (replica-3 volume = 3 copies)
+- **Use the same keepalived VIP** for both DNS (port 53) and UI (port 5000)
+- **Automatic failover**: If the MASTER server fails, the VIP moves to a BACKUP, taking both DNS and UI with it
+
+### Quick HA Deployment
+
+After running `setup.sh` and initial DNS deployment:
+
+```bash
+# Deploy HA UI with GlusterFS
+cd ansible
+ansible-playbook -i inventory.ini dnsmasq-ui-ha.yml
+
+# Verify UI is running on all servers
+curl http://192.168.0.231:5000/api/status
+curl http://192.168.0.232:5000/api/status
+curl http://192.168.0.233:5000/api/status
+
+# Access UI via VIP (same IP as DNS)
+curl http://192.168.0.250:5000/api/status
+```
+
+### HA UI Features
+
+✅ **GlusterFS Replica-3**: All three servers hold a copy of zones.json
+✅ **Real-time Sync**: Changes on any server are visible to all
+✅ **Single VIP**: Same IP for DNS and UI (different ports)
+✅ **Automatic Failover**: If MASTER fails, VIP moves within 1-2 seconds
+✅ **UI Health Monitoring**: Keepalived tracks the UI container health
+✅ **No Data Loss**: GlusterFS survives 1 server failure
+
+### GlusterFS Details
+
+The playbook sets up:
+- **Volume Name**: `dnsmasq-ui`
+- **Replication**: 3 copies (replica-3) across all servers
+- **Brick Path**: `/data/glusterfs/` on each server
+- **Mount Point**: `/opt/dnsmasq-ui-data/` on each server
+- **Container Mount**: zones.json bound into Docker container
+
+### Monitoring HA UI
+
+```bash
+# Check GlusterFS volume status (on any DNS server)
+ssh debian@192.168.0.231 gluster volume status dnsmasq-ui
+
+# Check if UI container is running
+ssh debian@192.168.0.231 docker ps | grep dnsmasq-ui
+
+# Check zones.json sync (same across all servers)
+ssh debian@192.168.0.231 ls -la /opt/dnsmasq-ui-data/zones.json
+ssh debian@192.168.0.232 ls -la /opt/dnsmasq-ui-data/zones.json
+ssh debian@192.168.0.233 ls -la /opt/dnsmasq-ui-data/zones.json
+
+# View keepalived health checks
+ssh debian@192.168.0.231 sudo systemctl status keepalived
+```
+
+### Failover Test
+
+To test automatic UI failover:
+
+```bash
+# 1. Verify current MASTER (should be dns01)
+curl http://192.168.0.250:5000/api/status
+
+# 2. Stop the UI container on dns01
+ssh debian@192.168.0.231 docker compose down
+cd /opt/dnsmasq-ui && docker compose down
+
+# 3. Verify VIP moved to dns02 (should happen within 10 seconds)
+curl http://192.168.0.250:5000/api/status
+# Should now be responding from dns02
+
+# 4. Restart UI on dns01
+ssh debian@192.168.0.231 docker compose up -d
+cd /opt/dnsmasq-ui && docker compose up -d
+
+# 5. Verify dns01 resumes as MASTER
+curl http://192.168.0.250:5000/api/status
+# Should respond from dns01 (higher priority)
+```
+
+See [HA_UI_DEPLOYMENT.md](HA_UI_DEPLOYMENT.md) for detailed HA setup guide.
 
 ## Configuration
 
@@ -882,6 +1004,12 @@ MIT
 - [x] Zone record preview in dashboard
 - [x] Keepalived status monitoring and display (MASTER/STANDBY/INACTIVE)
 - [x] VIP address display and active master indicator
+- [x] HA UI deployment with GlusterFS shared storage
+- [x] Docker deployment on all DNS servers
+- [x] Real-time zones.json replication (replica-3)
+- [x] Single VIP for both DNS and UI
+- [x] Automatic UI failover with keepalived health checks
+- [x] Configurable VIP address in setup script
 
 ### Planned 📋
 - [ ] Zone file import/export
@@ -898,7 +1026,7 @@ MIT
 
 ---
 
-**Status**: Production Ready (v2.0+)
-**Last Updated**: 2026-03-15
-**Latest Version**: v2.0+ - Multi-zone with SSH key management and keepalived monitoring
+**Status**: Production Ready (v2.1+)
+**Last Updated**: 2026-03-14
+**Latest Version**: v2.1+ - HA UI deployment with GlusterFS, Docker on all servers, single VIP failover
 **Repository**: https://github.com/alpauna/dnsmasq-ui
