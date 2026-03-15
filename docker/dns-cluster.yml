@@ -29,9 +29,7 @@ services:
     volumes:
       - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
     ports:
-      - "53:53/udp"
-      - "53:53/tcp"
-      - "22:2201"
+      - "2201:22"
 
   dns02:
     build: ./dns-node
@@ -51,9 +49,7 @@ services:
     volumes:
       - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
     ports:
-      - "53:53/udp"
-      - "53:53/tcp"
-      - "22:2202"
+      - "2202:22"
 
   dns03:
     build: ./dns-node
@@ -73,6 +69,4 @@ services:
     volumes:
       - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
     ports:
-      - "53:53/udp"
-      - "53:53/tcp"
-      - "22:2203"
+      - "2203:22"
