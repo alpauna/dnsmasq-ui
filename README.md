@@ -275,6 +275,21 @@ curl -X POST http://localhost:5000/api/config/ssh/sync \
   -d '{"public_key": "ssh-rsa AAAA...", "password": "user-password"}'
 ```
 
+### Backup & Restore
+
+```bash
+# Download configuration backup as JSON
+curl http://localhost:5000/api/config/backup > backup.json
+
+# Restore configuration from backup (no deployment)
+curl -F "backup_file=@backup.json" \
+  http://localhost:5000/api/config/restore
+
+# Restore configuration and deploy to all servers
+curl -F "backup_file=@backup.json" \
+  http://localhost:5000/api/config/restore-and-deploy
+```
+
 ## Supported Record Types
 
 - **A**: IPv4 address
@@ -401,6 +416,97 @@ For first-time deployment to servers without SSH keys:
 
 This workflow ensures secure initial setup even when starting from password-only SSH access.
 
+## Backup & Restore
+
+The application provides built-in backup and restore functionality for complete configuration management.
+
+### Backup Configuration
+
+Download your complete DNS configuration (zones, records, servers) as a JSON file:
+
+```bash
+# Via Web UI: Configuration page → Backup & Restore → Backup Config → Download
+
+# Via API:
+curl http://localhost:5000/api/config/backup > dns-backup.json
+```
+
+**Backup Includes:**
+- All zones and their DNS records
+- Server definitions
+- Global settings (upstream DNS, VIP, intervals)
+- Backup timestamp and version information
+
+### Restore Configuration
+
+Two restore modes are available:
+
+**1. Restore Config Only** - Update configuration without deploying:
+```bash
+# Via Web UI: Configuration → Restore Config → Select file → Restore Configuration
+
+# Via API:
+curl -F "backup_file=@dns-backup.json" http://localhost:5000/api/config/restore
+```
+
+**2. Restore & Deploy** - Restore and automatically push to all servers:
+```bash
+# Via Web UI: Configuration → Restore Config → Select "Restore & Deploy" → Restore Configuration
+
+# Via API:
+curl -F "backup_file=@dns-backup.json" http://localhost:5000/api/config/restore-and-deploy
+```
+
+When using **Restore & Deploy**, the system will:
+1. Validate the backup file
+2. Restore configuration to dnsmasq-ui
+3. Generate dnsmasq format config
+4. Deploy to all DNS servers (dns01, dns02, dns03)
+5. Restart dnsmasq service on each server
+6. Show per-server deployment status
+
+### Use Cases
+
+- **Disaster Recovery**: Restore configuration if accidentally deleted
+- **Configuration Transfer**: Move DNS config between dnsmasq-ui instances
+- **Version Control**: Save backups before making major changes
+- **Migration**: Copy configuration from old DNS system to new instance
+- **Testing**: Backup production, test changes, restore if needed
+
+### Backup Format
+
+Backups are standard JSON files with the following structure:
+
+```json
+{
+  "backup_timestamp": "2026-03-15T00:22:58.710628",
+  "version": "2.0",
+  "zones": [
+    {
+      "name": "example.com",
+      "description": "Example zone",
+      "type": "local",
+      "records": [...]
+    }
+  ],
+  "servers": {
+    "dns01": {
+      "ip": "192.168.0.231",
+      "hostname": "dns01",
+      "port": 22,
+      "enabled": true
+    }
+  },
+  "global": {
+    "upstream_dns": ["1.1.1.1", "8.8.8.8"],
+    "keepalive_vip": "192.168.0.250",
+    "keepalive_interval": 300
+  }
+}
+```
+
+This makes backups compatible with version control systems (git) and easy to edit manually if needed.
+
 ## Troubleshooting
 
 ### DNS not resolving
@@ -470,6 +576,8 @@ MIT
 - [x] Password-based SSH authentication
 - [x] Reverse proxy support (X-Forwarded headers)
 - [x] Configuration dashboard
+- [x] Backup & Restore functionality
+- [x] Restore & auto-deploy to servers
 
 ### Planned 📋
 - [ ] Zone file import/export
