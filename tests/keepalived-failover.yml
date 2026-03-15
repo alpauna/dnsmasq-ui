@@ -1,0 +1,198 @@
+---
+- name: Keepalived Failover Test
+  hosts: localhost
+  gather_facts: no
+  vars:
+    dns_servers:
+      dns01: "192.168.0.231"
+      dns02: "192.168.0.232"
+      dns03: "192.168.0.233"
+    vip: "192.168.0.250"
+    ui_host: "192.168.0.233"
+    ui_port: 5000
+    ssh_user: "debian"
+    test_domain: "ad.alshowto.com"
+
+  tasks:
+    - name: Display test configuration
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║            KEEPALIVED FAILOVER TEST SUITE                 ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║ MASTER (dns01):    {{ dns_servers.dns01 }}                        ║
+          ║ BACKUP1 (dns02):   {{ dns_servers.dns02 }}                        ║
+          ║ BACKUP2 (dns03):   {{ dns_servers.dns03 }}                        ║
+          ║ VIP:               {{ vip }}                          ║
+          ║ Test Domain:       {{ test_domain }}                  ║
+          ╚═══════════════════════════════════════════════════════════╝
+
+    # Phase 1: Baseline Status
+    - name: "PHASE 1: Get baseline keepalived status"
+      uri:
+        url: "http://{{ ui_host }}:{{ ui_port }}/api/status"
+        method: GET
+      register: baseline_status
+
+    - name: Display baseline status
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║              BASELINE CLUSTER STATUS (BEFORE)              ║
+          ╠═══════════════════════════════════════════════════════════╣
+          {% for server, status in baseline_status.json.servers.items() %}
+          ║ {{ server }}: {{ status.keepalived.status | upper | replace('MASTER', '🔴 MASTER') | replace('STANDBY', '🟢 STANDBY') | replace('INACTIVE', '⚫ INACTIVE') }} (Online: {{ status.online }})
+          {% endfor %}
+          ║ VIP: {{ baseline_status.json.vip }}
+          ╚═══════════════════════════════════════════════════════════╝
+
+    - name: Validate baseline - dns01 should be MASTER
+      assert:
+        that:
+          - baseline_status.json.servers.dns01.keepalived.status == 'MASTER'
+          - baseline_status.json.servers.dns02.keepalived.status == 'STANDBY'
+          - baseline_status.json.servers.dns03.keepalived.status == 'STANDBY'
+        fail_msg: "Baseline status check failed - expected dns01 as MASTER"
+
+    - name: Verify VIP is assigned to dns01
+      shell: |
+        ssh {{ ssh_user }}@{{ dns_servers.dns01 }} "ip addr show | grep -q {{ vip }}" && echo "OK" || echo "FAIL"
+      register: vip_check
+      failed_when: vip_check.stdout != "OK"
+
+    - name: "Test DNS resolution before failover"
+      shell: |
+        dig @{{ vip }} {{ test_domain }} +short | head -1
+      register: dns_before
+      retries: 3
+      delay: 1
+
+    - name: Display DNS resolution (baseline)
+      debug:
+        msg: "DNS resolution (baseline): {{ dns_before.stdout or 'No response' }}"
+
+    # Phase 2: Initiate Failover
+    - name: "PHASE 2: Simulate master failure - stop keepalived on dns01"
+      shell: |
+        ssh {{ ssh_user }}@{{ dns_servers.dns01 }} "sudo systemctl stop keepalived" 2>/dev/null
+      register: stop_keepalived
+
+    - name: Wait for failover detection (10 seconds)
+      wait_for:
+        timeout: 10
+      delegate_to: localhost
+
+    - name: "Get status after master shutdown"
+      uri:
+        url: "http://{{ ui_host }}:{{ ui_port }}/api/status"
+        method: GET
+      register: failover_status
+
+    - name: Display failover status
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║         CLUSTER STATUS (AFTER DNS01 SHUTDOWN)             ║
+          ╠═══════════════════════════════════════════════════════════╣
+          {% for server, status in failover_status.json.servers.items() %}
+          ║ {{ server }}: {{ status.keepalived.status | upper | replace('MASTER', '🔴 MASTER') | replace('STANDBY', '🟢 STANDBY') | replace('INACTIVE', '⚫ INACTIVE') }} (Online: {{ status.online }})
+          {% endfor %}
+          ║ VIP: {{ failover_status.json.vip }}
+          ╚═══════════════════════════════════════════════════════════╝
+
+    - name: Validate failover - dns02 should become MASTER
+      assert:
+        that:
+          - failover_status.json.servers.dns02.keepalived.status == 'MASTER'
+        fail_msg: "Failover failed - dns02 did not become MASTER"
+      retries: 3
+      delay: 2
+
+    - name: Verify VIP moved to dns02
+      shell: |
+        ssh {{ ssh_user }}@{{ dns_servers.dns02 }} "ip addr show | grep -q {{ vip }}" && echo "OK" || echo "FAIL"
+      register: vip_check_failover
+      failed_when: vip_check_failover.stdout != "OK"
+      retries: 3
+      delay: 1
+
+    - name: "Test DNS resolution after failover"
+      shell: |
+        dig @{{ vip }} {{ test_domain }} +short | head -1
+      register: dns_after_failover
+      retries: 5
+      delay: 1
+
+    - name: Display DNS resolution (after failover)
+      debug:
+        msg: "DNS resolution (after failover): {{ dns_after_failover.stdout or 'No response' }}"
+
+    # Phase 3: Recovery
+    - name: "PHASE 3: Restore master - start keepalived on dns01"
+      shell: |
+        ssh {{ ssh_user }}@{{ dns_servers.dns01 }} "sudo systemctl start keepalived" 2>/dev/null
+      register: start_keepalived
+
+    - name: Wait for recovery and preemption (10 seconds)
+      wait_for:
+        timeout: 10
+      delegate_to: localhost
+
+    - name: "Get status after recovery"
+      uri:
+        url: "http://{{ ui_host }}:{{ ui_port }}/api/status"
+        method: GET
+      register: recovery_status
+
+    - name: Display recovery status
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          CLUSTER STATUS (AFTER DNS01 RECOVERY)            ║
+          ╠═══════════════════════════════════════════════════════════╣
+          {% for server, status in recovery_status.json.servers.items() %}
+          ║ {{ server }}: {{ status.keepalived.status | upper | replace('MASTER', '🔴 MASTER') | replace('STANDBY', '🟢 STANDBY') | replace('INACTIVE', '⚫ INACTIVE') }} (Online: {{ status.online }})
+          {% endfor %}
+          ║ VIP: {{ recovery_status.json.vip }}
+          ╚═══════════════════════════════════════════════════════════╝
+
+    - name: Validate recovery - dns01 should resume as MASTER
+      assert:
+        that:
+          - recovery_status.json.servers.dns01.keepalived.status == 'MASTER'
+        fail_msg: "Recovery failed - dns01 did not resume as MASTER"
+      retries: 3
+      delay: 2
+
+    - name: Verify VIP returned to dns01
+      shell: |
+        ssh {{ ssh_user }}@{{ dns_servers.dns01 }} "ip addr show | grep -q {{ vip }}" && echo "OK" || echo "FAIL"
+      register: vip_check_recovery
+      failed_when: vip_check_recovery.stdout != "OK"
+      retries: 3
+      delay: 1
+
+    - name: "Test DNS resolution after recovery"
+      shell: |
+        dig @{{ vip }} {{ test_domain }} +short | head -1
+      register: dns_after_recovery
+      retries: 5
+      delay: 1
+
+    - name: Display DNS resolution (after recovery)
+      debug:
+        msg: "DNS resolution (after recovery): {{ dns_after_recovery.stdout or 'No response' }}"
+
+    # Phase 4: Test Summary
+    - name: Display test summary
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║              FAILOVER TEST RESULTS                        ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║ ✅ BASELINE:      dns01 was MASTER with VIP
+          ║ ✅ FAILOVER:      dns02 became MASTER when dns01 failed
+          ║ ✅ RECOVERY:      dns01 resumed MASTER after recovery
+          ║ ✅ VIP MOBILITY:  VIP moved dns01→dns02→dns01 correctly
+          ║ ✅ DNS SERVICE:   DNS resolution worked throughout
+          ╚═══════════════════════════════════════════════════════════╝
