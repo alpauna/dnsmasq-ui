@@ -6,7 +6,7 @@ Manages dnsmasq DNS records across multiple servers and zones.
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from flask_cors import CORS
-from werkzeug.proxy_fix import ProxyFix
+from werkzeug.middleware.proxy_fix import ProxyFix
 import json
 import os
 import subprocess
