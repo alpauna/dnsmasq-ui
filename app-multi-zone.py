@@ -249,7 +249,8 @@ class ZoneManager:
             # Check if keepalived is running
             stdin, stdout, stderr = ssh.exec_command("sudo systemctl is-active keepalived 2>/dev/null")
             keepalived_status = stdout.read().decode().strip()
-            keepalived_running = 'active' in keepalived_status.lower()
+            # Must be exactly "active", not "inactive" (substring match bug)
+            keepalived_running = keepalived_status.lower() == 'active'
 
             if not keepalived_running:
                 ssh.close()
