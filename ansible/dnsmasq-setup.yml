@@ -41,6 +41,15 @@
             script_user root
           }
 
+          # Health check for dnsmasq-ui (port 5000)
+          vrrp_script check_ui {
+            script "curl -sf http://localhost:5000/api/status > /dev/null"
+            interval 10
+            weight -20
+            fall 2
+            rise 2
+          }
+
           vrrp_instance DNS_VIP {
             state {% if inventory_hostname == 'dns01' %}MASTER{% else %}BACKUP{% endif %}
 
@@ -56,6 +65,11 @@
             # Track dnsmasq service
             track_processes {
               dnsmasq
+            }
+
+            # Track dnsmasq-ui health (if running)
+            track_script {
+              check_ui
             }
           }
         dest: /etc/keepalived/keepalived.conf

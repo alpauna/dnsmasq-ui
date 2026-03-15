@@ -127,12 +127,13 @@ EOF
 generate_keepalived_playbook() {
     local output_file="$SCRIPT_DIR/ansible/dnsmasq-setup.yml"
     local num_servers=$1
-    shift
+    local keepalive_vip=$2
+    shift 2
     local ips=("$@")
 
     log "Generating Ansible playbook with keepalived for $num_servers servers..."
 
-    cat > "$output_file" << 'EOF'
+    cat > "$output_file" <<EOF
 ---
 - name: Setup dnsmasq DNS servers with monitoring
   hosts: dns_servers
@@ -143,7 +144,7 @@ generate_keepalived_playbook() {
     dnsmasq_config_dir: /etc/dnsmasq.d
     dnsmasq_records_file: "{{ dnsmasq_config_dir }}/local-records.conf"
     monitoring_script: /usr/local/bin/dnsmasq-monitor.sh
-    keepalive_vip: 192.168.0.250
+    keepalive_vip: $keepalive_vip
 
   tasks:
     - name: Install dnsmasq, keepalived, and dependencies
@@ -177,6 +178,15 @@ generate_keepalived_playbook() {
             script_user root
           }
 
+          # Health check for dnsmasq-ui (port 5000)
+          vrrp_script check_ui {
+            script "curl -sf http://localhost:5000/api/status > /dev/null"
+            interval 10
+            weight -20
+            fall 2
+            rise 2
+          }
+
           vrrp_instance DNS_VIP {
             state {{ keepalived_state }}
             interface eth0
@@ -190,6 +200,10 @@ generate_keepalived_playbook() {
 
             track_processes {
               dnsmasq
+            }
+
+            track_script {
+              check_ui
             }
           }
         dest: /etc/keepalived/keepalived.conf
@@ -416,6 +430,21 @@ main() {
     done
     echo ""
 
+    # Get keepalived VIP
+    header "Keepalived Virtual IP (VIP)"
+    echo "The VIP is a shared IP address used for failover."
+    echo "It will be assigned to the MASTER server and move to a BACKUP if the MASTER fails."
+    echo "Both DNS (port 53) and the UI (port 5000) will use this VIP."
+    echo ""
+    read -p "VIP address [192.168.0.250]: " KEEPALIVE_VIP
+    KEEPALIVE_VIP=${KEEPALIVE_VIP:-192.168.0.250}
+
+    if ! validate_ip "$KEEPALIVE_VIP"; then
+        error "Invalid VIP address: $KEEPALIVE_VIP"
+    fi
+    log "Using VIP: $KEEPALIVE_VIP"
+    echo ""
+
     # Test SSH connectivity
     header "Testing SSH Connectivity"
     echo "Testing SSH access to servers (this may take a moment)..."
@@ -448,6 +477,7 @@ main() {
     header "Configuration Summary"
     echo "SSH User:         $SSH_USER"
     echo "Number of Servers: $NUM_SERVERS"
+    echo "Keepalived VIP:   $KEEPALIVE_VIP"
     echo ""
     echo "Servers:"
     for i in "${!DNS_IPS[@]}"; do
@@ -472,7 +502,7 @@ main() {
     header "Generating Configurations"
 
     generate_inventory "$SSH_USER" "${DNS_IPS[@]}"
-    generate_keepalived_playbook "$NUM_SERVERS" "${DNS_IPS[@]}"
+    generate_keepalived_playbook "$NUM_SERVERS" "$KEEPALIVE_VIP" "${DNS_IPS[@]}"
     update_zones_config "$NUM_SERVERS" "${DNS_IPS[@]}"
 
     echo ""
