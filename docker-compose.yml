@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # Management UI for DNS cluster
   dnsmasq-ui:
     build: .
     container_name: dnsmasq-ui
@@ -11,14 +12,94 @@ services:
       - ZONES_CONFIG=/etc/dnsmasq-ui/zones.json
       - DNSMASQ_RECORDS_FILE=/etc/dnsmasq.d/local-records.conf
       - SSH_KEY=/root/.ssh/id_rsa
-      - SSH_USER=debian
+      - SSH_USER=root
     volumes:
       - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
       - ./zones.json:/etc/dnsmasq-ui/zones.json
+      - ./wireguard-keys.json:/etc/dnsmasq-ui/wireguard-keys.json
     networks:
-      - dnsmasq
+      dnsmasq:
+        ipv4_address: 172.20.0.10
+    restart: unless-stopped
+
+  # DNS Server 1 (Master)
+  dns01:
+    build: ./docker/dns-node
+    container_name: dns01
+    hostname: dns01
+    networks:
+      dnsmasq:
+        ipv4_address: 172.20.0.231
+    environment:
+      - KEEPALIVED_STATE=MASTER
+      - KEEPALIVED_PRIORITY=150
+      - KEEPALIVED_VIP=172.20.0.252
+      - KEEPALIVED_INTERFACE=eth0
+      - NODE_HOSTNAME=dns01
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
+    ports:
+      - "2201:22"
+      - "5301:53/tcp"
+      - "5301:53/udp"
+    restart: unless-stopped
+
+  # DNS Server 2 (Backup)
+  dns02:
+    build: ./docker/dns-node
+    container_name: dns02
+    hostname: dns02
+    networks:
+      dnsmasq:
+        ipv4_address: 172.20.0.232
+    environment:
+      - KEEPALIVED_STATE=BACKUP
+      - KEEPALIVED_PRIORITY=100
+      - KEEPALIVED_VIP=172.20.0.252
+      - KEEPALIVED_INTERFACE=eth0
+      - NODE_HOSTNAME=dns02
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
+    ports:
+      - "2202:22"
+      - "5302:53/tcp"
+      - "5302:53/udp"
+    restart: unless-stopped
+
+  # DNS Server 3 (Backup)
+  dns03:
+    build: ./docker/dns-node
+    container_name: dns03
+    hostname: dns03
+    networks:
+      dnsmasq:
+        ipv4_address: 172.20.0.233
+    environment:
+      - KEEPALIVED_STATE=BACKUP
+      - KEEPALIVED_PRIORITY=50
+      - KEEPALIVED_VIP=172.20.0.252
+      - KEEPALIVED_INTERFACE=eth0
+      - NODE_HOSTNAME=dns03
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
+    ports:
+      - "2203:22"
+      - "5303:53/tcp"
+      - "5303:53/udp"
     restart: unless-stopped
 
 networks:
   dnsmasq:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
