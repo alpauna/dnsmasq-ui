@@ -92,6 +92,33 @@
             gap: 20px;
         }
 
+        .zones-grid.grid-view {
+            grid-template-columns: 1fr;
+        }
+
+        .view-toggle-btn {
+            padding: 6px 12px;
+            background: #f0f0f0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            color: #666;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .view-toggle-btn:hover {
+            background: #e0e0e0;
+        }
+
+        .view-toggle-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
         .zone-card {
             border: 1px solid #e0e0e0;
             border-radius: 6px;
@@ -128,6 +155,7 @@
         .zone-meta .records-count {
             color: #667eea;
             font-weight: bold;
+            font-size: 14px;
         }
 
         .zone-meta .zone-type {
@@ -137,6 +165,55 @@
             border-radius: 3px;
             font-size: 11px;
             text-transform: uppercase;
+        }
+
+        .zone-records-preview {
+            background: #f9f9f9;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 15px;
+            font-size: 12px;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+
+        .zone-records-preview .record-item {
+            padding: 4px 0;
+            color: #555;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .zone-records-preview .record-item:last-child {
+            border-bottom: none;
+        }
+
+        .zone-records-preview .record-domain {
+            color: #333;
+            font-weight: 500;
+            flex: 1;
+            word-break: break-word;
+        }
+
+        .zone-records-preview .record-type-badge {
+            background: #667eea;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 2px;
+            font-size: 10px;
+            font-weight: bold;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
+
+        .zone-records-preview .show-more {
+            color: #667eea;
+            font-weight: 500;
+            padding: 8px 0;
+            text-align: center;
+            border-top: 1px solid #eee;
         }
 
         .zone-actions {
@@ -448,7 +525,30 @@
         </div>
 
         <div class="section">
-            <h2>DNS Zones</h2>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2 style="margin: 0;">DNS Zones</h2>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <span style="font-size: 12px; color: #666;">View:</span>
+                    <button class="view-toggle-btn active" onclick="switchZoneView('card')" title="Card view">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="7" height="7"></rect>
+                            <rect x="14" y="3" width="7" height="7"></rect>
+                            <rect x="14" y="14" width="7" height="7"></rect>
+                            <rect x="3" y="14" width="7" height="7"></rect>
+                        </svg>
+                    </button>
+                    <button class="view-toggle-btn" onclick="switchZoneView('grid')" title="Grid view">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="8" y1="6" x2="21" y2="6"></line>
+                            <line x1="8" y1="12" x2="21" y2="12"></line>
+                            <line x1="8" y1="18" x2="21" y2="18"></line>
+                            <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                            <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                            <line x1="3" y1="18" x2="3.01" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+            </div>
 
             <div class="create-zone-form">
                 <div class="modal-header">Create New Zone</div>
@@ -482,9 +582,24 @@
                             <h3>{{ zone.name }}</h3>
                             <p>{{ zone.description or 'No description' }}</p>
                             <div class="zone-meta">
-                                <span class="records-count">{{ zone.records|length }} records</span>
+                                <span class="records-count" id="records-{{ loop.index }}">{{ zone.records|length }} records</span>
                                 <span class="zone-type">{{ zone.type }}</span>
                             </div>
+
+                            {% if zone.records|length > 0 %}
+                            <div class="zone-records-preview" id="preview-{{ loop.index }}">
+                                {% for record in zone.records[:3] %}
+                                <div class="record-item">
+                                    <span class="record-domain" title="{{ record.domain }}">{{ record.domain }}</span>
+                                    <span class="record-type-badge">{{ record.type }}</span>
+                                </div>
+                                {% endfor %}
+                                {% if zone.records|length > 3 %}
+                                <div class="show-more">+{{ zone.records|length - 3 }} more record{{ 's' if zone.records|length - 3 != 1 else '' }}</div>
+                                {% endif %}
+                            </div>
+                            {% endif %}
+
                             <div class="zone-actions">
                                 <a href="/zone/{{ zone.name }}" class="btn btn-primary">Manage Records</a>
                                 <button class="btn btn-danger btn-sm" onclick="deleteZone('{{ zone.name }}')">Delete</button>
@@ -535,6 +650,80 @@
     </div>
 
     <script>
+        function switchZoneView(view) {
+            const container = document.querySelector('.zones-grid');
+            const buttons = document.querySelectorAll('.view-toggle-btn');
+
+            // Update active button
+            buttons.forEach(btn => btn.classList.remove('active'));
+            event.target.closest('.view-toggle-btn').classList.add('active');
+
+            // Update grid view
+            if (view === 'grid') {
+                container.classList.add('grid-view');
+            } else {
+                container.classList.remove('grid-view');
+            }
+
+            // Save preference
+            localStorage.setItem('zoneViewMode', view);
+        }
+
+        function initZoneView() {
+            // Check how many zones we have
+            const zoneCards = document.querySelectorAll('.zone-card');
+            const zoneCount = zoneCards.length;
+
+            // Get saved preference or auto-select
+            let viewMode = localStorage.getItem('zoneViewMode');
+
+            // If more than 3 zones and no preference, default to grid
+            if (zoneCount > 3 && !viewMode) {
+                viewMode = 'grid';
+            } else if (!viewMode) {
+                viewMode = 'card';
+            }
+
+            // Apply the view mode
+            const buttons = document.querySelectorAll('.view-toggle-btn');
+            const container = document.querySelector('.zones-grid');
+
+            buttons.forEach(btn => btn.classList.remove('active'));
+
+            if (viewMode === 'grid') {
+                buttons[1].classList.add('active');
+                container.classList.add('grid-view');
+            } else {
+                buttons[0].classList.add('active');
+                container.classList.remove('grid-view');
+            }
+
+            // Show recommendation if needed
+            if (zoneCount > 3 && viewMode === 'card') {
+                showGridRecommendation(zoneCount);
+            }
+        }
+
+        function showGridRecommendation(zoneCount) {
+            const container = document.querySelector('.zones-grid');
+            const recommendation = document.createElement('div');
+            recommendation.style.cssText = `
+                grid-column: 1/-1;
+                padding: 12px 15px;
+                background: #e3f2fd;
+                border: 1px solid #bbdefb;
+                border-radius: 4px;
+                color: #1565c0;
+                font-size: 13px;
+                margin-bottom: 10px;
+            `;
+            recommendation.innerHTML = `
+                💡 <strong>Tip:</strong> You have ${zoneCount} zones. Grid view is recommended for better overview.
+                <button onclick="switchZoneView('grid')" style="margin-left: 10px; padding: 4px 12px; background: #1565c0; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px;">Switch to Grid View</button>
+            `;
+            container.parentNode.insertBefore(recommendation, container);
+        }
+
         function createZone(event) {
             event.preventDefault();
 
@@ -644,6 +833,9 @@
             })
             .catch(error => console.error('Error updating status:', error));
         }
+
+        // Initialize zone view
+        initZoneView();
 
         // Update server status on page load and every 30 seconds
         updateServerStatus();
