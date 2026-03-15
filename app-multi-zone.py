@@ -946,17 +946,30 @@ def index():
     """Dashboard with zones and servers overview."""
     zones = manager.get_zones()
     servers_status = {}
+    wg_enabled = manager.config.get('global', {}).get('wireguard', {}).get('enabled', False)
 
     for server_name, server_info in manager.get_servers().items():
         servers_status[server_name] = {
             'ip': server_info['ip'],
             'hostname': server_info['hostname'],
-            'status': 'online' if manager.check_server_status(server_info['ip']) else 'offline'
+            'status': 'online' if manager.check_server_status(server_info['ip']) else 'offline',
+            'tunnel_ip': server_info.get('wireguard', {}).get('tunnel_ip', 'N/A')
         }
+
+        # Add WireGuard status if enabled
+        if wg_enabled:
+            wg_status = manager.check_wg_status(server_info['ip'])
+            servers_status[server_name]['wg'] = {
+                'up': wg_status.get('wg0_up', False),
+                'interface_ip': wg_status.get('interface_ip', ''),
+                'peers_connected': wg_status.get('peers_connected', 0),
+                'error': wg_status.get('error', '')
+            }
 
     return render_template('dashboard-v2.html',
                          zones=zones,
                          servers=servers_status,
+                         wg_enabled=wg_enabled,
                          total_records=sum(len(z.get('records', [])) for z in zones))
 
 @app.route('/zone/<zone_name>')
@@ -1025,9 +1038,10 @@ def api_deploy():
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
-    """API: Get status of all servers including keepalived."""
+    """API: Get status of all servers including keepalived and WireGuard."""
     status = {}
     keepalived_vip = manager.config.get('global', {}).get('keepalive_vip', 'N/A')
+    wg_enabled = manager.config.get('global', {}).get('wireguard', {}).get('enabled', False)
 
     for server_name, server_info in manager.get_servers().items():
         dnsmasq_running = manager.check_server_status(server_info['ip'])
@@ -1042,11 +1056,19 @@ def api_status():
                 'running': keepalived_running,
                 'status': 'MASTER' if is_master else ('STANDBY' if keepalived_running else 'INACTIVE'),
                 'vip': keepalived_vip
-            }
+            },
+            'tunnel_ip': server_info.get('wireguard', {}).get('tunnel_ip', 'N/A')
         }
+
+        # Add WireGuard status if enabled
+        if wg_enabled:
+            wg_status = manager.check_wg_status(server_info['ip'])
+            status[server_name]['wireguard'] = wg_status
+
     return jsonify({
         'servers': status,
-        'vip': keepalived_vip
+        'vip': keepalived_vip,
+        'wg_enabled': wg_enabled
     })
 
 @app.route('/config')

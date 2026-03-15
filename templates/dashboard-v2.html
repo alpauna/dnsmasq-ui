@@ -546,6 +546,14 @@
                 <h3>Servers Online</h3>
                 <div class="value" id="online-count">-</div>
             </div>
+            {% if wg_enabled %}
+            <div class="stat-card">
+                <h3>WireGuard Mesh</h3>
+                <div class="value" id="wg-mesh-status">
+                    <span style="font-size: 14px; color: #999;">Checking...</span>
+                </div>
+            </div>
+            {% endif %}
         </div>
 
         <div class="section">
@@ -666,6 +674,19 @@
                             <label>Keepalived:</label>
                             <value id="keepalived-status-{{ server_name }}">Loading...</value>
                         </div>
+                        {% if wg_enabled %}
+                        <div class="server-info-item">
+                            <label>Tunnel IP:</label>
+                            <value>{{ server_info.tunnel_ip }}</value>
+                        </div>
+                        <div class="server-info-item" id="wg-{{ server_name }}" style="display: none;">
+                            <label>WireGuard:</label>
+                            <value id="wg-status-{{ server_name }}">
+                                <span id="wg-up-{{ server_name }}" style="color: #ddd;">Not checked</span>
+                                <span id="wg-peers-{{ server_name }}" style="font-size: 12px; margin-left: 10px; color: #999;"></span>
+                            </value>
+                        </div>
+                        {% endif %}
                     </div>
                 </div>
                 {% endfor %}
@@ -898,6 +919,53 @@
                     vipStatus.innerHTML = `Active on <strong>${activeMaster}</strong>`;
                     vipStatus.style.display = 'inline-block';
                 }
+
+                // Fetch and update WireGuard status if available
+                fetch('/api/wireguard/status')
+                .then(response => response.json())
+                .then(wgData => {
+                    let totalServers = 0;
+                    let upServers = 0;
+                    let totalPeers = 0;
+
+                    for (const [server, wgStatus] of Object.entries(wgData)) {
+                        totalServers++;
+
+                        const wgRow = document.getElementById(`wg-${server}`);
+                        const wgStatusElem = document.getElementById(`wg-up-${server}`);
+                        const wgPeersElem = document.getElementById(`wg-peers-${server}`);
+
+                        if (wgRow && wgStatusElem && wgPeersElem) {
+                            wgRow.style.display = 'flex';
+
+                            if (wgStatus.wg0_up) {
+                                upServers++;
+                                totalPeers += wgStatus.peers_connected;
+                                wgStatusElem.innerHTML = `<span style="color: #4CAF50;">✓ Up</span> (${wgStatus.interface_ip})`;
+                                wgPeersElem.innerHTML = `${wgStatus.peers_connected} peers connected`;
+                            } else if (wgStatus.error) {
+                                wgStatusElem.innerHTML = `<span style="color: #f44336;">✗ Down</span>`;
+                                wgPeersElem.innerHTML = `Error: ${wgStatus.error}`;
+                            } else {
+                                wgStatusElem.innerHTML = `<span style="color: #999;">○ Not configured</span>`;
+                                wgPeersElem.innerHTML = '';
+                            }
+                        }
+                    }
+
+                    // Update mesh status card
+                    const wgMeshStatus = document.getElementById('wg-mesh-status');
+                    if (wgMeshStatus) {
+                        if (upServers === totalServers && upServers > 0) {
+                            wgMeshStatus.innerHTML = `<span style="color: #4CAF50; font-size: 18px;">${upServers}/${totalServers}</span>`;
+                        } else if (upServers > 0) {
+                            wgMeshStatus.innerHTML = `<span style="color: #FF9800; font-size: 18px;">${upServers}/${totalServers}</span>`;
+                        } else {
+                            wgMeshStatus.innerHTML = `<span style="color: #f44336; font-size: 18px;">0/${totalServers}</span>`;
+                        }
+                    }
+                })
+                .catch(error => console.warn('WireGuard status not available:', error));
             })
             .catch(error => console.error('Error updating status:', error));
         }
