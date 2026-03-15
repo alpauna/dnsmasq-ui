@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration - dnsmasq-ui</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        .breadcrumb {
+            background: white;
+            border-radius: 8px;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            font-size: 13px;
+        }
+
+        .breadcrumb a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .header {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .section {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .section h2 {
+            color: #333;
+            font-size: 22px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .btn-sm {
+            padding: 8px 12px;
+            font-size: 12px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            color: #333;
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        .form-group input[type="text"],
+        .form-group input[type="file"],
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            font-family: monospace;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .key-info {
+            background: #f9f9f9;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 20px;
+            font-size: 13px;
+        }
+
+        .key-info-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .key-info-item:last-child {
+            border-bottom: none;
+        }
+
+        .key-info-label {
+            color: #666;
+            font-weight: 500;
+        }
+
+        .key-info-value {
+            color: #333;
+            font-family: monospace;
+            word-break: break-all;
+        }
+
+        .code-block {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            font-family: monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            margin-bottom: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .copy-btn {
+            padding: 4px 8px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            font-size: 11px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+
+        .copy-btn:hover {
+            background: #5568d3;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            font-size: 13px;
+        }
+
+        .alert-success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border: 1px solid #c8e6c9;
+        }
+
+        .alert-error {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+        }
+
+        .alert-info {
+            background: #e3f2fd;
+            color: #1565c0;
+            border: 1px solid #bbdefb;
+        }
+
+        .server-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+        }
+
+        .server-item {
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 15px;
+            background: #f9f9f9;
+        }
+
+        .server-item h4 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .server-item p {
+            color: #666;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .tab-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .tab-btn {
+            padding: 10px 20px;
+            background: none;
+            border: none;
+            color: #666;
+            cursor: pointer;
+            font-weight: 500;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+        }
+
+        .tab-btn.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="breadcrumb">
+            <a href="/">← Dashboard</a> / <strong>Configuration</strong>
+        </div>
+
+        <div class="header">
+            <h1>⚙️ Configuration</h1>
+            <p>SSH key management and server configuration</p>
+        </div>
+
+        <div class="section">
+            <h2>SSH Key Management</h2>
+
+            <div class="tab-group">
+                <button class="tab-btn active" onclick="switchTab('view-key')">Current Key</button>
+                <button class="tab-btn" onclick="switchTab('generate-key')">Generate New</button>
+                <button class="tab-btn" onclick="switchTab('upload-key')">Upload Key</button>
+                <button class="tab-btn" onclick="switchTab('sync-key')">Sync to Servers</button>
+            </div>
+
+            <!-- View Current Key -->
+            <div id="view-key" class="tab-content active">
+                <div id="key-info-container">
+                    <div class="loading" style="margin: 20px;"></div>
+                    <p>Loading SSH key information...</p>
+                </div>
+            </div>
+
+            <!-- Generate New Key -->
+            <div id="generate-key" class="tab-content">
+                <div class="alert alert-info">
+                    <strong>Generate a new SSH key pair</strong>: This will create a 4096-bit RSA key that you can use for authentication.
+                </div>
+                <button class="btn btn-primary" onclick="generateSSHKey()">Generate New Key</button>
+                <div id="generate-result" style="margin-top: 20px;"></div>
+            </div>
+
+            <!-- Upload Key -->
+            <div id="upload-key" class="tab-content">
+                <div class="alert alert-info">
+                    <strong>Upload SSH private key</strong>: Upload your private key (id_rsa) to use for server authentication.
+                </div>
+                <form id="upload-form" onsubmit="uploadSSHKey(event)">
+                    <div class="form-group">
+                        <label for="key-file">Private Key File (id_rsa)</label>
+                        <input type="file" id="key-file" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Upload Key</button>
+                </form>
+                <div id="upload-result" style="margin-top: 20px;"></div>
+            </div>
+
+            <!-- Sync to Servers -->
+            <div id="sync-key" class="tab-content">
+                <div class="alert alert-info">
+                    <strong>Distribute public key to servers</strong>: Add the public key to authorized_keys on all DNS servers.
+                </div>
+                <div class="form-group">
+                    <label for="public-key">Public Key Content</label>
+                    <textarea id="public-key" rows="6" placeholder="Paste public key here or generate one above"></textarea>
+                </div>
+                <button class="btn btn-primary" onclick="syncSSHKey()">Sync Public Key to Servers</button>
+                <div id="sync-result" style="margin-top: 20px;"></div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Server Connection Status</h2>
+            <div id="server-status" class="server-list">
+                <p style="padding: 20px; grid-column: 1/-1;">Loading server status...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            // Show selected tab
+            document.getElementById(tabName).classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        function loadSSHKeyInfo() {
+            fetch('/api/config/ssh')
+                .then(response => response.json())
+                .then(data => {
+                    const container = document.getElementById('key-info-container');
+                    if (!data.exists) {
+                        container.innerHTML = '<div class="alert alert-error"><strong>No SSH key found</strong><br>Generate a new key or upload an existing one.</div>';
+                        return;
+                    }
+
+                    let html = '<div class="key-info">';
+                    html += `<div class="key-info-item"><span class="key-info-label">Status</span><span class="key-info-value">✓ Configured</span></div>`;
+                    html += `<div class="key-info-item"><span class="key-info-label">Path</span><span class="key-info-value">${data.path}</span></div>`;
+                    html += `<div class="key-info-item"><span class="key-info-label">Type</span><span class="key-info-value">${data.key_type} (${data.bits} bits)</span></div>`;
+                    html += `<div class="key-info-item"><span class="key-info-label">Fingerprint</span><span class="key-info-value">${data.fingerprint}</span></div>`;
+                    html += `<div class="key-info-item"><span class="key-info-label">Modified</span><span class="key-info-value">${new Date(data.modified).toLocaleString()}</span></div>`;
+                    html += '</div>';
+                    container.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error loading SSH key info:', error);
+                    document.getElementById('key-info-container').innerHTML = '<div class="alert alert-error">Error loading SSH key information</div>';
+                });
+        }
+
+        function generateSSHKey() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> Generating...';
+
+            fetch('/api/config/ssh/generate', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Generate New Key';
+
+                    if (data.success) {
+                        let html = '<div class="alert alert-success"><strong>SSH key generated successfully!</strong></div>';
+                        html += '<div class="form-group"><label>Private Key</label>';
+                        html += `<div class="code-block">${escapeHtml(data.private_key)}</div>`;
+                        html += '<button class="copy-btn" onclick="copyToClipboard(this.previousElementSibling)">Copy Private Key</button></div>';
+                        html += '<div class="form-group"><label>Public Key</label>';
+                        html += `<div class="code-block">${escapeHtml(data.public_key)}</div>`;
+                        html += '<button class="copy-btn" onclick="copyToClipboard(this.previousElementSibling)">Copy Public Key</button>';
+                        html += '<button class="copy-btn" onclick="pastePublicKey(this.previousElementSibling.previousElementSibling)">Use for Sync</button></div>';
+                        document.getElementById('generate-result').innerHTML = html;
+                    } else {
+                        document.getElementById('generate-result').innerHTML = `<div class="alert alert-error">Error: ${data.error}</div>`;
+                    }
+                })
+                .catch(error => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Generate New Key';
+                    console.error('Error:', error);
+                    document.getElementById('generate-result').innerHTML = '<div class="alert alert-error">Error generating SSH key</div>';
+                });
+        }
+
+        function uploadSSHKey(event) {
+            event.preventDefault();
+            const file = document.getElementById('key-file').files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('private_key', file);
+
+            const btn = event.target.querySelector('button[type="submit"]');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> Uploading...';
+
+            fetch('/api/config/ssh/upload', {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => response.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Upload Key';
+
+                    if (data.success) {
+                        document.getElementById('upload-result').innerHTML = '<div class="alert alert-success">SSH key uploaded successfully!</div>';
+                        document.getElementById('upload-form').reset();
+                        setTimeout(loadSSHKeyInfo, 1000);
+                    } else {
+                        document.getElementById('upload-result').innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Upload Key';
+                    console.error('Error:', error);
+                    document.getElementById('upload-result').innerHTML = '<div class="alert alert-error">Error uploading SSH key</div>';
+                });
+        }
+
+        function syncSSHKey() {
+            const publicKey = document.getElementById('public-key').value.trim();
+            if (!publicKey) {
+                alert('Please enter a public key');
+                return;
+            }
+
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> Syncing...';
+
+            fetch('/api/config/ssh/sync', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ public_key: publicKey })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Sync Public Key to Servers';
+
+                    if (data.success) {
+                        let html = '<div class="alert alert-success"><strong>SSH key synced to servers!</strong></div>';
+                        for (const [server, result] of Object.entries(data.results)) {
+                            if (result.success) {
+                                html += `<p>✓ ${server}: ${result.message}</p>`;
+                            } else {
+                                html += `<p>✗ ${server}: ${result.message}</p>`;
+                            }
+                        }
+                        document.getElementById('sync-result').innerHTML = html;
+                    } else {
+                        document.getElementById('sync-result').innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Sync Public Key to Servers';
+                    console.error('Error:', error);
+                    document.getElementById('sync-result').innerHTML = '<div class="alert alert-error">Error syncing SSH key</div>';
+                });
+        }
+
+        function loadServerStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    let html = '';
+                    for (const [name, info] of Object.entries(data)) {
+                        html += `<div class="server-item">
+                            <h4>${name}</h4>
+                            <p><strong>IP:</strong> ${info.ip}</p>
+                            <p><strong>Status:</strong> ${info.online ? '🟢 Online' : '🔴 Offline'}</p>
+                        </div>`;
+                    }
+                    document.getElementById('server-status').innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error loading server status:', error);
+                    document.getElementById('server-status').innerHTML = '<div class="alert alert-error">Error loading server status</div>';
+                });
+        }
+
+        function copyToClipboard(element) {
+            const text = element.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                alert('Copied to clipboard!');
+            });
+        }
+
+        function pastePublicKey(element) {
+            const text = element.textContent;
+            document.getElementById('public-key').value = text;
+            switchTab('sync-key');
+        }
+
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, m => map[m]);
+        }
+
+        // Load data on page load
+        loadSSHKeyInfo();
+        loadServerStatus();
+        setInterval(loadServerStatus, 30000);
+    </script>
+</body>
+</html>

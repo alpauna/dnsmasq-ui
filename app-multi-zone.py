@@ -14,6 +14,11 @@ from pathlib import Path
 from datetime import datetime
 import paramiko
 import logging
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
+import hashlib
+import base64
 
 app = Flask(__name__)
 CORS(app)
@@ -230,6 +235,94 @@ class ZoneManager:
         except:
             return False
 
+    def get_ssh_key_info(self):
+        """Get current SSH key information."""
+        try:
+            if not os.path.exists(SSH_KEY):
+                return None
+
+            # Get file info
+            stat = os.stat(SSH_KEY)
+
+            # Get key fingerprint
+            with open(SSH_KEY, 'rb') as f:
+                key_data = f.read()
+
+            # Load key and get fingerprint
+            pkey = paramiko.RSAKey.from_private_key_file(SSH_KEY)
+            fingerprint = hashlib.md5(pkey.get_base64()).hexdigest()
+            fingerprint_hex = ':'.join([fingerprint[i:i+2] for i in range(0, len(fingerprint), 2)])
+
+            return {
+                'exists': True,
+                'path': SSH_KEY,
+                'size': stat.st_size,
+                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                'fingerprint': fingerprint_hex,
+                'key_type': 'RSA',
+                'bits': pkey.get_bits()
+            }
+        except Exception as e:
+            logger.error(f"Error reading SSH key: {str(e)}")
+            return {'exists': False, 'error': str(e)}
+
+    def generate_ssh_key(self):
+        """Generate new RSA SSH key pair."""
+        try:
+            # Generate private key
+            private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=4096,
+                backend=default_backend()
+            )
+
+            # Serialize private key
+            private_pem = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.OpenSSH,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+
+            # Serialize public key
+            public_key = private_key.public_key()
+            public_pem = public_key.public_bytes(
+                encoding=serialization.Encoding.OpenSSH,
+                format=serialization.PublicFormat.OpenSSH
+            )
+
+            return {
+                'success': True,
+                'private_key': private_pem.decode(),
+                'public_key': public_pem.decode()
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def distribute_key_to_servers(self, public_key_content):
+        """Distribute public key to all servers."""
+        results = {}
+
+        for server_name, server_info in self.get_servers().items():
+            if not server_info.get('enabled', True):
+                continue
+
+            server_ip = server_info['ip']
+            try:
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
+
+                # Append public key to authorized_keys
+                cmd = f"mkdir -p ~/.ssh && echo '{public_key_content}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+                ssh.exec_command(cmd)
+                ssh.close()
+
+                results[server_name] = {'success': True, 'message': 'Key distributed'}
+            except Exception as e:
+                results[server_name] = {'success': False, 'message': str(e)}
+
+        return results
+
 # Initialize manager
 manager = ZoneManager(ZONES_FILE)
 
@@ -336,6 +429,66 @@ def api_status():
             'online': manager.check_server_status(server_info['ip'])
         }
     return jsonify(status)
+
+@app.route('/config')
+def config_page():
+    """Configuration page for SSH keys and server management."""
+    return render_template('config.html')
+
+@app.route('/api/config/ssh', methods=['GET'])
+def api_get_ssh_config():
+    """API: Get SSH key information."""
+    key_info = manager.get_ssh_key_info()
+    return jsonify(key_info)
+
+@app.route('/api/config/ssh/generate', methods=['POST'])
+def api_generate_ssh_key():
+    """API: Generate new SSH key pair."""
+    result = manager.generate_ssh_key()
+    return jsonify(result)
+
+@app.route('/api/config/ssh/upload', methods=['POST'])
+def api_upload_ssh_key():
+    """API: Upload and set new SSH key."""
+    try:
+        if 'private_key' not in request.files:
+            return jsonify({'success': False, 'message': 'No private key file provided'}), 400
+
+        private_key_file = request.files['private_key']
+        if not private_key_file.filename:
+            return jsonify({'success': False, 'message': 'Empty file'}), 400
+
+        # Read the uploaded key
+        key_content = private_key_file.read().decode()
+
+        # Save it to the configured location
+        key_path = SSH_KEY
+        os.makedirs(os.path.dirname(key_path), exist_ok=True)
+        with open(key_path, 'w') as f:
+            f.write(key_content)
+        os.chmod(key_path, 0o600)
+
+        logger.info(f"New SSH key uploaded to {key_path}")
+        return jsonify({'success': True, 'message': 'SSH key uploaded successfully'})
+    except Exception as e:
+        logger.error(f"Error uploading SSH key: {str(e)}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/config/ssh/sync', methods=['POST'])
+def api_sync_ssh_key():
+    """API: Distribute public key to all servers."""
+    try:
+        data = request.json
+        public_key = data.get('public_key', '')
+
+        if not public_key:
+            return jsonify({'success': False, 'message': 'No public key provided'}), 400
+
+        results = manager.distribute_key_to_servers(public_key)
+        return jsonify({'success': True, 'results': results})
+    except Exception as e:
+        logger.error(f"Error syncing SSH key: {str(e)}")
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(error):
