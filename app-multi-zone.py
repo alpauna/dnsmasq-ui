@@ -6,21 +6,46 @@ Manages dnsmasq DNS records across multiple servers and zones.
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from flask_cors import CORS
+from werkzeug.proxy_fix import ProxyFix
 import json
 import os
 import subprocess
 from pathlib import Path
 from datetime import datetime
 import paramiko
+import logging
 
 app = Flask(__name__)
 CORS(app)
+
+# Reverse proxy support: trust X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host
+# Handles proper IP tracking and URL construction behind reverse proxies
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
+# Logging for request tracking
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configuration
 ZONES_FILE = os.getenv('ZONES_CONFIG', 'zones.json')
 DNSMASQ_RECORDS_FILE = os.getenv('DNSMASQ_RECORDS_FILE', '/etc/dnsmasq.d/local-records.conf')
 SSH_KEY = os.getenv('SSH_KEY', os.path.expanduser('~/.ssh/id_rsa'))
 SSH_USER = os.getenv('SSH_USER', 'debian')
+
+# Reverse proxy configuration
+PROXY_PATH_PREFIX = os.getenv('PROXY_PATH_PREFIX', '')  # e.g., '/dnsmasq-ui' for http://proxy/dnsmasq-ui/
+TRUSTED_PROXIES = os.getenv('TRUSTED_PROXIES', '*').split(',')  # Comma-separated IPs or '*'
+
+def get_client_ip():
+    """Get client IP, respecting X-Forwarded-For from reverse proxy."""
+    return request.remote_addr
+
+def log_request():
+    """Log incoming request with client IP and path."""
+    client_ip = get_client_ip()
+    method = request.method
+    path = request.path
+    logger.info(f"{client_ip} {method} {path}")
 
 class ZoneManager:
     """Manages DNS zones and records."""
@@ -207,6 +232,16 @@ class ZoneManager:
 
 # Initialize manager
 manager = ZoneManager(ZONES_FILE)
+
+# Request logging middleware
+@app.before_request
+def before_request():
+    """Log all incoming requests with client IP."""
+    client_ip = get_client_ip()
+    method = request.method
+    path = request.path
+    user_agent = request.headers.get('User-Agent', 'unknown')
+    logger.info(f"[{client_ip}] {method} {path} | User-Agent: {user_agent}")
 
 # Routes
 @app.route('/')
