@@ -5,12 +5,15 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 ## Features
 
 - 🖥️ **Web Dashboard**: Manage DNS records across multiple dnsmasq servers
-- 🔄 **Multi-Zone Support**: Configure separate zones (ad.alshowto.com, etc.)
+- 🔄 **Multi-Zone Support**: Configure separate zones (ad.alshowto.com, internal.alshowto.com, etc.)
 - 📊 **Server Status**: Real-time monitoring of dnsmasq service health
 - ❤️ **Keepalive Tracking**: Automatic health checks and status logging
 - 🤖 **Ansible Automation**: Full deployment and configuration management
 - 🐳 **Docker Support**: Easy containerized deployment
-- 🔐 **SSH-based Management**: Secure remote configuration via SSH keys
+- 🔐 **SSH Key Management**: Generate, upload, and distribute SSH keys to servers
+- 🔑 **Password-based SSH Auth**: Initial setup with user passwords, fallback to key auth
+- 🔀 **Reverse Proxy Support**: X-Forwarded headers for deployment behind nginx/Traefik/HAProxy
+- 📋 **Configuration Dashboard**: Manage SSH keys and server settings from web UI
 
 ## Architecture
 
@@ -57,40 +60,108 @@ python app.py
 
 ## Configuration
 
-### servers.json
+### zones.json
 
-Configure your DNS servers:
+The main configuration file that defines zones, servers, and global settings:
 
 ```json
 {
-  "dns01": {
-    "ip": "192.168.0.231",
-    "hostname": "dns01",
-    "port": 22
+  "zones": [
+    {
+      "name": "ad.alshowto.com",
+      "description": "Active Directory domain",
+      "type": "local",
+      "records": [
+        {
+          "domain": "example.ad.alshowto.com",
+          "type": "A",
+          "value": "192.168.0.100"
+        },
+        {
+          "domain": "www.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "example.ad.alshowto.com"
+        }
+      ]
+    },
+    {
+      "name": "internal.alshowto.com",
+      "description": "Internal services",
+      "type": "local",
+      "records": []
+    }
+  ],
+  "servers": {
+    "dns01": {
+      "ip": "192.168.0.231",
+      "hostname": "dns01",
+      "port": 22,
+      "enabled": true
+    },
+    "dns02": {
+      "ip": "192.168.0.232",
+      "hostname": "dns02",
+      "port": 22,
+      "enabled": true
+    },
+    "dns03": {
+      "ip": "192.168.0.233",
+      "hostname": "dns03",
+      "port": 22,
+      "enabled": true
+    }
   },
-  "dns02": {
-    "ip": "192.168.0.232",
-    "hostname": "dns02",
-    "port": 22
-  },
-  "dns03": {
-    "ip": "192.168.0.233",
-    "hostname": "dns03",
-    "port": 22
+  "global": {
+    "upstream_dns": ["1.1.1.1", "8.8.8.8"],
+    "keepalive_vip": "192.168.0.250",
+    "keepalive_interval": 300
   }
 }
 ```
 
+**Key Sections:**
+- **zones**: Array of DNS zones with records
+- **servers**: Dictionary of DNS servers to manage
+- **global**: Global settings (upstream DNS, VIP, health check interval)
+
 ### Environment Variables
 
 ```bash
-# SSH configuration
-export SSH_KEY=~/.ssh/id_rsa
-export SSH_USER=debian
+# Configuration
+export ZONES_CONFIG=zones.json                           # Zone and server config file
+export DNSMASQ_RECORDS_FILE=/etc/dnsmasq.d/local-records.conf  # dnsmasq output path
 
-# dnsmasq paths
-export DNSMASQ_UI_CONFIG=/etc/dnsmasq-ui/servers.json
-export DNSMASQ_RECORDS_FILE=/etc/dnsmasq.d/local-records.conf
+# SSH Configuration
+export SSH_KEY=~/.ssh/id_rsa                            # Private key for SSH auth
+export SSH_USER=debian                                   # SSH username for servers
+
+# Reverse Proxy Support
+export PROXY_PATH_PREFIX=/dnsmasq-ui                    # URL path prefix (optional)
+export TRUSTED_PROXIES=*                                # Trusted proxy IPs (or '*' for all)
+```
+
+### Reverse Proxy Configuration
+
+For deployment behind nginx, Traefik, or HAProxy, enable X-Forwarded header support. See [REVERSE_PROXY.md](REVERSE_PROXY.md) for detailed nginx/Traefik/HAProxy examples.
+
+**Key Headers Supported:**
+- `X-Forwarded-For` - Client IP tracking
+- `X-Forwarded-Proto` - HTTP vs HTTPS detection
+- `X-Forwarded-Host` - Original hostname
+- `X-Forwarded-Port` - Original port
+
+**Example Nginx Configuration:**
+```nginx
+location /dnsmasq-ui/ {
+    proxy_pass http://192.168.0.233:5000/;
+
+    # Enable reverse proxy support
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $server_name;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_set_header Host $host;
+}
 ```
 
 ## Ansible Deployment
@@ -137,30 +208,71 @@ tail -f /var/log/dnsmasq-monitor.log
 
 ## API Reference
 
-### Get DNS Records
+### Zone Management
 
 ```bash
-curl http://localhost:5000/api/records/dns01
-```
+# Get all zones
+curl http://localhost:5000/api/zones
 
-### Update DNS Records
-
-```bash
-curl -X POST http://localhost:5000/api/records/dns01 \
+# Create new zone
+curl -X POST http://localhost:5000/api/zones \
   -H "Content-Type: application/json" \
-  -d '{
-    "records": [
-      {"domain": "example.ad.alshowto.com", "type": "A", "value": "192.168.0.100"},
-      {"domain": "example.ad.alshowto.com", "type": "AAAA", "value": "2604:7a00:ea40::100"},
-      {"domain": "www.ad.alshowto.com", "type": "CNAME", "value": "example.ad.alshowto.com"}
-    ]
-  }'
+  -d '{"name": "prod.alshowto.com", "description": "Production", "type": "local"}'
+
+# Delete zone
+curl -X DELETE http://localhost:5000/api/zones/prod.alshowto.com
 ```
 
-### Check Server Status
+### DNS Records (by Zone)
 
 ```bash
+# Get records in zone
+curl http://localhost:5000/api/zones/ad.alshowto.com/records
+
+# Add record to zone
+curl -X POST http://localhost:5000/api/zones/ad.alshowto.com/records \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "example.ad.alshowto.com", "type": "A", "value": "192.168.0.100"}'
+
+# Delete record from zone
+curl -X DELETE http://localhost:5000/api/zones/ad.alshowto.com/records/example.ad.alshowto.com/A
+```
+
+### Deployment
+
+```bash
+# Deploy configuration to all servers
+curl -X POST http://localhost:5000/api/deploy
+
+# Check server status
 curl http://localhost:5000/api/status
+```
+
+### SSH Key Management
+
+```bash
+# Get current SSH key info
+curl http://localhost:5000/api/config/ssh
+
+# Get list of target servers for sync
+curl http://localhost:5000/api/config/ssh/servers
+
+# Generate new SSH key pair
+curl -X POST http://localhost:5000/api/config/ssh/generate
+
+# Upload SSH private key
+curl -F "private_key=@/path/to/id_rsa" \
+  http://localhost:5000/api/config/ssh/upload
+
+# Sync public key to servers (key-based auth)
+curl -X POST http://localhost:5000/api/config/ssh/sync \
+  -H "Content-Type: application/json" \
+  -d '{"public_key": "ssh-rsa AAAA..."}'
+
+# Sync public key with password fallback
+curl -X POST http://localhost:5000/api/config/ssh/sync \
+  -H "Content-Type: application/json" \
+  -d '{"public_key": "ssh-rsa AAAA...", "password": "user-password"}'
 ```
 
 ## Supported Record Types
@@ -172,32 +284,64 @@ curl http://localhost:5000/api/status
 ## Web UI
 
 ### Dashboard
-- View all DNS servers and their status
+- View all DNS servers and their status (online/offline indicators)
+- Zone overview with record counts
 - Quick health check overview
-- Navigate to individual server management
+- Navigate to zone management and configuration
+- Access configuration page for SSH key management
 
-### Server Management
-- View all DNS records for a zone
-- Add new records
-- Edit existing records
-- Delete records
-- Save changes (syncs to dnsmasq)
+### Zone Management
+- View all DNS records organized by zone
+- Add new records to any zone
+- Edit and delete existing records
+- Inline record editing with save functionality
+- Deploy changes across all servers with one click
+
+### Configuration Page
+The configuration page (`/config`) provides SSH key and server management:
+
+#### SSH Key Management
+- **View Current Key**: Display key fingerprint, type, size, and modification time
+- **Generate New Keys**: One-click generation of 4096-bit RSA key pairs
+- **Upload Keys**: Import existing SSH private keys for authentication
+- **Sync to Servers**: Distribute public keys to all configured DNS servers
+
+#### Password-Based SSH Authentication
+For initial setup when servers don't have valid SSH keys:
+- Enter target server credentials (username/password)
+- System tries key-based auth first
+- Falls back to password auth if key auth fails
+- Automatically installs public key to authorized_keys on success
+- Shows per-server sync status and results
+
+#### Server Status
+- Real-time connection status for all servers
+- IP addresses and hostnames
+- Auto-refreshes every 30 seconds
 
 ## File Structure
 
 ```
 dnsmasq-ui/
-├── app.py                 # Flask application
-├── requirements.txt       # Python dependencies
-├── Dockerfile            # Container configuration
-├── docker-compose.yml    # Docker Compose setup
-├── servers.json          # Server configuration
+├── app-multi-zone.py          # Flask application (multi-zone version)
+├── app.py                      # Simple single-server version (reference)
+├── requirements.txt            # Python dependencies
+├── Dockerfile                  # Container configuration
+├── docker-compose.yml          # Docker Compose setup
+├── zones.json                  # Zone and server configuration
+├── servers.json                # Legacy server configuration
+├── CLAUDE.md                   # Development guide
+├── REVERSE_PROXY.md            # Reverse proxy setup guide
+├── README.md                   # This file
 ├── templates/
-│   ├── dashboard.html    # Main dashboard
-│   └── server.html       # Server detail/management
+│   ├── dashboard-v2.html       # Multi-zone dashboard
+│   ├── zone.html               # Zone detail and record management
+│   ├── config.html             # Configuration and SSH key management
+│   ├── dashboard.html          # Simple dashboard (legacy)
+│   └── server.html             # Simple server management (legacy)
 └── ansible/
-    ├── dnsmasq-setup.yml # Ansible playbook
-    └── inventory.ini     # Server inventory
+    ├── dnsmasq-setup.yml       # Ansible playbook for server setup
+    └── inventory.ini           # Ansible inventory with server definitions
 ```
 
 ## DNS Record Format
@@ -221,10 +365,41 @@ server=8.8.8.8
 
 ## Security Considerations
 
-- **SSH Keys**: Requires SSH key authentication (no passwords)
-- **Credentials**: Store SSH keys securely in `/root/.ssh/id_rsa`
+- **SSH Keys**: Primary authentication method is SSH key-based (secure by default)
+- **Password Authentication**: Optional fallback for initial setup when keys aren't available yet
+- **Credentials Storage**: SSH keys should be stored securely at `~/.ssh/id_rsa` with 0600 permissions
 - **Network**: Run dnsmasq-ui on protected network or behind firewall
-- **Access Control**: Consider adding authentication layer for production use
+- **Access Control**: Consider adding authentication layer (e.g., reverse proxy auth) for production use
+- **Reverse Proxy**: Full support for X-Forwarded headers when deployed behind nginx/Traefik/HAProxy
+- **Logs**: Client IP tracking via X-Forwarded-For headers automatically logged
+
+## Initial Setup Workflow
+
+For first-time deployment to servers without SSH keys:
+
+1. **Access Configuration Page**: Navigate to `http://hostname:5000/config`
+
+2. **Generate SSH Key**:
+   - Go to "Generate New" tab
+   - Click "Generate New Key"
+   - Copy both private and public keys
+   - Save private key securely
+
+3. **Distribute Public Key with Password Auth**:
+   - Select "Sync to Servers" tab
+   - Paste the public key content
+   - Enter target server password (debian user password or similar)
+   - Click "Sync Public Key to Servers"
+   - System will:
+     - Try SSH key auth first
+     - If key auth fails, use password auth as fallback
+     - Install public key to authorized_keys on all servers
+
+4. **Future Operations**:
+   - Use key-based authentication (no password needed)
+   - System automatically uses keys for all SSH operations
+
+This workflow ensures secure initial setup even when starting from password-only SSH access.
 
 ## Troubleshooting
 
@@ -289,17 +464,29 @@ MIT
 
 ## Roadmap
 
-- [ ] Multi-zone management UI
+### Completed ✅
+- [x] Multi-zone management UI
+- [x] SSH key generation and management
+- [x] Password-based SSH authentication
+- [x] Reverse proxy support (X-Forwarded headers)
+- [x] Configuration dashboard
+
+### Planned 📋
 - [ ] Zone file import/export
 - [ ] DNSSEC support
-- [ ] Advanced monitoring dashboard
+- [ ] Advanced monitoring dashboard with graphs
 - [ ] Backup/restore functionality
-- [ ] API authentication/authorization
-- [ ] Metrics export (Prometheus)
+- [ ] API authentication/authorization (OAuth2, API keys)
+- [ ] Metrics export (Prometheus format)
 - [ ] Load balancing across DNS servers
+- [ ] Bulk record operations
+- [ ] Record templates and macros
+- [ ] Audit logging for all changes
+- [ ] DNS query analytics and caching stats
 
 ---
 
-**Status**: Production Ready (v1.0)
-**Last Updated**: 2026-03-14
-**Maintainer**: Your Team
+**Status**: Production Ready (v2.0)
+**Last Updated**: 2026-03-15
+**Latest Version**: v2.0 - Multi-zone with SSH key management
+**Repository**: https://github.com/alpauna/dnsmasq-ui
