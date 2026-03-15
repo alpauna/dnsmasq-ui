@@ -1,15 +1,15 @@
 #!/bin/bash
-# Deploy Builder VM using Debian 13 (Trixie) Cloud Image
-# Latest packages, all installations via cloud-init on first boot
+# Deploy Builder VM using Debian 12 (Bookworm) Cloud Image
+# Stable, production-tested alternative with cloud-init package installation
 # Based on: https://alshowto.com/proxmox-and-debian-12-cloud-image/
 #
-# Usage: bash deploy-builder-debian13.sh [.env_file]
-# Default VM ID: 9101
+# Usage: bash deploy-builder-debian12.sh [.env_file]
+# Default VM ID: 9102
 # Default IP: 192.168.0.254/23
 #
-# Advantage: All packages installed via cloud-init (not virt-customize)
-# Cloud-init takes longer (3-5 min) but more flexible for updates
-# Alternative: Use deploy-builder-cloud-image.sh for Debian 12 (stable)
+# Advantage: Debian 12 is stable and well-tested
+# Note: For latest packages, use deploy-builder-cloud-image.sh (Debian 13)
+# This script installs all packages via cloud-init on first boot
 
 set -e
 
@@ -30,17 +30,17 @@ source "${1:-.env}" || error "No .env file found"
 # Configuration
 PROXMOX_HOST="${PROXMOX_HOST:-192.168.7.13}"
 PROXMOX_PASSWORD="${PROXMOX_PASSWORD}"
-VM_ID="${VM_ID:-9101}"
-VM_NAME="${VM_NAME:-builder-deb13}"
+VM_ID="${VM_ID:-9102}"
+VM_NAME="${VM_NAME:-builder-deb12}"
 VM_CORES="${VM_CORES:-4}"
 VM_MEMORY="${VM_MEMORY:-4096}"
 VM_STORAGE="${VM_STORAGE:-c-vm}"
 VM_BRIDGE="${VM_NETWORK_BRIDGE:-vmbr0}"
-VM_MAC="${VM_MAC_ADDRESS:-bc:24:11:65:e1:02}"
+VM_MAC="${VM_MAC_ADDRESS:-bc:24:11:65:e1:03}"
 VM_DISK_SIZE=30
 
 CLOUD_INIT_USER="${CLOUD_INIT_USER:-debian}"
-CLOUD_INIT_HOSTNAME="${CLOUD_INIT_HOSTNAME:-builder-deb13}"
+CLOUD_INIT_HOSTNAME="${CLOUD_INIT_HOSTNAME:-builder-deb12}"
 CLOUD_INIT_IP="${CLOUD_INIT_IP:-192.168.0.254/23}"
 CLOUD_INIT_GATEWAY="${CLOUD_INIT_GATEWAY:-192.168.0.1}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_rsa.pub}"
@@ -55,7 +55,7 @@ header() {
     echo ""
 }
 
-header "Debian 13 (Trixie) Cloud Image - Builder VM Deployment"
+header "Debian 12 (Bookworm) Cloud Image - Builder VM Deployment"
 
 # Validate SSH key
 if [ ! -f "$SSH_KEY_PATH" ]; then
@@ -79,7 +79,7 @@ if [[ ! $confirm =~ ^[Yy]$ ]]; then
 fi
 
 # Create deployment script for Proxmox
-cat > /tmp/builder-deb13-deploy.sh << 'DEPLOY_SCRIPT'
+cat > /tmp/builder-deb12-deploy.sh << 'DEPLOY_SCRIPT'
 #!/bin/bash
 set -e
 
@@ -98,13 +98,13 @@ CLOUD_INIT_IP=${11}
 CLOUD_INIT_GATEWAY=${12}
 SSH_PUB_KEY=${13}
 
-DEBIAN_IMAGE_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-trixie-generic-amd64.qcow2"
+DEBIAN_IMAGE_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 DEBIAN_IMAGE_FILE="debian-13-generic-amd64.qcow2"
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 
 echo "════════════════════════════════════════════════════════════"
-echo "  Debian 13 (Trixie) Cloud Image Deployment"
+echo "  Debian 12 (Bookworm) Cloud Image Deployment"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
@@ -120,9 +120,9 @@ apt-get update -qq && apt-get install -y -qq libguestfs-tools > /dev/null 2>&1
 echo "[✓] Tools installed"
 
 # Step 3: Download image
-echo "[3/11] Downloading Debian 13 (Trixie) cloud image..."
+echo "[3/11] Downloading Debian 12 (Bookworm) cloud image..."
 wget -q "$DEBIAN_IMAGE_URL" -O "$DEBIAN_IMAGE_FILE" 2>/dev/null || \
-  wget -q "https://cloud.debian.org/images/cloud/trixie/latest/debian-trixie-generic-amd64.qcow2" -O "$DEBIAN_IMAGE_FILE"
+  wget -q "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2" -O "$DEBIAN_IMAGE_FILE"
 echo "[✓] Image downloaded"
 
 # Step 4: Minimal image customization (only qemu-guest-agent)
@@ -178,7 +178,7 @@ echo "[10/11] Creating cloud-init user-data (with package installation)..."
 
 mkdir -p /var/lib/vz/snippets
 
-cat > /var/lib/vz/snippets/builder-deb13-user-data.yml << 'USERDATA'
+cat > /var/lib/vz/snippets/builder-deb12-user-data.yml << 'USERDATA'
 #cloud-config
 hostname: HOSTNAME
 manage_etc_hosts: true
@@ -235,21 +235,21 @@ runcmd:
   - systemctl enable ssh
   - echo "Cloud-init provisioning complete!"
 
-final_message: "Builder VM ready for dnsmasq-ui testing - Debian 13"
+final_message: "Builder VM ready for dnsmasq-ui testing - Debian 12 (Bookworm)"
 USERDATA
 
 # Replace placeholders (use # as delimiter to avoid issues with SSH key slashes)
-sed -i "s#HOSTNAME#$CLOUD_INIT_HOSTNAME#g" /var/lib/vz/snippets/builder-deb13-user-data.yml
-sed -i "s#USERNAME#$CLOUD_INIT_USER#g" /var/lib/vz/snippets/builder-deb13-user-data.yml
+sed -i "s#HOSTNAME#$CLOUD_INIT_HOSTNAME#g" /var/lib/vz/snippets/builder-deb12-user-data.yml
+sed -i "s#USERNAME#$CLOUD_INIT_USER#g" /var/lib/vz/snippets/builder-deb12-user-data.yml
 # Escape special characters in SSH key for sed (escape &, \, and # for the # delimiter)
 SSH_PUB_KEY_ESCAPED=$(echo "$SSH_PUB_KEY" | sed 's/[&\#]/\\&/g')
-sed -i "s#SSH_KEY#$SSH_PUB_KEY_ESCAPED#g" /var/lib/vz/snippets/builder-deb13-user-data.yml
+sed -i "s#SSH_KEY#$SSH_PUB_KEY_ESCAPED#g" /var/lib/vz/snippets/builder-deb12-user-data.yml
 
 echo "[✓] User-data created"
 
 # Step 11: Link cloud-init
 echo "[11/11] Linking cloud-init..."
-qm set $VM_ID --cicustom "local:snippets/builder-deb13-user-data.yml" > /dev/null 2>&1 || true
+qm set $VM_ID --cicustom "local:snippets/builder-deb12-user-data.yml" > /dev/null 2>&1 || true
 echo "[✓] Cloud-init configured"
 
 # Cleanup
@@ -258,7 +258,7 @@ rm -rf "$TEMP_DIR"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "  ✓ Debian 13 Builder VM Ready!"
+echo "  ✓ Debian 12 Builder VM Ready!"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "VM: $VM_NAME (ID: $VM_ID)"
@@ -270,25 +270,25 @@ echo ""
 
 DEPLOY_SCRIPT
 
-chmod +x /tmp/builder-deb13-deploy.sh
+chmod +x /tmp/builder-deb12-deploy.sh
 
 log "Uploading deployment script to $PROXMOX_HOST..."
 sshpass -p "$PROXMOX_PASSWORD" scp -o StrictHostKeyChecking=no \
-  /tmp/builder-deb13-deploy.sh "root@$PROXMOX_HOST:/tmp/" 2>/dev/null
+  /tmp/builder-deb12-deploy.sh "root@$PROXMOX_HOST:/tmp/" 2>/dev/null
 
 log "Executing deployment..."
 SSH_PUB_KEY=$(cat "$SSH_KEY_PATH")
 
 sshpass -p "$PROXMOX_PASSWORD" ssh -o StrictHostKeyChecking=no "root@$PROXMOX_HOST" \
-  "bash /tmp/builder-deb13-deploy.sh $VM_ID '$VM_NAME' $VM_CORES $VM_MEMORY '$VM_STORAGE' '$VM_BRIDGE' '$VM_MAC' $VM_DISK_SIZE '$CLOUD_INIT_USER' '$CLOUD_INIT_HOSTNAME' '$CLOUD_INIT_IP' '$CLOUD_INIT_GATEWAY' '$SSH_PUB_KEY'"
+  "bash /tmp/builder-deb12-deploy.sh $VM_ID '$VM_NAME' $VM_CORES $VM_MEMORY '$VM_STORAGE' '$VM_BRIDGE' '$VM_MAC' $VM_DISK_SIZE '$CLOUD_INIT_USER' '$CLOUD_INIT_HOSTNAME' '$CLOUD_INIT_IP' '$CLOUD_INIT_GATEWAY' '$SSH_PUB_KEY'"
 
 echo ""
-header "✓ Debian 13 Deployment Complete!"
+header "✓ Debian 12 Deployment Complete!"
 
-echo "Builder VM (Debian 13 / Trixie) has been deployed!"
+echo "Builder VM (Debian 12 / Bookworm) has been deployed!"
 echo ""
 echo "Deployment Method:"
-echo "  ✓ Cloud image: Debian 13 (Trixie)"
+echo "  ✓ Cloud image: Debian 12 (Bookworm)"
 echo "  ✓ Customization: Minimal (only qemu-guest-agent via virt-customize)"
 echo "  ✓ Packages: Installed via cloud-init on first boot"
 echo "  ✓ SSH: Key-based authentication pre-configured"

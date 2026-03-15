@@ -127,6 +127,34 @@ curl http://192.168.0.233:5000/api/status     # Direct to dns03
 # http://192.168.0.250:5000
 ```
 
+### Builder VM Setup (Testing & Development)
+
+For testing dnsmasq-ui before production deployment, use the automated builder VM deployment:
+
+```bash
+# 1. Initialize secrets and environment
+bash setup-secrets.sh
+source .env
+
+# 2. Deploy builder VM (choose one):
+# Option A: Debian 13 (latest packages, recommended)
+bash ansible/deploy-builder-cloud-image.sh
+
+# Option B: Debian 12 (stable alternative)
+bash ansible/deploy-builder-debian12.sh
+
+# 3. SSH into VM and verify
+ssh debian@192.168.0.253
+cloud-init status  # Wait for completion
+docker --version
+
+# 4. Run Docker test cluster
+cd /opt/dnsmasq-ui/docker
+./build-test-cluster.sh
+```
+
+**See:** [BUILDER_QUICKSTART.md](BUILDER_QUICKSTART.md) for quick reference, [BUILDER_SETUP.md](BUILDER_SETUP.md) for complete guide
+
 ### Setup Examples
 
 **Example 1: 3-Server Cluster (High Availability)**

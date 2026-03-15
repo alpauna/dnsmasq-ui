@@ -1,7 +1,15 @@
 #!/bin/bash
-# Deploy Builder VM using Debian 12 Cloud Image
+# Deploy Builder VM using Debian 13 (Trixie) Cloud Image
+# Latest packages, all installations via cloud-init on first boot
 # Based on: https://alshowto.com/proxmox-and-debian-12-cloud-image/
-# Fast, automated deployment with cloud-init
+#
+# Usage: bash deploy-builder-cloud-image.sh [.env_file]
+# Default VM ID: 9100
+# Default IP: 192.168.0.253/23
+#
+# Advantage: All packages installed via cloud-init (not virt-customize)
+# Cloud-init takes longer (3-5 min) but more flexible for updates
+# Alternative: Use deploy-builder-debian12.sh for Debian 12 (Bookworm) if needed
 
 set -e
 
@@ -44,12 +52,14 @@ CLOUD_INIT_GATEWAY="${CLOUD_INIT_GATEWAY:-192.168.0.1}"
 CLOUD_INIT_DNS="${CLOUD_INIT_DNS_PRIMARY:-192.168.0.250}"
 
 # SSH configuration
-SSH_KEY_PATH="${SSH_KEY_PATH:-~/.ssh/id_rsa.pub}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_rsa.pub}"
+# Ensure full path expansion
+eval SSH_KEY_PATH="$SSH_KEY_PATH"
 TIMEZONE="UTC"
 
-# Debian cloud image
-DEBIAN_IMAGE_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
-DEBIAN_IMAGE_FILE="debian-12-generic-amd64.qcow2"
+# Debian 13 (Trixie) cloud image
+DEBIAN_IMAGE_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-trixie-generic-amd64.qcow2"
+DEBIAN_IMAGE_FILE="debian-13-generic-amd64.qcow2"
 
 header() {
     echo ""
@@ -84,6 +94,65 @@ if [[ ! $confirm =~ ^[Yy]$ ]]; then
     error "Deployment cancelled"
 fi
 
+# Prepare cloud-init file locally (to avoid sed escaping issues)
+CLOUD_INIT_TEMP=$(mktemp)
+cat > "$CLOUD_INIT_TEMP" << USERDATA_LOCAL
+#cloud-config
+hostname: $CLOUD_INIT_HOSTNAME
+manage_etc_hosts: true
+fqdn: $CLOUD_INIT_HOSTNAME.$CLOUD_INIT_DOMAIN
+
+users:
+  - name: $CLOUD_INIT_USER
+    gecos: System Admin
+    groups: sudo,docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - $(cat "$SSH_KEY_PATH")
+
+packages:
+  - openssh-server
+  - openssh-client
+  - curl
+  - wget
+  - git
+  - jq
+  - vim
+  - net-tools
+  - iproute2
+  - python3
+  - python3-pip
+  - python3-docker
+  - python3-dotenv
+  - docker.io
+  - docker-compose
+  - ansible
+  - dnsmasq
+  - keepalived
+
+package_update: true
+package_upgrade: true
+
+timezone: UTC
+write_files:
+  - path: /etc/sysctl.d/99-custom.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables=1
+      net.bridge.bridge-nf-call-ip6tables=1
+
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker $CLOUD_INIT_USER
+  - systemctl enable ssh
+  - systemctl enable dnsmasq
+  - systemctl enable keepalived
+  - echo "Cloud-init provisioning complete!"
+
+final_message: "Builder VM ready for dnsmasq-ui testing"
+USERDATA_LOCAL
+
 # Create deployment script for Proxmox
 cat > /tmp/builder-cloud-deploy.sh << 'DEPLOY_SCRIPT'
 #!/bin/bash
@@ -104,8 +173,7 @@ CLOUD_INIT_DOMAIN=${11}
 CLOUD_INIT_IP=${12}
 CLOUD_INIT_GATEWAY=${13}
 CLOUD_INIT_DNS=${14}
-SSH_PUB_KEY=${15}
-TIMEZONE=${16}
+TIMEZONE=${15}
 
 DEBIAN_IMAGE_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 DEBIAN_IMAGE_FILE="debian-12-generic-amd64.qcow2"
@@ -113,29 +181,29 @@ TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 
 echo "════════════════════════════════════════════════════════════"
-echo "  Debian 12 Cloud Image Deployment"
+echo "  Debian 13 (Trixie) Cloud Image Deployment"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
 # Step 1: Clean up previous attempts
-echo "[1/10] Cleaning up previous VM (if exists)..."
+echo "[1/11] Cleaning up previous VM (if exists)..."
 qm destroy $VM_ID 2>/dev/null || true
 rm -f "$DEBIAN_IMAGE_FILE"
 echo "[✓] Cleanup complete"
 
 # Step 2: Install required tools
-echo "[2/10] Installing libguestfs-tools..."
+echo "[2/11] Installing libguestfs-tools..."
 apt-get update -qq
 apt-get install -y -qq libguestfs-tools > /dev/null 2>&1
 echo "[✓] Tools installed"
 
 # Step 3: Download Debian cloud image
-echo "[3/10] Downloading Debian 12 cloud image (may take a minute)..."
+echo "[3/11] Downloading Debian 13 (Trixie) cloud image (may take a minute)..."
 wget -q "$DEBIAN_IMAGE_URL" -O "$DEBIAN_IMAGE_FILE"
 echo "[✓] Image downloaded"
 
-# Step 4: Customize image with virt-customize
-echo "[4/10] Customizing image (installing qemu-guest-agent, etc.)..."
+# Step 4: Customize image with virt-customize (minimal customization)
+echo "[4/11] Customizing image (qemu-guest-agent only, packages via cloud-init)..."
 virt-customize -a "$DEBIAN_IMAGE_FILE" \
   --install qemu-guest-agent \
   --truncate /etc/machine-id \
@@ -146,7 +214,7 @@ virt-customize -a "$DEBIAN_IMAGE_FILE" \
 echo "[✓] Image customized"
 
 # Step 5: Create VM
-echo "[5/10] Creating VM $VM_ID ($VM_NAME)..."
+echo "[5/11] Creating VM $VM_ID ($VM_NAME)..."
 qm create $VM_ID \
   --name "$VM_NAME" \
   --cpu host \
@@ -159,12 +227,12 @@ qm create $VM_ID \
 echo "[✓] VM created"
 
 # Step 6: Import disk
-echo "[6/10] Importing disk image to $VM_STORAGE..."
+echo "[6/11] Importing disk image to $VM_STORAGE..."
 qm importdisk $VM_ID "$DEBIAN_IMAGE_FILE" "$VM_STORAGE" -format qcow2 > /dev/null 2>&1
 echo "[✓] Disk imported"
 
 # Step 7: Configure storage and boot
-echo "[7/10] Configuring storage and boot..."
+echo "[7/11] Configuring storage and boot..."
 qm set $VM_ID \
   --scsihw virtio-scsi-pci \
   --scsi0 "$VM_STORAGE:vm-$VM_ID-disk-0" \
@@ -176,12 +244,16 @@ qm set $VM_ID \
 echo "[✓] Storage configured"
 
 # Step 8: Resize disk
-echo "[8/10] Resizing disk to ${VM_DISK_SIZE}GB..."
+echo "[8/11] Resizing disk to ${VM_DISK_SIZE}GB..."
 qm resize $VM_ID scsi0 +$((VM_DISK_SIZE - 2))G > /dev/null 2>&1
 echo "[✓] Disk resized"
 
-# Step 9: Configure cloud-init network and access
+# Step 9: Configure cloud-init and network
 echo "[9/10] Configuring cloud-init..."
+
+mkdir -p /var/lib/vz/snippets
+cp /tmp/builder-user-data.yml /var/lib/vz/snippets/builder-user-data.yml
+
 # Set static IP or DHCP
 if [[ "$CLOUD_INIT_IP" == "dhcp" ]]; then
     qm set $VM_ID --ipconfig0 ip=dhcp
@@ -189,13 +261,10 @@ else
     qm set $VM_ID --ipconfig0 "ip=$CLOUD_INIT_IP,gw=$CLOUD_INIT_GATEWAY"
 fi
 
-# Password handled by cloud-init (SSH key-based auth preferred)
-echo "[✓] Cloud-init configured"
+# Link custom cloud-init
+qm set $VM_ID --cicustom "local:snippets/builder-user-data.yml" > /dev/null 2>&1 || true
 
-# Step 10: Convert to template or ready state
-echo "[10/10] Finalizing VM..."
-echo "Cloud-init configuration:"
-qm cloudinit dump $VM_ID user 2>/dev/null | head -20
+echo "[✓] Cloud-init configured"
 
 # Clean up
 cd /
@@ -203,7 +272,7 @@ rm -rf "$TEMP_DIR"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
-echo "  ✓ Builder VM Ready!"
+echo "  ✓ Debian 13 Builder VM Ready!"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "VM Details:"
@@ -227,15 +296,16 @@ DEPLOY_SCRIPT
 chmod +x /tmp/builder-cloud-deploy.sh
 
 # Upload and execute on Proxmox
-log "Uploading deployment script to $PROXMOX_HOST..."
+log "Uploading deployment files to $PROXMOX_HOST..."
 sshpass -p "$PROXMOX_PASSWORD" scp -o StrictHostKeyChecking=no \
   /tmp/builder-cloud-deploy.sh "root@$PROXMOX_HOST:/tmp/" 2>/dev/null
+sshpass -p "$PROXMOX_PASSWORD" scp -o StrictHostKeyChecking=no \
+  "$CLOUD_INIT_TEMP" "root@$PROXMOX_HOST:/tmp/builder-user-data.yml" 2>/dev/null
 
 log "Executing deployment on $PROXMOX_HOST..."
-SSH_PUB_KEY=$(cat "$SSH_KEY_PATH")
 
 sshpass -p "$PROXMOX_PASSWORD" ssh -o StrictHostKeyChecking=no "root@$PROXMOX_HOST" \
-  "bash /tmp/builder-cloud-deploy.sh $VM_ID '$VM_NAME' $VM_CORES $VM_MEMORY '$VM_STORAGE' '$VM_BRIDGE' '$VM_MAC' $VM_DISK_SIZE '$CLOUD_INIT_USER' '$CLOUD_INIT_HOSTNAME' '$CLOUD_INIT_DOMAIN' '$CLOUD_INIT_IP' '$CLOUD_INIT_GATEWAY' '$CLOUD_INIT_DNS' '$SSH_PUB_KEY' '$TIMEZONE'"
+  "bash /tmp/builder-cloud-deploy.sh $VM_ID '$VM_NAME' $VM_CORES $VM_MEMORY '$VM_STORAGE' '$VM_BRIDGE' '$VM_MAC' $VM_DISK_SIZE '$CLOUD_INIT_USER' '$CLOUD_INIT_HOSTNAME' '$CLOUD_INIT_DOMAIN' '$CLOUD_INIT_IP' '$CLOUD_INIT_GATEWAY' '$CLOUD_INIT_DNS' '$TIMEZONE'"
 
 echo ""
 header "✓ Deployment Complete!"
@@ -262,6 +332,9 @@ echo ""
 echo "4. Test DNS queries:"
 echo "   dig @172.20.0.250 example.com"
 echo ""
+
+# Clean up temporary cloud-init file
+rm -f "$CLOUD_INIT_TEMP"
 
 # Auto-start option
 read -p "Start VM now? [y/N]: " start_now
