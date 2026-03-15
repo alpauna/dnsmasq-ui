@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     dnsutils \
     sudo \
     wireguard-tools \
+    iptables \
     && rm -rf /var/lib/apt/lists/*
 
 # Create SSH directories
