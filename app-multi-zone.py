@@ -239,18 +239,18 @@ class ZoneManager:
         """Get current SSH key information."""
         try:
             if not os.path.exists(SSH_KEY):
-                return None
+                return {'exists': False}
 
             # Get file info
             stat = os.stat(SSH_KEY)
 
-            # Get key fingerprint
-            with open(SSH_KEY, 'rb') as f:
-                key_data = f.read()
-
             # Load key and get fingerprint
             pkey = paramiko.RSAKey.from_private_key_file(SSH_KEY)
-            fingerprint = hashlib.md5(pkey.get_base64()).hexdigest()
+            # Get MD5 fingerprint of the public key (base64 data)
+            base64_key = pkey.get_base64()
+            if isinstance(base64_key, str):
+                base64_key = base64_key.encode()
+            fingerprint = hashlib.md5(base64_key).hexdigest()
             fingerprint_hex = ':'.join([fingerprint[i:i+2] for i in range(0, len(fingerprint), 2)])
 
             return {
