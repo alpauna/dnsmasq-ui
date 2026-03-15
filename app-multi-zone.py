@@ -4,7 +4,7 @@ dnsmasq-ui v2: Enhanced web UI with multi-zone support.
 Manages dnsmasq DNS records across multiple servers and zones.
 """
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask import Flask, render_template, request, jsonify, redirect, url_for, send_file
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 import json
@@ -298,6 +298,61 @@ class ZoneManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
+    def backup_config(self):
+        """Export complete configuration as JSON.
+
+        Returns:
+            Tuple of (json_string, backup_filename)
+        """
+        try:
+            backup_data = {
+                'backup_timestamp': datetime.now().isoformat(),
+                'version': '2.0',
+                'zones': self.config.get('zones', []),
+                'servers': self.config.get('servers', {}),
+                'global': self.config.get('global', {})
+            }
+
+            filename = f"dnsmasq-ui-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+            json_str = json.dumps(backup_data, indent=2)
+
+            return json_str, filename
+        except Exception as e:
+            logger.error(f"Error creating backup: {str(e)}")
+            return None, None
+
+    def restore_config(self, backup_json_str):
+        """Restore configuration from JSON backup.
+
+        Args:
+            backup_json_str: JSON string containing backup data
+
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            backup_data = json.loads(backup_json_str)
+
+            # Validate backup structure
+            if 'zones' not in backup_data or 'servers' not in backup_data:
+                return False, "Invalid backup format: missing zones or servers"
+
+            # Update config with backup data
+            self.config['zones'] = backup_data.get('zones', [])
+            self.config['servers'] = backup_data.get('servers', {})
+            self.config['global'] = backup_data.get('global', {})
+
+            # Save the restored config
+            self.save_config()
+
+            logger.info(f"Config restored from backup. {len(self.config['zones'])} zones, {len(self.config['servers'])} servers")
+            return True, f"Configuration restored: {len(self.config['zones'])} zones, {len(self.config['servers'])} servers"
+        except json.JSONDecodeError:
+            return False, "Invalid JSON format in backup file"
+        except Exception as e:
+            logger.error(f"Error restoring backup: {str(e)}")
+            return False, str(e)
+
     def distribute_key_to_servers(self, public_key_content, password=None):
         """Distribute public key to all servers.
 
@@ -485,6 +540,83 @@ def api_upload_ssh_key():
         return jsonify({'success': True, 'message': 'SSH key uploaded successfully'})
     except Exception as e:
         logger.error(f"Error uploading SSH key: {str(e)}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/config/backup', methods=['GET'])
+def api_backup_config():
+    """API: Download configuration backup as JSON file."""
+    try:
+        json_str, filename = manager.backup_config()
+        if not json_str:
+            return jsonify({'error': 'Failed to create backup'}), 500
+
+        # Return JSON as downloadable file
+        from io import BytesIO
+        return send_file(
+            BytesIO(json_str.encode()),
+            mimetype='application/json',
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        logger.error(f"Error downloading backup: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/config/restore', methods=['POST'])
+def api_restore_config():
+    """API: Restore configuration from JSON backup file."""
+    try:
+        if 'backup_file' not in request.files:
+            return jsonify({'success': False, 'message': 'No backup file provided'}), 400
+
+        backup_file = request.files['backup_file']
+        if not backup_file.filename:
+            return jsonify({'success': False, 'message': 'Empty file'}), 400
+
+        # Read backup content
+        backup_content = backup_file.read().decode()
+
+        # Restore config
+        success, message = manager.restore_config(backup_content)
+
+        if success:
+            return jsonify({'success': True, 'message': message})
+        else:
+            return jsonify({'success': False, 'message': message}), 400
+    except Exception as e:
+        logger.error(f"Error restoring config: {str(e)}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/config/restore-and-deploy', methods=['POST'])
+def api_restore_and_deploy():
+    """API: Restore configuration and automatically deploy to all servers."""
+    try:
+        if 'backup_file' not in request.files:
+            return jsonify({'success': False, 'message': 'No backup file provided'}), 400
+
+        backup_file = request.files['backup_file']
+        if not backup_file.filename:
+            return jsonify({'success': False, 'message': 'Empty file'}), 400
+
+        # Read backup content
+        backup_content = backup_file.read().decode()
+
+        # Restore config
+        success, message = manager.restore_config(backup_content)
+
+        if not success:
+            return jsonify({'success': False, 'message': message}), 400
+
+        # Deploy to all servers
+        deploy_results = manager.deploy_to_servers()
+
+        return jsonify({
+            'success': True,
+            'message': message,
+            'deploy_results': deploy_results
+        })
+    except Exception as e:
+        logger.error(f"Error in restore and deploy: {str(e)}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/config/ssh/servers', methods=['GET'])

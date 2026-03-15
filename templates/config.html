@@ -385,6 +385,68 @@
                 <p style="padding: 20px; grid-column: 1/-1;">Loading server status...</p>
             </div>
         </div>
+
+        <div class="section">
+            <h2>Backup & Restore</h2>
+
+            <div class="tab-group" style="margin-bottom: 20px;">
+                <button class="tab-btn active" onclick="switchTabBackup('backup-tab')">Backup Config</button>
+                <button class="tab-btn" onclick="switchTabBackup('restore-tab')">Restore Config</button>
+            </div>
+
+            <!-- Backup Tab -->
+            <div id="backup-tab" class="tab-content active">
+                <div class="alert alert-info">
+                    <strong>Backup Configuration</strong>: Download your complete DNS configuration (zones, records, servers, global settings) as a JSON file.
+                </div>
+                <p style="margin-bottom: 20px; color: #666;">
+                    This backup includes all zones, DNS records, server definitions, and settings. Use it to:
+                </p>
+                <ul style="margin-bottom: 20px; margin-left: 20px; color: #666;">
+                    <li>Backup configuration before making changes</li>
+                    <li>Transfer configuration to another instance</li>
+                    <li>Version control your DNS configuration</li>
+                    <li>Restore to a previous state if needed</li>
+                </ul>
+                <button class="btn btn-primary" onclick="downloadBackup()">Download Backup (JSON)</button>
+                <div id="backup-status" style="margin-top: 20px;"></div>
+            </div>
+
+            <!-- Restore Tab -->
+            <div id="restore-tab" class="tab-content">
+                <div class="alert alert-info">
+                    <strong>Restore Configuration</strong>: Upload a previously backed-up JSON file to restore your DNS configuration.
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: #333; margin-bottom: 15px;">Restore Options</h4>
+
+                    <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="radio" name="restore-option" value="restore-only" checked style="margin-right: 8px;">
+                            <span>Restore Config Only</span>
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="radio" name="restore-option" value="restore-and-deploy" style="margin-right: 8px;">
+                            <span>Restore & Deploy to Servers</span>
+                        </label>
+                    </div>
+
+                    <div class="alert alert-info">
+                        <strong>Restore & Deploy</strong>: This will restore your configuration <strong>and</strong> automatically push the changes to all DNS servers (dns01, dns02, dns03). The dnsmasq service will be restarted on each server.
+                    </div>
+                </div>
+
+                <form id="restore-form" onsubmit="restoreConfig(event)">
+                    <div class="form-group">
+                        <label for="restore-file">Backup File (JSON)</label>
+                        <input type="file" id="restore-file" accept=".json" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Restore Configuration</button>
+                </form>
+                <div id="restore-status" style="margin-top: 20px;"></div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -399,6 +461,23 @@
 
             // Show selected tab
             document.getElementById(tabName).classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        function switchTabBackup(tabName) {
+            // Find the parent to scope the search
+            const parent = event.target.closest('.section');
+
+            // Hide all tabs in this section
+            parent.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            parent.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            // Show selected tab
+            parent.querySelector('#' + tabName).classList.add('active');
             event.target.classList.add('active');
         }
 
@@ -613,6 +692,94 @@
                 "'": '&#039;'
             };
             return text.replace(/[&<>"']/g, m => map[m]);
+        }
+
+        function downloadBackup() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> Preparing backup...';
+
+            fetch('/api/config/backup')
+                .then(response => response.blob())
+                .then(blob => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Download Backup (JSON)';
+
+                    // Create download link
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `dnsmasq-ui-backup-${new Date().toISOString().split('T')[0]}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    a.remove();
+
+                    document.getElementById('backup-status').innerHTML = '<div class="alert alert-success">✓ Backup downloaded successfully!</div>';
+                })
+                .catch(error => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Download Backup (JSON)';
+                    console.error('Error:', error);
+                    document.getElementById('backup-status').innerHTML = '<div class="alert alert-error">Error downloading backup</div>';
+                });
+        }
+
+        function restoreConfig(event) {
+            event.preventDefault();
+
+            const file = document.getElementById('restore-file').files[0];
+            if (!file) return;
+
+            const restoreOption = document.querySelector('input[name="restore-option"]:checked').value;
+            const endpoint = restoreOption === 'restore-and-deploy'
+                ? '/api/config/restore-and-deploy'
+                : '/api/config/restore';
+
+            const formData = new FormData();
+            formData.append('backup_file', file);
+
+            const btn = event.target.querySelector('button[type="submit"]');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> Restoring...';
+
+            fetch(endpoint, {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => response.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Restore Configuration';
+
+                    if (data.success) {
+                        let html = `<div class="alert alert-success"><strong>✓ Configuration restored!</strong><br>${data.message}</div>`;
+
+                        if (data.deploy_results) {
+                            html += '<div style="margin-top: 15px;"><strong>Deployment Results:</strong><br>';
+                            for (const [server, result] of Object.entries(data.deploy_results)) {
+                                if (result.success) {
+                                    html += `✓ ${server}: ${result.message}<br>`;
+                                } else {
+                                    html += `✗ ${server}: ${result.message}<br>`;
+                                }
+                            }
+                            html += '</div>';
+                        }
+
+                        document.getElementById('restore-status').innerHTML = html;
+                        document.getElementById('restore-form').reset();
+                        setTimeout(() => location.reload(), 2000);
+                    } else {
+                        document.getElementById('restore-status').innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Restore Configuration';
+                    console.error('Error:', error);
+                    document.getElementById('restore-status').innerHTML = '<div class="alert alert-error">Error restoring configuration</div>';
+                });
         }
 
         // Load data on page load
