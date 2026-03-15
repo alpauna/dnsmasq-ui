@@ -298,8 +298,13 @@ class ZoneManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-    def distribute_key_to_servers(self, public_key_content):
-        """Distribute public key to all servers."""
+    def distribute_key_to_servers(self, public_key_content, password=None):
+        """Distribute public key to all servers.
+
+        Args:
+            public_key_content: Public key to distribute
+            password: Optional password for SSH authentication (for servers without key setup)
+        """
         results = {}
 
         for server_name, server_info in self.get_servers().items():
@@ -310,7 +315,15 @@ class ZoneManager:
             try:
                 ssh = paramiko.SSHClient()
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
+
+                # Try key-based auth first, fallback to password if provided
+                try:
+                    ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
+                except (paramiko.AuthenticationException, paramiko.SSHException):
+                    if password:
+                        ssh.connect(server_ip, username=SSH_USER, password=password, timeout=5)
+                    else:
+                        raise
 
                 # Append public key to authorized_keys
                 cmd = f"mkdir -p ~/.ssh && echo '{public_key_content}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
@@ -474,17 +487,34 @@ def api_upload_ssh_key():
         logger.error(f"Error uploading SSH key: {str(e)}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
+@app.route('/api/config/ssh/servers', methods=['GET'])
+def api_get_servers_for_sync():
+    """API: Get list of servers for key sync."""
+    servers = []
+    for server_name, server_info in manager.get_servers().items():
+        if server_info.get('enabled', True):
+            servers.append({
+                'name': server_name,
+                'ip': server_info['ip'],
+                'hostname': server_info.get('hostname', server_name)
+            })
+    return jsonify({'servers': servers})
+
 @app.route('/api/config/ssh/sync', methods=['POST'])
 def api_sync_ssh_key():
-    """API: Distribute public key to all servers."""
+    """API: Distribute public key to all servers.
+
+    Supports both key-based and password-based authentication.
+    """
     try:
         data = request.json
         public_key = data.get('public_key', '')
+        password = data.get('password', None)
 
         if not public_key:
             return jsonify({'success': False, 'message': 'No public key provided'}), 400
 
-        results = manager.distribute_key_to_servers(public_key)
+        results = manager.distribute_key_to_servers(public_key, password=password)
         return jsonify({'success': True, 'results': results})
     except Exception as e:
         logger.error(f"Error syncing SSH key: {str(e)}")

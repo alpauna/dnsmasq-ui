@@ -355,10 +355,25 @@
                 <div class="alert alert-info">
                     <strong>Distribute public key to servers</strong>: Add the public key to authorized_keys on all DNS servers.
                 </div>
+
+                <h3 style="color: #333; margin-top: 20px; margin-bottom: 15px;">Target Servers</h3>
+                <div id="sync-servers" class="server-list" style="margin-bottom: 20px;">
+                    <p style="padding: 20px; grid-column: 1/-1;">Loading servers...</p>
+                </div>
+
                 <div class="form-group">
                     <label for="public-key">Public Key Content</label>
                     <textarea id="public-key" rows="6" placeholder="Paste public key here or generate one above"></textarea>
                 </div>
+
+                <div class="form-group">
+                    <label for="ssh-password">SSH Password (Optional)</label>
+                    <input type="password" id="ssh-password" placeholder="Leave empty to use SSH keys. Enter password to authenticate with user credentials.">
+                    <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                        If SSH key authentication fails, password will be used as fallback.
+                    </p>
+                </div>
+
                 <button class="btn btn-primary" onclick="syncSSHKey()">Sync Public Key to Servers</button>
                 <div id="sync-result" style="margin-top: 20px;"></div>
             </div>
@@ -482,8 +497,34 @@
                 });
         }
 
+        function loadSyncServers() {
+            fetch('/api/config/ssh/servers')
+                .then(response => response.json())
+                .then(data => {
+                    let html = '';
+                    if (data.servers.length === 0) {
+                        html = '<p style="padding: 20px; grid-column: 1/-1;">No servers configured</p>';
+                    } else {
+                        for (const server of data.servers) {
+                            html += `<div class="server-item">
+                                <h4>${server.name}</h4>
+                                <p><strong>Hostname:</strong> ${server.hostname}</p>
+                                <p><strong>IP:</strong> ${server.ip}</p>
+                            </div>`;
+                        }
+                    }
+                    document.getElementById('sync-servers').innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error loading servers:', error);
+                    document.getElementById('sync-servers').innerHTML = '<p style="padding: 20px; grid-column: 1/-1; color: #c62828;">Error loading servers</p>';
+                });
+        }
+
         function syncSSHKey() {
             const publicKey = document.getElementById('public-key').value.trim();
+            const password = document.getElementById('ssh-password').value;
+
             if (!publicKey) {
                 alert('Please enter a public key');
                 return;
@@ -493,10 +534,15 @@
             btn.disabled = true;
             btn.innerHTML = '<span class="loading"></span> Syncing...';
 
+            const payload = { public_key: publicKey };
+            if (password) {
+                payload.password = password;
+            }
+
             fetch('/api/config/ssh/sync', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ public_key: publicKey })
+                body: JSON.stringify(payload)
             })
                 .then(response => response.json())
                 .then(data => {
@@ -572,6 +618,7 @@
         // Load data on page load
         loadSSHKeyInfo();
         loadServerStatus();
+        loadSyncServers();
         setInterval(loadServerStatus, 30000);
     </script>
 </body>
