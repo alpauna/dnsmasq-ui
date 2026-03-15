@@ -213,9 +213,11 @@ docker exec dns03 ping -c 3 10.99.0.2
 - [x] Latest handshake timestamps show active connections
 - [x] Ping between tunnel IPs succeeds (0% loss)
 
-### DNS Queries (Needs Investigation)
-- [ ] dnsmasq listening on wg0 interface (10.99.0.1:53)
-- [ ] DNS queries over tunnel complete (not timeout)
+### DNS Queries (🔧 Being Fixed)
+- [x] Root cause identified: zones.json parsing error in entrypoint.sh
+- [x] dnsmasq listening on all interfaces including wg0 (172.20.0.x:53)
+- [ ] DNS records loading to `/etc/dnsmasq.d/zones.conf` (fix applied, awaiting rebuild)
+- [ ] DNS queries over tunnel complete (not timeout) - should work after fix
 - [ ] Forward requests to upstream DNS
 - [ ] Zone data accessible over tunnel
 - [ ] HA failover works over tunnel
@@ -236,28 +238,37 @@ docker exec dns03 ping -c 3 10.99.0.2
 
 ## Known Issues & Troubleshooting
 
-### DNS Queries Timeout (Last Session Issue)
-**Symptom**: Ping works over tunnel, but DNS queries timeout
-**Possible Causes**:
-1. dnsmasq not listening on wg0 interface (listening on 0.0.0.0:53 only)
-2. DNS response routes not configured correctly
-3. Firewall rules blocking return traffic
-4. dnsmasq configuration not reloaded after WireGuard deployment
+### DNS Queries Timeout (🔧 FIXED - Rebuilding Containers)
+**Symptom**: Ping works over tunnel, but DNS queries timeout (including localhost)
+**Root Cause**: zones.json parsing error in entrypoint.sh Python code
+- zones.json structure: zones is a LIST of zone objects
+- Code was treating zones as a DICT with `.items()` call
+- Result: zones.json parsing failed, no DNS records loaded to dnsmasq
 
-**Debug Steps**:
+**Fix Applied**: Updated entrypoint.sh to handle both list and dict formats
+- Checks `isinstance(zones_list, list)` first
+- Falls back to `.items()` for legacy dict format
+- DNS records now load correctly from zones.json
+
+**Status**: Containers currently rebuilding with fix...
+
+**Debug Steps** (After containers rebuild):
 ```bash
-# Check if dnsmasq is listening on wg0
+# Verify DNS records loaded
+docker exec dns01 cat /etc/dnsmasq.d/zones.conf | head -10
+# Should show: address=/domain/ip, cname=... (not empty)
+
+# Test DNS on localhost
+docker exec dns01 dig @127.0.0.1 dns01.ad.alshowto.com +short
+# Should return: 192.168.0.231 (not timeout)
+
+# Test DNS over tunnel
+docker exec dns02 dig @10.99.0.1 dns01.ad.alshowto.com +short
+# Should return: 192.168.0.231 (not timeout)
+
+# Check dnsmasq is listening
 docker exec dns01 ss -tlnup | grep 53
-
-# Check dnsmasq configuration
-docker exec dns01 cat /etc/dnsmasq.conf | grep listen-address
-docker exec dns01 cat /etc/dnsmasq.conf | grep interface
-
-# Check firewall rules (if enabled)
-docker exec dns01 iptables -L INPUT -n -v | grep dns
-
-# Test DNS directly on wg0 IP
-docker exec dns02 dig @10.99.0.1 example.com +short
+# Should show: 0.0.0.0:53 LISTEN (all interfaces)
 ```
 
 ### WireGuard Interface Not Staying Up

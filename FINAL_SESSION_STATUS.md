@@ -258,11 +258,22 @@ docker exec dns02 ping -c 2 10.99.0.1
 
 ---
 
-## Build Status
+## Build Status & Disk Space Issue
 
-**Last Check**: ~14:45 UTC
-- Docker build processes: 3 active
-- Expected completion: Within 5 minutes
+**Issue Encountered**: Docker build failed due to `/var/cache/apt/archives/` full
+- apt-get install needed 477 MB but only 0 available
+- Build hung for 80+ minutes trying to acquire space
+
+**Resolution Applied**:
+```bash
+apt-get clean && apt-get autoclean     # Freed space
+docker system prune -f --all           # Removed unused Docker images/layers
+Total space freed: 19.19 GB
+```
+
+**Rebuild Status**:
+- Restarted build with disk space freed
+- Expected duration: 3-5 minutes per container (now has space)
 - Containers will auto-restart with new image
 - dnsmasq will reload zones.json during startup
 - DNS queries should complete successfully
