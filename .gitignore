@@ -40,6 +40,8 @@ ENV/
 # Secrets (WireGuard keys, credentials)
 wireguard-keys.json
 wireguard-keys.json.bak
+wireguard-keys-docker.json
+wireguard-keys-docker.json.bak
 servers.json
 
 # Logs

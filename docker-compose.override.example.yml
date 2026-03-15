@@ -1,0 +1,34 @@
+# Docker Compose override for testing All-Docker Architecture
+# COPY THIS FILE TO docker-compose.override.yml ON YOUR TEST MACHINE
+#
+# This overrides the production docker-compose.yml to use:
+# - zones-docker.json (container IPs 172.20.0.x instead of 192.168.0.x)
+# - docker.env environment file
+#
+# Usage on builder VM:
+#   cp docker-compose.override.example.yml docker-compose.override.yml
+#   docker-compose down
+#   docker-compose build --no-cache
+#   docker-compose up -d
+
+version: '3.8'
+
+services:
+  dnsmasq-ui:
+    env_file:
+      - docker.env
+    volumes:
+      - ./zones-docker.json:/etc/dnsmasq-ui/zones.json
+      - ./wireguard-keys-docker.json:/etc/dnsmasq-ui/wireguard-keys.json:ro
+
+  dns01:
+    volumes:
+      - ./zones-docker.json:/etc/dnsmasq-ui/zones.json:ro
+
+  dns02:
+    volumes:
+      - ./zones-docker.json:/etc/dnsmasq-ui/zones.json:ro
+
+  dns03:
+    volumes:
+      - ./zones-docker.json:/etc/dnsmasq-ui/zones.json:ro
