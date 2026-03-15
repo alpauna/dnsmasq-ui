@@ -1,0 +1,66 @@
+# Ansible Vault Secrets Template
+# ================================
+# Copy this to vault.yml and fill in your actual secrets
+# Then encrypt with: ansible-vault encrypt vault.yml
+# Use with: ansible-playbook playbook.yml --ask-vault-pass
+
+---
+# Proxmox Infrastructure Credentials
+proxmox_credentials:
+  pve_root_user: "root"
+  pve_root_password: "YOUR_PROXMOX_ROOT_PASSWORD"
+  pve_api_user: "root@pam"
+  pve_api_token_id: "your-token-id"  # Optional: for API token auth
+  pve_api_token_secret: "YOUR_TOKEN_SECRET"
+
+# SSH Key Configuration
+ssh_keys:
+  builder_vm_ssh_key: |
+    -----BEGIN RSA PRIVATE KEY-----
+    YOUR_SSH_PRIVATE_KEY_HERE
+    -----END RSA PRIVATE KEY-----
+  builder_vm_ssh_pub: "ssh-rsa YOUR_SSH_PUBLIC_KEY_HERE"
+
+# DNS Server Credentials (if needed for remote deployment)
+dns_server_credentials:
+  ssh_user: "debian"
+  ssh_key_file: "~/.ssh/id_rsa"
+  sudo_password: ""  # Leave empty if using NOPASSWD
+
+# Cloud-init Secrets
+cloud_init:
+  dns01_password: ""  # Leave empty if using SSH keys only
+  dns02_password: ""
+  dns03_password: ""
+
+# Network Configuration Secrets
+network_secrets:
+  dhcp_pool_start: "192.168.0.100"
+  dhcp_pool_end: "192.168.0.200"
+  dns_server_primary: "192.168.0.250"
+  dns_server_secondary: "1.1.1.1"
+
+# Storage Secrets (if using external storage with credentials)
+storage_secrets:
+  nas_username: "admin"
+  nas_password: "YOUR_NAS_PASSWORD"
+  nas_share_path: "/mnt/nas/proxmox"
+
+# Backup Configuration
+backup_secrets:
+  backup_retention_days: 30
+  backup_schedule: "2"  # 2 AM daily
+  remote_backup_server: ""
+  remote_backup_user: ""
+  remote_backup_password: ""
+
+# Monitoring/Alerting
+monitoring_secrets:
+  slack_webhook_url: ""  # For Slack notifications
+  email_alerts: "admin@example.com"
+  pagerduty_key: ""  # For PagerDuty integration
+
+# Cluster Secrets
+cluster_secrets:
+  cluster_name: "pve"
+  cluster_password: ""  # Cluster join password (if needed)
