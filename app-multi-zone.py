@@ -235,6 +235,36 @@ class ZoneManager:
         except:
             return False
 
+    def check_keepalived_status(self, server_ip):
+        """Check if server is the active keepalived master.
+
+        Returns:
+            Tuple of (is_master, keepalived_running)
+        """
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
+
+            # Check if keepalived is running
+            stdin, stdout, stderr = ssh.exec_command("sudo systemctl is-active keepalived 2>/dev/null")
+            keepalived_status = stdout.read().decode().strip()
+            keepalived_running = 'active' in keepalived_status.lower()
+
+            if not keepalived_running:
+                ssh.close()
+                return False, False
+
+            # Check if this is the master (MASTER state in keepalived)
+            stdin, stdout, stderr = ssh.exec_command("sudo systemctl status keepalived 2>/dev/null | grep -i master")
+            output = stdout.read().decode().strip()
+            ssh.close()
+
+            is_master = len(output) > 0 and 'MASTER' in output.upper()
+            return is_master, keepalived_running
+        except:
+            return False, False
+
     def get_ssh_key_info(self):
         """Get current SSH key information."""
         try:
@@ -489,14 +519,29 @@ def api_deploy():
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
-    """API: Get status of all servers."""
+    """API: Get status of all servers including keepalived."""
     status = {}
+    keepalived_vip = manager.config.get('global', {}).get('keepalive_vip', 'N/A')
+
     for server_name, server_info in manager.get_servers().items():
+        dnsmasq_running = manager.check_server_status(server_info['ip'])
+        is_master, keepalived_running = manager.check_keepalived_status(server_info['ip'])
+
         status[server_name] = {
             'ip': server_info['ip'],
-            'online': manager.check_server_status(server_info['ip'])
+            'hostname': server_info.get('hostname', server_name),
+            'online': dnsmasq_running,
+            'dnsmasq': 'active' if dnsmasq_running else 'inactive',
+            'keepalived': {
+                'running': keepalived_running,
+                'status': 'MASTER' if is_master else ('STANDBY' if keepalived_running else 'INACTIVE'),
+                'vip': keepalived_vip
+            }
         }
-    return jsonify(status)
+    return jsonify({
+        'servers': status,
+        'vip': keepalived_vip
+    })
 
 @app.route('/config')
 def config_page():

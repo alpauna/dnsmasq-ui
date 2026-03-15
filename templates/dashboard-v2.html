@@ -373,6 +373,30 @@
             font-weight: 500;
         }
 
+        .keepalived-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .keepalived-badge.master {
+            background: #4caf50;
+            color: white;
+        }
+
+        .keepalived-badge.standby {
+            background: #ff9800;
+            color: white;
+        }
+
+        .keepalived-badge.inactive {
+            background: #999;
+            color: white;
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -618,9 +642,13 @@
 
         <div class="section">
             <h2>DNS Servers</h2>
-            <div class="servers-grid">
+            <div id="keepalived-vip" style="background: #f0f0f0; padding: 12px; border-radius: 6px; margin-bottom: 20px; font-size: 13px;">
+                <strong>Keepalived VIP:</strong> <span id="vip-address">Loading...</span>
+                <span id="vip-status" style="margin-left: 20px; padding: 4px 8px; background: white; border-radius: 3px; display: none;"></span>
+            </div>
+            <div class="servers-grid" id="servers-container">
                 {% for server_name, server_info in servers.items() %}
-                <div class="server-card">
+                <div class="server-card" id="server-{{ server_name }}">
                     <h3>{{ server_info.hostname }}</h3>
                     <div class="server-info">
                         <div class="server-info-item">
@@ -633,6 +661,10 @@
                                 <span class="status-indicator {% if server_info.status == 'online' %}status-online{% else %}status-offline{% endif %}"></span>
                                 <span class="status-text">{{ server_info.status|capitalize }}</span>
                             </value>
+                        </div>
+                        <div class="server-info-item" id="keepalived-{{ server_name }}" style="display: none;">
+                            <label>Keepalived:</label>
+                            <value id="keepalived-status-{{ server_name }}">Loading...</value>
                         </div>
                     </div>
                 </div>
@@ -824,12 +856,48 @@
             .then(response => response.json())
             .then(data => {
                 let onlineCount = 0;
-                for (const [server, status] of Object.entries(data)) {
+                let activeMaster = null;
+                const keepalivedVip = data.vip || 'N/A';
+                const servers = data.servers || {};
+
+                // Update VIP address
+                document.getElementById('vip-address').textContent = keepalivedVip;
+
+                for (const [server, status] of Object.entries(servers)) {
                     if (status.online) {
                         onlineCount++;
                     }
+
+                    // Update keepalived status if available
+                    if (status.keepalived) {
+                        const keepalivedRow = document.getElementById(`keepalived-${server}`);
+                        const keepalivedStatus = document.getElementById(`keepalived-status-${server}`);
+
+                        if (keepalivedRow && keepalivedStatus) {
+                            keepalivedRow.style.display = 'flex';
+
+                            const badge = document.createElement('span');
+                            badge.className = `keepalived-badge ${status.keepalived.status.toLowerCase()}`;
+                            badge.textContent = status.keepalived.status;
+
+                            keepalivedStatus.innerHTML = '';
+                            keepalivedStatus.appendChild(badge);
+
+                            if (status.keepalived.status === 'MASTER') {
+                                activeMaster = server;
+                            }
+                        }
+                    }
                 }
+
                 document.getElementById('online-count').textContent = onlineCount;
+
+                // Update VIP status indicator
+                if (activeMaster) {
+                    const vipStatus = document.getElementById('vip-status');
+                    vipStatus.innerHTML = `Active on <strong>${activeMaster}</strong>`;
+                    vipStatus.style.display = 'inline-block';
+                }
             })
             .catch(error => console.error('Error updating status:', error));
         }
