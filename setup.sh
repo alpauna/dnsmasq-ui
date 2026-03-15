@@ -1,0 +1,506 @@
+#!/bin/bash
+# dnsmasq-ui Setup Script
+# Interactive configuration for DNS cluster deployment
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+log() {
+    echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"
+}
+
+success() {
+    echo -e "${GREEN}✓ $*${NC}"
+}
+
+error() {
+    echo -e "${RED}✗ $*${NC}"
+    exit 1
+}
+
+warning() {
+    echo -e "${YELLOW}⚠ $*${NC}"
+}
+
+info() {
+    echo -e "${CYAN}ℹ $*${NC}"
+}
+
+header() {
+    echo ""
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC} $1"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+# Parse IP range into array
+parse_ip_range() {
+    local input=$1
+    local ips=()
+
+    # Check if it's a range (e.g., 192.168.0.231-233)
+    if [[ $input =~ ^([0-9.]+)-([0-9]+)$ ]]; then
+        local base="${BASH_REMATCH[1]}"
+        local end_octet="${BASH_REMATCH[2]}"
+        local base_prefix=$(echo $base | rev | cut -d. -f2- | rev)
+        local start_octet=$(echo $base | rev | cut -d. -f1 | rev)
+
+        for ((i=start_octet; i<=end_octet; i++)); do
+            ips+=("${base_prefix}.${i}")
+        done
+    # Check if it's a comma-separated list
+    elif [[ $input == *","* ]]; then
+        IFS=',' read -ra ips <<< "$input"
+        for i in "${!ips[@]}"; do
+            ips[$i]=$(echo "${ips[$i]}" | xargs)  # trim whitespace
+        done
+    # Single IP
+    else
+        ips=("$input")
+    fi
+
+    printf '%s\n' "${ips[@]}"
+}
+
+# Validate IP address
+validate_ip() {
+    local ip=$1
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Test SSH connectivity
+test_ssh() {
+    local ip=$1
+    local user=$2
+    if timeout 5 ssh -o ConnectTimeout=3 "$user@$ip" "echo OK" > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Generate Ansible inventory
+generate_inventory() {
+    local output_file="$SCRIPT_DIR/ansible/inventory.ini"
+    local ssh_user=$1
+    shift
+    local ips=("$@")
+
+    log "Generating Ansible inventory..."
+
+    cat > "$output_file" << EOF
+[dns_servers]
+EOF
+
+    for i in "${!ips[@]}"; do
+        local dns_num=$((i + 1))
+        local server_name="dns$(printf "%02d" $dns_num)"
+        echo "${server_name} ansible_host=${ips[$i]} ansible_user=${ssh_user} ansible_become=yes" >> "$output_file"
+    done
+
+    cat >> "$output_file" << EOF
+
+[dns_servers:vars]
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_private_key_file=~/.ssh/id_rsa
+EOF
+
+    success "Inventory generated at $output_file"
+}
+
+# Generate Ansible keepalived config with dynamic priorities
+generate_keepalived_playbook() {
+    local output_file="$SCRIPT_DIR/ansible/dnsmasq-setup.yml"
+    local num_servers=$1
+    shift
+    local ips=("$@")
+
+    log "Generating Ansible playbook with keepalived for $num_servers servers..."
+
+    cat > "$output_file" << 'EOF'
+---
+- name: Setup dnsmasq DNS servers with monitoring
+  hosts: dns_servers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    dnsmasq_config_dir: /etc/dnsmasq.d
+    dnsmasq_records_file: "{{ dnsmasq_config_dir }}/local-records.conf"
+    monitoring_script: /usr/local/bin/dnsmasq-monitor.sh
+    keepalive_vip: 192.168.0.250
+
+  tasks:
+    - name: Install dnsmasq, keepalived, and dependencies
+      apt:
+        name:
+          - dnsmasq
+          - dnsutils
+          - net-tools
+          - systemd
+          - keepalived
+          - iproute2
+        state: present
+        update_cache: yes
+
+    - name: Stop systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: no
+
+    - name: Set keepalived priority based on hostname
+      set_fact:
+        keepalived_state: "{{ 'MASTER' if inventory_hostname == groups['dns_servers'][0] else 'BACKUP' }}"
+        keepalived_priority: "{{ 150 - (groups['dns_servers'].index(inventory_hostname) * 10) }}"
+
+    - name: Create keepalived configuration
+      copy:
+        content: |
+          global_defs {
+            router_id DNS_CLUSTER
+            script_user root
+          }
+
+          vrrp_instance DNS_VIP {
+            state {{ keepalived_state }}
+            interface eth0
+            virtual_router_id 51
+            priority {{ keepalived_priority }}
+            advert_int 1
+
+            virtual_ipaddress {
+              {{ keepalive_vip }}/24
+            }
+
+            track_processes {
+              dnsmasq
+            }
+          }
+        dest: /etc/keepalived/keepalived.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart keepalived
+
+    - name: Enable and start keepalived
+      systemd:
+        name: keepalived
+        enabled: yes
+        state: started
+
+    - name: Create dnsmasq records file
+      copy:
+        content: |
+          # Local DNS Records for ad.alshowto.com
+          # Generated by Ansible
+
+          address=/10g-sw01.ad.alshowto.com/2604:7a00:ea40:5630:5ea6:e6ff:fe27:417c
+          address=/10g-sw02.ad.alshowto.com/2604:7a00:ea40:5630:56af:97ff:fe8f:c7a7
+          address=/dns01.ad.alshowto.com/192.168.0.231
+          address=/dns02.ad.alshowto.com/192.168.0.232
+          address=/dns03.ad.alshowto.com/192.168.0.233
+          address=/mfc-printer.ad.alshowto.com/192.168.0.70
+          address=/middle-01.ad.alshowto.com/192.168.0.250
+
+          cname=esphome.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=frigate.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=ha-tainer.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=ha.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=ma.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=music.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=nginx-proxy.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=nginx-proxy.cld.alshowto.com,middle-01.ad.alshowto.com
+          cname=piehole.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=portainer.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=proxmox.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=rtr.ad.alshowto.com,middle-01.ad.alshowto.com
+          cname=wordpress-dbadmin.ad.alshowto.com,middle-01.ad.alshowto.com
+
+          # Upstream DNS servers
+          server=1.1.1.1
+          server=8.8.8.8
+        dest: "{{ dnsmasq_records_file }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart dnsmasq
+
+    - name: Create dnsmasq main config
+      lineinfile:
+        path: /etc/dnsmasq.conf
+        regexp: "^conf-dir={{ dnsmasq_config_dir }}"
+        line: "conf-dir={{ dnsmasq_config_dir }}"
+        state: present
+      notify: restart dnsmasq
+
+    - name: Enable and start dnsmasq
+      systemd:
+        name: dnsmasq
+        enabled: yes
+        state: started
+
+    - name: Create monitoring script
+      copy:
+        content: |
+          #!/bin/bash
+          # dnsmasq Health Check Script
+          # Monitors dnsmasq service and logs keepalive status
+
+          LOG_FILE="/var/log/dnsmasq-monitor.log"
+          STATUS_FILE="/var/run/dnsmasq-status"
+
+          check_dnsmasq() {
+              if systemctl is-active --quiet dnsmasq; then
+                  echo "online" > $STATUS_FILE
+                  return 0
+              else
+                  echo "offline" > $STATUS_FILE
+                  return 1
+              fi
+          }
+
+          check_dns() {
+              # Test DNS resolution
+              dig @127.0.0.1 +short walmart.com > /dev/null 2>&1
+              return $?
+          }
+
+          log_status() {
+              TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+              HOSTNAME=$(hostname)
+              STATUS=$(cat $STATUS_FILE)
+              echo "[$TIMESTAMP] $HOSTNAME - $STATUS" >> $LOG_FILE
+          }
+
+          check_dnsmasq && check_dns && STATUS="healthy" || STATUS="degraded"
+          log_status
+        dest: "{{ monitoring_script }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create keepalive check cron job
+      cron:
+        name: "dnsmasq health check"
+        minute: "*/5"
+        job: "{{ monitoring_script }}"
+        user: root
+
+    - name: Verify DNS is working
+      command: dig @127.0.0.1 +short walmart.com
+      register: dns_test
+      failed_when: dns_test.stdout == ""
+
+    - name: Display DNS test result
+      debug:
+        msg: "DNS working: {{ dns_test.stdout }}"
+
+  handlers:
+    - name: restart dnsmasq
+      systemd:
+        name: dnsmasq
+        state: restarted
+
+    - name: restart keepalived
+      systemd:
+        name: keepalived
+        state: restarted
+EOF
+
+    success "Ansible playbook generated at $output_file"
+}
+
+# Update zones.json with new servers
+update_zones_config() {
+    local zones_file="$SCRIPT_DIR/zones.json"
+    local num_servers=$1
+    shift
+    local ips=("$@")
+
+    log "Updating zones.json with server configuration..."
+
+    # Create JSON servers object
+    local servers_json="{"
+    for i in "${!ips[@]}"; do
+        local dns_num=$((i + 1))
+        local server_name="dns$(printf "%02d" $dns_num)"
+        servers_json+="\"${server_name}\": {\"ip\": \"${ips[$i]}\", \"hostname\": \"${server_name}\", \"port\": 22, \"enabled\": true}"
+        if [ $i -lt $((${#ips[@]} - 1)) ]; then
+            servers_json+=", "
+        fi
+    done
+    servers_json+="}"
+
+    # Use Python to update JSON while preserving structure
+    python3 << PYEOF
+import json
+
+with open('$zones_file', 'r') as f:
+    config = json.load(f)
+
+# Update servers with new configuration
+config['servers'] = json.loads($servers_json)
+
+with open('$zones_file', 'w') as f:
+    json.dump(config, f, indent=2)
+
+print(f"Updated zones.json with {len(config['servers'])} servers")
+PYEOF
+
+    success "zones.json updated with $num_servers servers"
+}
+
+# Main setup flow
+main() {
+    header "dnsmasq-ui Interactive Setup"
+
+    echo "This script will configure your DNS cluster with Ansible and keepalived."
+    echo ""
+
+    # Get SSH user
+    read -p "SSH user for DNS servers [debian]: " SSH_USER
+    SSH_USER=${SSH_USER:-debian}
+    log "Using SSH user: $SSH_USER"
+
+    # Get number of servers
+    read -p "Number of DNS servers [3]: " NUM_SERVERS
+    NUM_SERVERS=${NUM_SERVERS:-3}
+
+    if ! [[ $NUM_SERVERS =~ ^[0-9]+$ ]] || [ $NUM_SERVERS -lt 1 ]; then
+        error "Invalid number of servers. Must be >= 1"
+    fi
+
+    log "Configuring for $NUM_SERVERS DNS server(s)"
+    echo ""
+
+    # Get server addresses
+    header "DNS Server Addresses"
+    echo "Enter DNS server addresses as:"
+    echo "  - Single IP: 192.168.0.231"
+    echo "  - Range: 192.168.0.231-233 (generates .231, .232, .233)"
+    echo "  - List: 192.168.0.231, 192.168.0.232, 192.168.0.233"
+    echo ""
+
+    read -p "Enter $NUM_SERVERS server address(es): " SERVER_INPUT
+
+    # Parse and validate addresses
+    mapfile -t DNS_IPS < <(parse_ip_range "$SERVER_INPUT")
+
+    if [ ${#DNS_IPS[@]} -ne $NUM_SERVERS ]; then
+        error "Expected $NUM_SERVERS addresses, got ${#DNS_IPS[@]}"
+    fi
+
+    # Validate each IP
+    log "Validating IP addresses..."
+    for ip in "${DNS_IPS[@]}"; do
+        if ! validate_ip "$ip"; then
+            error "Invalid IP address: $ip"
+        fi
+        success "Valid: $ip"
+    done
+    echo ""
+
+    # Test SSH connectivity
+    header "Testing SSH Connectivity"
+    echo "Testing SSH access to servers (this may take a moment)..."
+    echo ""
+
+    local all_connected=true
+    for i in "${!DNS_IPS[@]}"; do
+        local dns_num=$((i + 1))
+        local server_name="dns$(printf "%02d" $dns_num)"
+        local ip=${DNS_IPS[$i]}
+
+        if test_ssh "$ip" "$SSH_USER"; then
+            success "SSH to $server_name ($ip): OK"
+        else
+            warning "SSH to $server_name ($ip): FAILED"
+            all_connected=false
+        fi
+    done
+    echo ""
+
+    if [ "$all_connected" = false ]; then
+        warning "Some servers are not accessible via SSH"
+        read -p "Continue anyway? [y/N]: " continue_anyway
+        if [[ ! $continue_anyway =~ ^[Yy]$ ]]; then
+            error "Setup cancelled"
+        fi
+    fi
+
+    # Show configuration summary
+    header "Configuration Summary"
+    echo "SSH User:         $SSH_USER"
+    echo "Number of Servers: $NUM_SERVERS"
+    echo ""
+    echo "Servers:"
+    for i in "${!DNS_IPS[@]}"; do
+        local dns_num=$((i + 1))
+        local server_name="dns$(printf "%02d" $dns_num)"
+        local priority=$((150 - (i * 10)))
+        local state="MASTER"
+        if [ $i -gt 0 ]; then
+            state="BACKUP"
+        fi
+        printf "  %s (%s): %s [priority: %d]\n" "$server_name" "${DNS_IPS[$i]}" "$state" "$priority"
+    done
+    echo ""
+
+    # Confirm before generating
+    read -p "Proceed with configuration generation? [y/N]: " confirm
+    if [[ ! $confirm =~ ^[Yy]$ ]]; then
+        error "Setup cancelled"
+    fi
+
+    # Generate configurations
+    header "Generating Configurations"
+
+    generate_inventory "$SSH_USER" "${DNS_IPS[@]}"
+    generate_keepalived_playbook "$NUM_SERVERS" "${DNS_IPS[@]}"
+    update_zones_config "$NUM_SERVERS" "${DNS_IPS[@]}"
+
+    echo ""
+    header "Setup Complete! ✓"
+
+    echo "Configuration files generated:"
+    echo "  ✓ ansible/inventory.ini"
+    echo "  ✓ ansible/dnsmasq-setup.yml"
+    echo "  ✓ zones.json (updated)"
+    echo ""
+    echo "Next steps:"
+    echo ""
+    echo "1. Review the generated files:"
+    echo "   cat ansible/inventory.ini"
+    echo "   cat ansible/dnsmasq-setup.yml"
+    echo ""
+    echo "2. Deploy with Ansible:"
+    echo "   cd ansible"
+    echo "   ansible-playbook -i inventory.ini dnsmasq-setup.yml"
+    echo ""
+    echo "3. Or use the deployment script:"
+    echo "   cd .."
+    echo "   ./deploy-keepalived.sh all"
+    echo ""
+    echo "4. Verify deployment:"
+    echo "   curl http://localhost:5000/api/status"
+    echo ""
+}
+
+# Run setup
+main "$@"
