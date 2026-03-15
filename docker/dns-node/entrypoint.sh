@@ -156,13 +156,13 @@ echo "[*] Starting services..."
 SSH_PID=$!
 echo "[+] SSH started (PID: $SSH_PID)"
 
-# Start dnsmasq
-/usr/sbin/dnsmasq --no-daemon &
+# Start dnsmasq (daemon mode since we'll background it)
+/usr/sbin/dnsmasq -C /etc/dnsmasq.conf &
 DNSMASQ_PID=$!
 echo "[+] dnsmasq started (PID: $DNSMASQ_PID)"
 
 # Give dnsmasq time to start
-sleep 1
+sleep 2
 
 # Start keepalived in foreground (keeps container alive)
 echo "[+] Starting keepalived (${KEEPALIVED_STATE}, priority ${KEEPALIVED_PRIORITY})..."
