@@ -245,6 +245,19 @@ else
 fi
 
 # ============================================================================
+# WireGuard Setup (if config present from previous deploy)
+# ============================================================================
+
+if [ -f /etc/wireguard/wg0.conf ]; then
+    echo "[*] WireGuard config found, starting wg0..."
+    wg-quick up wg0 2>/dev/null && \
+        echo "[+] WireGuard started ($(ip -4 addr show wg0 2>/dev/null | awk '/inet/{print $2}'))" || \
+        echo "[!] WireGuard failed to start (check config)"
+else
+    echo "[*] No WireGuard config found (deploy via dnsmasq-ui to enable)"
+fi
+
+# ============================================================================
 # Start Services
 # ============================================================================
 

@@ -124,7 +124,7 @@
     "keepalive_vip": "192.168.0.252",
     "keepalive_interval": 300,
     "wireguard": {
-      "enabled": false,
+      "enabled": true,
       "mesh_subnet": "10.99.0.0/24",
       "listen_port": 51820,
       "persistent_keepalive": 25

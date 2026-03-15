@@ -677,13 +677,11 @@ class ZoneManager:
 
             # SSH commands: install, create dirs, deploy config, set permissions, enable
             commands = ";".join([
-                "sudo apt-get update -qq 2>/dev/null",
-                "sudo apt-get install -y wireguard-tools 2>/dev/null",
                 "sudo mkdir -p /etc/wireguard && sudo chmod 0700 /etc/wireguard",
                 f"echo '{config_b64}' | base64 -d | sudo tee /etc/wireguard/wg0.conf > /dev/null",
                 "sudo chmod 0600 /etc/wireguard/wg0.conf",
-                "sudo systemctl enable wg-quick@wg0 2>/dev/null",
-                "sudo systemctl restart wg-quick@wg0"
+                "sudo wg-quick down wg0 2>/dev/null || true",
+                "sudo wg-quick up wg0"
             ])
 
             ssh = paramiko.SSHClient()
@@ -729,7 +727,7 @@ class ZoneManager:
             # SSH commands
             commands = ";".join([
                 f"echo '{config_b64}' | base64 -d | sudo tee /etc/dnsmasq.d/wireguard.conf > /dev/null",
-                "sudo systemctl restart dnsmasq"
+                "sudo pkill -HUP dnsmasq 2>/dev/null || (sudo pkill dnsmasq 2>/dev/null; sleep 1; sudo /usr/sbin/dnsmasq -C /etc/dnsmasq.conf)"
             ])
 
             ssh = paramiko.SSHClient()
