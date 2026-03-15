@@ -50,10 +50,32 @@ else
     SSH_PUBLIC_KEY="ssh-rsa AAAA... (insert your public key here)"
 fi
 
-# Extract server names and IPs from inventory.ini
+# Extract server names and IPs from inventory.ini and IPv6 from zones.json
 declare -A SERVERS
 declare -A SERVER_IPS
 declare -A MACS
+declare -A SERVER_IPV6S
+
+# Load server IPv6 addresses from zones.json
+python3 << 'PYEOF' > /tmp/server_ipv6s.txt
+import json
+try:
+    with open('$SCRIPT_DIR/zones.json', 'r') as f:
+        config = json.load(f)
+        servers = config.get('servers', {})
+        for server_name, server_info in servers.items():
+            if 'ipv6' in server_info:
+                print(f"{server_name}={server_info['ipv6']}")
+except:
+    pass
+PYEOF
+
+while IFS='=' read -r server_name ipv6; do
+    if [ -n "$server_name" ] && [ -n "$ipv6" ]; then
+        SERVER_IPV6S["$server_name"]="$ipv6"
+    fi
+done < /tmp/server_ipv6s.txt
+rm -f /tmp/server_ipv6s.txt
 
 while IFS= read -r line; do
     if [[ $line =~ ^(dns[0-9]+)[[:space:]]+ansible_host=([0-9.]+) ]]; then
@@ -71,6 +93,7 @@ done < "$SCRIPT_DIR/ansible/inventory.ini"
 
 # Detect network type and gateway from zones.json
 GATEWAY=$(python3 -c "import json; print(json.load(open('$SCRIPT_DIR/zones.json')).get('global', {}).get('gateway', '192.168.0.1'))" 2>/dev/null || echo "192.168.0.1")
+SUBNET_CIDR=$(python3 -c "import json; print(json.load(open('$SCRIPT_DIR/zones.json')).get('global', {}).get('subnet_cidr', '/24'))" 2>/dev/null || echo "/24")
 
 # Generate cloud-init for each server
 for SERVER_NAME in "${!SERVERS[@]}"; do
@@ -105,8 +128,18 @@ for SERVER_NAME in "${!SERVERS[@]}"; do
         # Static mode
         cat "$SCRIPT_DIR/cloud-init/network-config-static.template" > "$NETWORK_CONFIG_FILE"
         sed -i "s|__IP_ADDRESS__|$SERVER_IP|g" "$NETWORK_CONFIG_FILE"
+        sed -i "s|__SUBNET_CIDR__|$SUBNET_CIDR|g" "$NETWORK_CONFIG_FILE"
         sed -i "s|__GATEWAY__|$GATEWAY|g" "$NETWORK_CONFIG_FILE"
-        success "Generated: $NETWORK_CONFIG_FILE (Static IP)"
+
+        # Handle IPv6 address
+        if [ -n "${SERVER_IPV6S[$SERVER_NAME]}" ]; then
+            sed -i "s|__IPV6_ADDRESS__|${SERVER_IPV6S[$SERVER_NAME]}|g" "$NETWORK_CONFIG_FILE"
+            success "Generated: $NETWORK_CONFIG_FILE (Static IP + IPv6)"
+        else
+            # Remove IPv6 address line if not provided
+            sed -i '/^      - __IPV6_ADDRESS__$/d' "$NETWORK_CONFIG_FILE"
+            success "Generated: $NETWORK_CONFIG_FILE (Static IP)"
+        fi
     fi
 done
 

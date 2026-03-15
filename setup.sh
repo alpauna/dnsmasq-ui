@@ -349,37 +349,61 @@ EOF
 update_zones_config() {
     local zones_file="$SCRIPT_DIR/zones.json"
     local num_servers=$1
-    shift
+    local keepalive_vip=$2
+    local gateway_ip=$3
+    local subnet_cidr=$4
+    shift 4
     local ips=("$@")
 
     log "Updating zones.json with server configuration..."
 
-    # Create JSON servers object
-    local servers_json="{"
-    for i in "${!ips[@]}"; do
-        local dns_num=$((i + 1))
-        local server_name="dns$(printf "%02d" $dns_num)"
-        servers_json+="\"${server_name}\": {\"ip\": \"${ips[$i]}\", \"hostname\": \"${server_name}\", \"port\": 22, \"enabled\": true}"
-        if [ $i -lt $((${#ips[@]} - 1)) ]; then
-            servers_json+=", "
-        fi
-    done
-    servers_json+="}"
-
     # Use Python to update JSON while preserving structure
     python3 << PYEOF
 import json
+import sys
 
-with open('$zones_file', 'r') as f:
+zones_file = '$zones_file'
+num_servers = $num_servers
+ips = [${ips[@]/#/\"}]  # Quote each IP
+ipv6s = [${DNS_IPV6S[@]/#/\"}]  # Quote each IPv6
+
+with open(zones_file, 'r') as f:
     config = json.load(f)
 
-# Update servers with new configuration
-config['servers'] = json.loads($servers_json)
+# Build servers dict
+servers = {}
+for i in range(num_servers):
+    dns_num = i + 1
+    server_name = f"dns{dns_num:02d}"
+    servers[server_name] = {
+        "ip": ips[i].strip('\"'),
+        "hostname": server_name,
+        "port": 22,
+        "enabled": True
+    }
+    # Add IPv6 if available and not empty
+    if i < len(ipv6s):
+        ipv6 = ipv6s[i].strip('\"')
+        if ipv6:
+            servers[server_name]["ipv6"] = ipv6
 
-with open('$zones_file', 'w') as f:
+# Update servers with new configuration
+config['servers'] = servers
+
+# Update global settings
+if 'global' not in config:
+    config['global'] = {}
+
+config['global']['keepalived_vip'] = '$keepalive_vip'
+if '$gateway_ip':
+    config['global']['gateway'] = '$gateway_ip'
+if '$subnet_cidr':
+    config['global']['subnet_cidr'] = '$subnet_cidr'
+
+with open(zones_file, 'w') as f:
     json.dump(config, f, indent=2)
 
-print(f"Updated zones.json with {len(config['servers'])} servers")
+print(f"Updated zones.json with {num_servers} servers")
 PYEOF
 
     success "zones.json updated with $num_servers servers"
@@ -571,6 +595,30 @@ main() {
         done
         echo ""
 
+        # Optional IPv6 addresses
+        header "IPv6 Addresses (Optional)"
+        echo "Enter IPv6 addresses for each server (optional - leave blank to skip)."
+        echo "Format: 2001:db8::1/64, fe80::1/10, etc."
+        echo ""
+
+        declare -a DNS_IPV6S
+        for i in "${!DNS_IPS[@]}"; do
+            local dns_num=$((i + 1))
+            read -p "DNS$dns_num IPv6 address (optional): " ipv6
+            if [ -n "$ipv6" ]; then
+                # Basic IPv6 validation - just check for colons and hex
+                if [[ $ipv6 =~ ^[0-9a-fA-F:]+(/[0-9]+)?$ ]]; then
+                    DNS_IPV6S+=("$ipv6")
+                    success "Valid IPv6: $ipv6"
+                else
+                    error "Invalid IPv6 address format: $ipv6"
+                fi
+            else
+                DNS_IPV6S+=("")
+            fi
+        done
+        echo ""
+
         # Get keepalived VIP
         header "Keepalived Virtual IP (VIP)"
         echo "The VIP is a shared IP address used for failover."
@@ -585,6 +633,38 @@ main() {
         fi
         log "Using VIP: $KEEPALIVE_VIP"
         echo ""
+
+        # Get gateway and subnet only for non-Docker deployments
+        if [ "$DOCKER_MODE" != "true" ]; then
+            # Get gateway address
+            header "Network Gateway"
+            echo "Enter the default gateway for the network (used in cloud-init configurations)."
+            echo ""
+            read -p "Gateway address [192.168.0.1]: " GATEWAY_IP
+            GATEWAY_IP=${GATEWAY_IP:-192.168.0.1}
+
+            if ! validate_ip "$GATEWAY_IP"; then
+                error "Invalid gateway address: $GATEWAY_IP"
+            fi
+            log "Using gateway: $GATEWAY_IP"
+            echo ""
+
+            # Get subnet/CIDR
+            header "Network Subnet"
+            echo "Enter the subnet CIDR notation (e.g., /24 for 255.255.255.0, /23 for 255.255.254.0)."
+            echo "This is used in cloud-init configurations for static IP addresses."
+            echo ""
+            read -p "Subnet/CIDR [/24]: " SUBNET_CIDR
+            SUBNET_CIDR=${SUBNET_CIDR:-/24}
+
+            # Validate CIDR notation
+            if ! [[ "$SUBNET_CIDR" =~ ^/[0-9]+$ ]]; then
+                error "Invalid subnet notation. Use format like /24, /23, /22, etc."
+            fi
+
+            log "Using subnet: $SUBNET_CIDR"
+            echo ""
+        fi
 
         # Test SSH connectivity
         header "Testing SSH Connectivity"
@@ -628,6 +708,10 @@ main() {
         done
     fi
     echo "Keepalived VIP:   $KEEPALIVE_VIP"
+    if [ "$DOCKER_MODE" != "true" ]; then
+        echo "Gateway:          $GATEWAY_IP"
+        echo "Subnet/CIDR:      $SUBNET_CIDR"
+    fi
     echo ""
     echo "Servers:"
     for i in "${!DNS_IPS[@]}"; do
@@ -658,8 +742,10 @@ main() {
     generate_inventory "$SSH_USER" "${DNS_IPS[@]}"
     if [ "$DOCKER_MODE" != "true" ]; then
         generate_keepalived_playbook "$NUM_SERVERS" "$KEEPALIVE_VIP" "${DNS_IPS[@]}"
+        update_zones_config "$NUM_SERVERS" "$KEEPALIVE_VIP" "$GATEWAY_IP" "$SUBNET_CIDR" "${DNS_IPV6S[@]}" "${DNS_IPS[@]}"
+    else
+        update_zones_config "$NUM_SERVERS" "$KEEPALIVE_VIP" "" "" "${DNS_IPS[@]}"
     fi
-    update_zones_config "$NUM_SERVERS" "${DNS_IPS[@]}"
 
     if [ "$DOCKER_MODE" = "true" ]; then
         # Generate Docker Compose
