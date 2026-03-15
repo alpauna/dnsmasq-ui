@@ -119,7 +119,7 @@ SSH_PID=$!
 echo "[+] SSH started (PID: $SSH_PID)"
 
 # Start dnsmasq
-/usr/sbin/dnsmasq --no-daemon --no-fork --log-facility=- &
+/usr/sbin/dnsmasq --no-daemon &
 DNSMASQ_PID=$!
 echo "[+] dnsmasq started (PID: $DNSMASQ_PID)"
 
