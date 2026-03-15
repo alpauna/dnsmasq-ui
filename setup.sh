@@ -235,7 +235,7 @@ generate_keepalived_playbook() {
           address=/dns02.ad.alshowto.com/192.168.0.232
           address=/dns03.ad.alshowto.com/192.168.0.233
           address=/mfc-printer.ad.alshowto.com/192.168.0.70
-          address=/middle-01.ad.alshowto.com/192.168.0.250
+          address=/middle-01.ad.alshowto.com/192.168.0.252
 
           cname=esphome.ad.alshowto.com,middle-01.ad.alshowto.com
           cname=frigate.ad.alshowto.com,middle-01.ad.alshowto.com
@@ -658,8 +658,8 @@ main() {
         echo "It will be assigned to the MASTER server and move to a BACKUP if the MASTER fails."
         echo "Both DNS (port 53) and the UI (port 5000) will use this VIP."
         echo ""
-        read -p "VIP address [192.168.0.250]: " KEEPALIVE_VIP
-        KEEPALIVE_VIP=${KEEPALIVE_VIP:-192.168.0.250}
+        read -p "VIP address [192.168.0.252]: " KEEPALIVE_VIP
+        KEEPALIVE_VIP=${KEEPALIVE_VIP:-192.168.0.252}
 
         if ! validate_ip "$KEEPALIVE_VIP"; then
             error "Invalid VIP address: $KEEPALIVE_VIP"
@@ -840,7 +840,7 @@ main() {
         echo "   ./generate-cloud-init.sh"
         echo ""
         echo "5. Verify deployment:"
-        echo "   curl http://192.168.0.250:5000/api/status"
+        echo "   curl http://192.168.0.252:5000/api/status"
         echo ""
     fi
 }

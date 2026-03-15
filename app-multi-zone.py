@@ -76,7 +76,7 @@ class ZoneManager:
                 'servers': {},
                 'global': {
                     'upstream_dns': ['1.1.1.1', '8.8.8.8'],
-                    'keepalive_vip': '192.168.0.250',
+                    'keepalive_vip': '192.168.0.252',
                     'keepalive_interval': 300
                 }
             }

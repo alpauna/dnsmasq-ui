@@ -9,7 +9,7 @@
     glusterfs_brick_path: /data/glusterfs
     glusterfs_mount_path: /opt/dnsmasq-ui-data
     ui_docker_path: /opt/dnsmasq-ui
-    keepalive_vip: "{{ keepalive_vip | default('192.168.0.250') }}"
+    keepalive_vip: "{{ keepalive_vip | default('192.168.0.252') }}"
 
   tasks:
     # =====================================================================

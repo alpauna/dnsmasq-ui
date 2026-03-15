@@ -42,7 +42,7 @@
         {
           "domain": "middle-01.ad.alshowto.com",
           "type": "A",
-          "value": "192.168.0.250"
+          "value": "192.168.0.252"
         },
         {
           "domain": "esphome.ad.alshowto.com",
@@ -121,7 +121,7 @@
       "1.1.1.1",
       "8.8.8.8"
     ],
-    "keepalive_vip": "192.168.0.250",
+    "keepalive_vip": "192.168.0.252",
     "keepalive_interval": 300,
     "wireguard": {
       "enabled": false,

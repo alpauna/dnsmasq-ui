@@ -8,7 +8,7 @@
     dnsmasq_config_dir: /etc/dnsmasq.d
     dnsmasq_records_file: "{{ dnsmasq_config_dir }}/local-records.conf"
     monitoring_script: /usr/local/bin/dnsmasq-monitor.sh
-    keepalive_vip: 192.168.0.250
+    keepalive_vip: 192.168.0.252
 
   tasks:
     - name: Install dnsmasq, keepalived, and dependencies
@@ -96,7 +96,7 @@
           address=/dns02.ad.alshowto.com/192.168.0.232
           address=/dns03.ad.alshowto.com/192.168.0.233
           address=/mfc-printer.ad.alshowto.com/192.168.0.70
-          address=/middle-01.ad.alshowto.com/192.168.0.250
+          address=/middle-01.ad.alshowto.com/192.168.0.252
 
           cname=esphome.ad.alshowto.com,middle-01.ad.alshowto.com
           cname=frigate.ad.alshowto.com,middle-01.ad.alshowto.com
