@@ -2,13 +2,12 @@
 # DNS Stress Test Script
 # Tests DNS performance and reliability under load
 
-set -e
-
 # Configuration
 VIP="192.168.0.250"
 DNS_QUERIES=100
 CONCURRENT_THREADS=10
 TIMEOUT=5
+TEMP_DIR="/tmp/dns-stress-$$"
 
 # Test domains from dnsmasq config
 TEST_DOMAINS=(
@@ -17,6 +16,10 @@ TEST_DOMAINS=(
     "dns03.ad.alshowto.com"
     "middle-01.ad.alshowto.com"
 )
+
+# Cleanup on exit
+trap "rm -rf $TEMP_DIR" EXIT
+mkdir -p $TEMP_DIR
 
 # Colors for output
 RED='\033[0;31m'
@@ -151,35 +154,6 @@ test_domain_query() {
     fi
 }
 
-# Run queries with concurrent threads
-run_concurrent_queries() {
-    local domain=$1
-    local max_pid=0
-
-    log "Testing domain: $domain (${DNS_QUERIES} queries, ${CONCURRENT_THREADS} threads)"
-
-    for ((i=1; i<=DNS_QUERIES; i++)); do
-        # Manage concurrent threads
-        while [ $(jobs -r -p | wc -l) -ge $CONCURRENT_THREADS ]; do
-            sleep 0.01
-        done
-
-        # Run query in background
-        (
-            test_domain_query "$domain" $i
-        ) &
-
-        # Track progress every 10 queries
-        if [ $((i % 10)) -eq 0 ]; then
-            printf "  Progress: %d/%d queries sent\r" $i $DNS_QUERIES
-        fi
-    done
-
-    # Wait for all background jobs to finish
-    wait
-    printf "  Progress: %d/%d queries completed\n" $DNS_QUERIES $DNS_QUERIES
-}
-
 # Run tests for each domain
 echo "Starting queries..."
 echo ""
@@ -193,8 +167,9 @@ for domain in "${TEST_DOMAINS[@]}"; do
     failed_count=0
     timeout_count=0
 
-    log "Testing domain: $domain"
+    log "Testing domain: $domain (${DNS_QUERIES} queries)"
 
+    # Run queries sequentially (simpler, more reliable)
     for ((i=1; i<=DNS_QUERIES; i++)); do
         result=$(test_domain_query "$domain" $i 2>&1)
         status=$?
@@ -216,8 +191,8 @@ for domain in "${TEST_DOMAINS[@]}"; do
 
         ((TOTAL_QUERIES++))
 
-        # Show progress
-        if [ $((i % 25)) -eq 0 ]; then
+        # Show progress every 10 queries
+        if [ $((i % 10)) -eq 0 ]; then
             printf "  Progress: %d/%d (✓:%d ✗:%d ⏱:%d)\r" $i $DNS_QUERIES $success_count $failed_count $timeout_count
         fi
     done
