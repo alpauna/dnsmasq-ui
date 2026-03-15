@@ -14,6 +14,8 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 - 🔑 **Password-based SSH Auth**: Initial setup with user passwords, fallback to key auth
 - 🔀 **Reverse Proxy Support**: X-Forwarded headers for deployment behind nginx/Traefik/HAProxy
 - 📋 **Configuration Dashboard**: Manage SSH keys and server settings from web UI
+- 🔀 **Flexible Zone View**: Toggle between card and grid layouts with smart recommendations
+- 💾 **Backup & Restore**: Export/import complete DNS configuration with auto-deployment
 
 ## Architecture
 
@@ -311,6 +313,13 @@ curl -F "backup_file=@backup.json" \
 - Edit and delete existing records
 - Inline record editing with save functionality
 - Deploy changes across all servers with one click
+- **Card/Grid View Toggle**: Switch between card and grid layouts
+  - Card view: Multi-column layout (default for ≤3 zones)
+  - Grid view: Full-width list layout (recommended for >3 zones)
+  - Zone record preview showing first 3 records per zone
+  - "+X more records" indicator for zones with many records
+  - View preference saved in browser (persists across sessions)
+  - Smart recommendation to switch to grid view when zones > 3
 
 ### Configuration Page
 The configuration page (`/config`) provides SSH key and server management:
@@ -507,6 +516,56 @@ Backups are standard JSON files with the following structure:
 
 This makes backups compatible with version control systems (git) and easy to edit manually if needed.
 
+## Zone View Modes
+
+The dashboard supports flexible viewing of DNS zones to accommodate varying numbers of zones.
+
+### Card View (Default for ≤3 zones)
+- **Multi-column** card layout
+- **Best for**: Small number of zones (1-3)
+- **Features**:
+  - Compact display of zone information
+  - Record preview showing first 3 records
+  - Zone type badge
+  - Quick access to manage/delete buttons
+
+### Grid View (Recommended for >3 zones)
+- **Full-width** list layout
+- **Best for**: Many zones (4+)
+- **Features**:
+  - Better vertical organization
+  - Scrollable interface
+  - More readable on smaller screens
+  - All zone info visible at once
+
+### Smart Features
+
+**Auto-Recommendation:**
+- When zones > 3, dashboard recommends grid view
+- Shows tip notification with quick switch button
+- You can dismiss and use preferred view
+
+**View Persistence:**
+- Selected view mode is saved in browser
+- Preference persists across sessions
+- Toggle buttons at top-right of zones section
+- Both views show identical zone information
+
+**Record Preview:**
+- First 3 records displayed inline
+- Record type shown with colored badge (A, AAAA, CNAME)
+- "+X more records" indicator for zones with 4+ records
+- No need to click through to see zone contents
+
+### Switching Views
+
+Toggle buttons are located at the top-right of the "DNS Zones" section:
+```
+View: [📦 Card] [📋 Grid]
+```
+
+Click to switch instantly between views. Your preference is automatically saved!
+
 ## Troubleshooting
 
 ### DNS not resolving
@@ -578,6 +637,8 @@ MIT
 - [x] Configuration dashboard
 - [x] Backup & Restore functionality
 - [x] Restore & auto-deploy to servers
+- [x] Card/Grid view toggle for DNS zones
+- [x] Zone record preview in dashboard
 
 ### Planned 📋
 - [ ] Zone file import/export
