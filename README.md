@@ -19,6 +19,7 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 - **🚀 HA UI Deployment**: Run dnsmasq-ui on all servers with GlusterFS shared storage for automatic failover
 - **📁 GlusterFS Replication**: zones.json automatically replicated across all servers (replica-3)
 - **⚡ Single VIP**: Same keepalived VIP serves both DNS (port 53) and UI (port 5000)
+- **🔗 WireGuard Mesh**: Full-mesh encrypted network for secure cross-cluster DNS synchronization (v2.2+)
 
 ## Architecture
 
@@ -386,10 +387,85 @@ export DNSMASQ_RECORDS_FILE=/etc/dnsmasq.d/local-records.conf  # dnsmasq output 
 export SSH_KEY=~/.ssh/id_rsa                            # Private key for SSH auth
 export SSH_USER=debian                                   # SSH username for servers
 
+# WireGuard Configuration
+export WG_KEYS_FILE=wireguard-keys.json                # Private keys file (gitignored)
+
 # Reverse Proxy Support
 export PROXY_PATH_PREFIX=/dnsmasq-ui                    # URL path prefix (optional)
 export TRUSTED_PROXIES=*                                # Trusted proxy IPs (or '*' for all)
 ```
+
+### WireGuard Mesh Network
+
+Enable encrypted full-mesh networking between DNS servers for secure cross-cluster communication and automatic DNS synchronization in disconnected networks.
+
+#### Configuration in zones.json
+
+Per-server WireGuard configuration (public keys only):
+```json
+{
+  "servers": {
+    "dns01": {
+      "ip": "192.168.0.231",
+      "wireguard": {
+        "public_key": "BASE64-ENCODED-PUBLIC-KEY",
+        "tunnel_ip": "10.99.0.1/24",
+        "listen_port": 51820,
+        "generated": "2026-03-15T00:00:00"
+      }
+    }
+  },
+  "global": {
+    "wireguard": {
+      "enabled": false,
+      "mesh_subnet": "10.99.0.0/24",
+      "listen_port": 51820,
+      "persistent_keepalive": 25
+    }
+  }
+}
+```
+
+**Key Security Points:**
+- Private keys stored in gitignored `wireguard-keys.json` (0600 permissions, never in version control)
+- Public keys distributed via zones.json (safe to commit)
+- Enable WireGuard by setting `global.wireguard.enabled: true`
+- Each node automatically gets a tunnel IP (10.99.0.1, 10.99.0.2, etc.)
+
+#### Workflow
+
+```bash
+# 1. Generate WireGuard keypairs for all servers
+curl -X POST http://localhost:5000/api/wireguard/generate-keys
+
+# 2. Validate configuration
+curl http://localhost:5000/api/wireguard/validate
+
+# 3. Preview WireGuard config for a server
+curl http://localhost:5000/api/wireguard/config/dns01
+
+# 4. Deploy mesh to all servers
+curl -X POST http://localhost:5000/api/wireguard/deploy
+
+# 5. Check mesh health
+curl http://localhost:5000/api/wireguard/status
+```
+
+#### What Happens After Deployment
+
+- Each node installs `wireguard-tools` and runs `wg-quick up wg0`
+- dnsmasq listens on `wg0` interface (in addition to physical interfaces)
+- Full-mesh topology: each node peers with all others
+- All DNS queries can traverse encrypted tunnels
+- Keepalived VIP works alongside WireGuard (separate networks)
+- Health checks monitor peer connectivity and interface status
+
+#### Use Cases
+
+- **Disconnected Networks**: DNS servers in isolated subnets can sync via WireGuard tunnel
+- **Security**: Encrypt DNS traffic between internal servers
+- **Multi-Site Clusters**: Connect DNS servers across different networks or datacenters
+- **VPN Integration**: Integrate with existing WireGuard infrastructure
 
 ### Reverse Proxy Configuration
 
@@ -604,6 +680,49 @@ curl -F "backup_file=@backup.json" \
 # Restore configuration and deploy to all servers
 curl -F "backup_file=@backup.json" \
   http://localhost:5000/api/config/restore-and-deploy
+```
+
+### WireGuard Mesh Management
+
+```bash
+# Generate WireGuard keypairs for all servers
+curl -X POST http://localhost:5000/api/wireguard/generate-keys
+
+# Generate with key rotation (overwrite existing keys)
+curl -X POST http://localhost:5000/api/wireguard/generate-keys \
+  -H "Content-Type: application/json" \
+  -d '{"overwrite": true}'
+
+# Validate WireGuard configuration
+curl http://localhost:5000/api/wireguard/validate
+
+# Get WireGuard wg0.conf preview for a server
+curl http://localhost:5000/api/wireguard/config/dns01
+
+# Deploy WireGuard mesh to all enabled servers
+curl -X POST http://localhost:5000/api/wireguard/deploy
+
+# Deploy to single server
+curl -X POST http://localhost:5000/api/wireguard/deploy/dns01
+
+# Check WireGuard mesh status (peers, handshakes, IPs)
+curl http://localhost:5000/api/wireguard/status
+
+# Response example:
+# {
+#   "dns01": {
+#     "wg0_up": true,
+#     "peers_connected": 2,
+#     "interface_ip": "10.99.0.1/24",
+#     "error": ""
+#   },
+#   "dns02": {
+#     "wg0_up": true,
+#     "peers_connected": 2,
+#     "interface_ip": "10.99.0.2/24",
+#     "error": ""
+#   }
+# }
 ```
 
 ## Supported Record Types
@@ -1038,6 +1157,7 @@ MIT
 - [x] Single VIP for both DNS and UI
 - [x] Automatic UI failover with keepalived health checks
 - [x] Configurable VIP address in setup script
+- [x] WireGuard mesh networking (v2.2) - full-mesh encrypted inter-node communication
 
 ### Planned 📋
 - [ ] Zone file import/export
@@ -1054,7 +1174,14 @@ MIT
 
 ---
 
-**Status**: Production Ready (v2.1+)
-**Last Updated**: 2026-03-14
-**Latest Version**: v2.1+ - HA UI deployment with GlusterFS, Docker on all servers, single VIP failover
+**Status**: Production Ready (v2.2+)
+**Last Updated**: 2026-03-15
+**Latest Version**: v2.2 - WireGuard mesh networking, HA UI with GlusterFS, single VIP failover
 **Repository**: https://github.com/alpauna/dnsmasq-ui
+
+### What's New in v2.2
+- ✨ **WireGuard Full-Mesh**: Encrypted inter-node communication for disconnected networks
+- 🔐 **Secure Key Management**: Private keys in gitignored file, public keys in zones.json
+- 🚀 **Fleet-wide Deployment**: Deploy mesh to all servers or individual nodes via API
+- 📊 **Mesh Health Monitoring**: Check peer connectivity and tunnel status
+- 🔗 **Dual Network Support**: Keepalived VIP + WireGuard tunnels work together seamlessly

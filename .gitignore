@@ -37,6 +37,11 @@ ENV/
 .env
 .env.local
 
+# Secrets (WireGuard keys, credentials)
+wireguard-keys.json
+wireguard-keys.json.bak
+servers.json
+
 # Logs
 *.log
 logs/

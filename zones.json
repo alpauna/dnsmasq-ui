@@ -83,19 +83,37 @@
       "ip": "192.168.0.231",
       "hostname": "dns01",
       "port": 22,
-      "enabled": true
+      "enabled": true,
+      "wireguard": {
+        "public_key": null,
+        "tunnel_ip": "10.99.0.1",
+        "listen_port": 51820,
+        "generated": null
+      }
     },
     "dns02": {
       "ip": "192.168.0.232",
       "hostname": "dns02",
       "port": 22,
-      "enabled": true
+      "enabled": true,
+      "wireguard": {
+        "public_key": null,
+        "tunnel_ip": "10.99.0.2",
+        "listen_port": 51820,
+        "generated": null
+      }
     },
     "dns03": {
       "ip": "192.168.0.233",
       "hostname": "dns03",
       "port": 22,
-      "enabled": true
+      "enabled": true,
+      "wireguard": {
+        "public_key": null,
+        "tunnel_ip": "10.99.0.3",
+        "listen_port": 51820,
+        "generated": null
+      }
     }
   },
   "global": {
@@ -104,6 +122,12 @@
       "8.8.8.8"
     ],
     "keepalive_vip": "192.168.0.250",
-    "keepalive_interval": 300
+    "keepalive_interval": 300,
+    "wireguard": {
+      "enabled": false,
+      "mesh_subnet": "10.99.0.0/24",
+      "listen_port": 51820,
+      "persistent_keepalive": 25
+    }
   }
 }

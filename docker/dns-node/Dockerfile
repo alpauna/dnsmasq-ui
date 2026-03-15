@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     iputils-ping \
     dnsutils \
     sudo \
+    wireguard-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Create SSH directories
