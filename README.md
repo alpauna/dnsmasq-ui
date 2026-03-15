@@ -193,9 +193,19 @@ ansible-playbook -i inventory.ini dnsmasq-setup.yml --extra-vars "verify=true"
 - Disables systemd-resolved to avoid conflicts
 - Starts and enables dnsmasq service
 
-## Monitoring & Keepalive
+## Monitoring & Keepalived
 
-Each DNS server runs a health check every 5 minutes:
+### Real-Time Keepalived Status
+The dashboard displays keepalived status for each DNS server:
+
+- **MASTER** (green badge): Server is the active failover master with VIP assigned
+- **STANDBY** (orange badge): Keepalived is running but this is not the master
+- **INACTIVE** (gray badge): Keepalived service is not running
+
+Status updates automatically every 30 seconds via the `/api/status` endpoint.
+
+### Legacy Health Checks
+Each DNS server can run a health check every 5 minutes (if configured):
 
 ```bash
 # Check local status
@@ -206,6 +216,17 @@ tail -f /var/log/dnsmasq-monitor.log
 
 # Manual health check
 /usr/local/bin/dnsmasq-monitor.sh
+```
+
+### Keepalived Monitoring via SSH
+The application monitors keepalived status on each server via SSH:
+
+```bash
+# Manual status check from UI server
+ssh debian@192.168.0.231 sudo systemctl status keepalived
+
+# Check if VIP is active (only on MASTER)
+ssh debian@192.168.0.231 ip addr | grep 192.168.0.250
 ```
 
 ## API Reference
@@ -246,8 +267,25 @@ curl -X DELETE http://localhost:5000/api/zones/ad.alshowto.com/records/example.a
 # Deploy configuration to all servers
 curl -X POST http://localhost:5000/api/deploy
 
-# Check server status
+# Check server status (includes keepalived status)
 curl http://localhost:5000/api/status
+
+# Response example:
+# {
+#   "servers": {
+#     "dns01": {
+#       "ip": "192.168.0.231",
+#       "online": true,
+#       "dnsmasq": "active",
+#       "keepalived": {
+#         "running": true,
+#         "status": "MASTER",  // MASTER, STANDBY, or INACTIVE
+#         "vip": "192.168.0.250"
+#       }
+#     }
+#   },
+#   "vip": "192.168.0.250"
+# }
 ```
 
 ### SSH Key Management
@@ -302,6 +340,10 @@ curl -F "backup_file=@backup.json" \
 
 ### Dashboard
 - View all DNS servers and their status (online/offline indicators)
+- **Keepalived Status Display**: Real-time monitoring of keepalived failover state
+  - Shows MASTER (green), STANDBY (orange), or INACTIVE (gray) for each server
+  - Displays keepalived VIP address and active master server
+  - Auto-refreshes every 30 seconds
 - Zone overview with record counts
 - Quick health check overview
 - Navigate to zone management and configuration
@@ -639,6 +681,8 @@ MIT
 - [x] Restore & auto-deploy to servers
 - [x] Card/Grid view toggle for DNS zones
 - [x] Zone record preview in dashboard
+- [x] Keepalived status monitoring and display (MASTER/STANDBY/INACTIVE)
+- [x] VIP address display and active master indicator
 
 ### Planned 📋
 - [ ] Zone file import/export
@@ -655,7 +699,7 @@ MIT
 
 ---
 
-**Status**: Production Ready (v2.0)
+**Status**: Production Ready (v2.0+)
 **Last Updated**: 2026-03-15
-**Latest Version**: v2.0 - Multi-zone with SSH key management
+**Latest Version**: v2.0+ - Multi-zone with SSH key management and keepalived monitoring
 **Repository**: https://github.com/alpauna/dnsmasq-ui
