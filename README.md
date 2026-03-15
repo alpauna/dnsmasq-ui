@@ -60,6 +60,105 @@ python app.py
 # Access at http://localhost:5000
 ```
 
+## Interactive Setup
+
+The **setup.sh** script provides an interactive way to configure DNS clusters of any size with dynamic Ansible playbooks and keepalived configuration.
+
+### Features
+
+- ✅ **Flexible Server Configuration**: Support for 1 to unlimited DNS servers
+- ✅ **Three IP Input Formats**:
+  - Single IP: `192.168.0.231`
+  - IP Range: `192.168.0.231-233` (auto-expands)
+  - Comma-Separated: `192.168.0.231, 192.168.0.240`
+- ✅ **SSH Connectivity Testing**: Verifies access to all servers before generation
+- ✅ **Dynamic Keepalived Configuration**: Automatic priority assignment based on server count
+- ✅ **Auto-Generates**:
+  - `ansible/inventory.ini` (Ansible server definitions)
+  - `ansible/dnsmasq-setup.yml` (Dynamic playbook with keepalived)
+  - Updated `zones.json` (New server definitions)
+
+### Quick Setup
+
+```bash
+# Run interactive setup wizard
+./setup.sh
+
+# Follow the prompts:
+#   1. SSH user (default: debian)
+#   2. Number of servers (e.g., 3)
+#   3. Server addresses (e.g., 192.168.0.231-233)
+#   4. Confirm configuration
+
+# Deploy with Ansible
+cd ansible
+ansible-playbook -i inventory.ini dnsmasq-setup.yml
+
+# Or use the deployment script
+./deploy-keepalived.sh all
+```
+
+### Setup Examples
+
+**Example 1: 3-Server Cluster (High Availability)**
+```bash
+$ ./setup.sh
+SSH user: [debian] → (press enter)
+Number of servers: [3] → (press enter)
+Server addresses: 192.168.0.231-233
+
+Result:
+  ✓ dns01 (192.168.0.231): MASTER, priority 150
+  ✓ dns02 (192.168.0.232): BACKUP, priority 140
+  ✓ dns03 (192.168.0.233): BACKUP, priority 130
+```
+
+**Example 2: 5-Server Multi-Region Cluster**
+```bash
+$ ./setup.sh
+SSH user: ubuntu
+Number of servers: 5
+Server addresses: 10.0.1.100-102, 10.0.2.100-101
+
+Result:
+  ✓ dns01-dns03 in region 1
+  ✓ dns04-dns05 in region 2
+  ✓ Automatic cascade failover
+```
+
+**Example 3: Single Server (Development)**
+```bash
+$ ./setup.sh
+Number of servers: 1
+Server addresses: 192.168.1.100
+
+Result:
+  ✓ dns01: MASTER (no failover)
+```
+
+### Keepalived Priority System
+
+The setup script automatically assigns keepalived priorities:
+
+```
+Servers → Priority Assignment
+1       → 150 (MASTER only)
+2       → 150 (MASTER), 140 (BACKUP)
+3       → 150, 140, 130
+4       → 150, 140, 130, 120
+5       → 150, 140, 130, 120, 110
+```
+
+If the MASTER fails, the highest-priority BACKUP automatically takes over. When MASTER recovers, it automatically resumes control (preemption).
+
+### Additional Documentation
+
+See [SETUP_GUIDE.md](SETUP_GUIDE.md) for comprehensive setup documentation including:
+- Detailed input format examples
+- Troubleshooting guide
+- Advanced configuration options
+- Best practices for production deployments
+
 ## Configuration
 
 ### zones.json
@@ -166,9 +265,24 @@ location /dnsmasq-ui/ {
 }
 ```
 
-## Ansible Deployment
+## Deployment
 
-Deploy dnsmasq across all three servers:
+### Option 1: Interactive Setup (Recommended)
+
+Use the setup script to automatically generate Ansible configuration:
+
+```bash
+# Run interactive setup
+./setup.sh
+
+# Deploy with Ansible
+cd ansible
+ansible-playbook -i inventory.ini dnsmasq-setup.yml
+```
+
+### Option 2: Manual Ansible Deployment
+
+If you prefer to manually configure servers:
 
 ```bash
 # Install Ansible
@@ -180,9 +294,21 @@ vim inventory.ini  # Update IPs and SSH keys
 
 # Run playbook
 ansible-playbook -i inventory.ini dnsmasq-setup.yml
+```
 
-# Verify deployment
-ansible-playbook -i inventory.ini dnsmasq-setup.yml --extra-vars "verify=true"
+### Option 3: Deployment Script
+
+Use the quick deployment script without Ansible:
+
+```bash
+# Deploy to all servers
+./deploy-keepalived.sh all
+
+# Deploy to specific server
+./deploy-keepalived.sh dns01
+
+# View options
+./deploy-keepalived.sh --help
 ```
 
 ### Playbook Features
@@ -607,6 +733,79 @@ View: [📦 Card] [📋 Grid]
 ```
 
 Click to switch instantly between views. Your preference is automatically saved!
+
+## Comprehensive Testing
+
+A complete test suite is available in the `tests/` directory to validate your DNS cluster deployment.
+
+### DNS Stress Testing
+
+Test DNS performance and reliability under load:
+
+```bash
+cd tests
+
+# Default stress test (100 queries, 4 domains)
+./dns-stress-test.sh
+
+# High-load stress test (500 queries)
+./dns-stress-test.sh --queries 500
+
+# Test specific domain
+./dns-stress-test.sh --domain dns01.ad.alshowto.com
+
+# Show help
+./dns-stress-test.sh --help
+```
+
+**Expected Results:**
+- Success rate: 99%+ (excellent performance)
+- No timeouts or failures
+- All domains responding correctly
+
+### Keepalived Failover Testing
+
+Test automatic failover when master fails:
+
+```bash
+cd tests
+
+# Run complete failover test
+./run-all-tests.sh --failover
+
+# This will:
+# 1. Verify dns01 is MASTER with VIP
+# 2. Stop keepalived on dns01 (simulate failure)
+# 3. Confirm dns02 becomes MASTER
+# 4. Verify VIP moved to dns02
+# 5. Restart keepalived on dns01
+# 6. Confirm dns01 resumes MASTER role
+# 7. Verify DNS service continuity throughout
+```
+
+### Complete Test Suite
+
+Run all tests together:
+
+```bash
+cd tests
+./run-all-tests.sh
+
+# This runs:
+# - SSH connectivity checks
+# - DNS stress test (100 queries)
+# - Keepalived failover test
+# - Final cluster status report
+```
+
+### Testing Documentation
+
+See [tests/README.md](tests/README.md) for detailed testing documentation including:
+- Individual test descriptions
+- Usage examples for different scenarios
+- Expected results and pass criteria
+- Troubleshooting guide for test failures
+- Performance benchmarks
 
 ## Troubleshooting
 
