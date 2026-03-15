@@ -139,20 +139,39 @@ try:
     # Generate dnsmasq configuration from zones
     with open('/etc/dnsmasq.d/zones.conf', 'w') as out:
         if 'zones' in config:
-            for zone_name, zone_data in config['zones'].items():
-                if 'records' in zone_data:
-                    for record in zone_data['records']:
-                        domain = record.get('domain', '')
-                        record_type = record.get('type', 'A')
-                        value = record.get('value', '')
+            # Handle zones as a list (not a dict)
+            zones_list = config['zones']
+            if isinstance(zones_list, list):
+                for zone_data in zones_list:
+                    if 'records' in zone_data:
+                        for record in zone_data['records']:
+                            domain = record.get('domain', '')
+                            record_type = record.get('type', 'A')
+                            value = record.get('value', '')
 
-                        if domain and value:
-                            if record_type == 'A':
-                                out.write(f'address=/{domain}/{value}\n')
-                            elif record_type == 'AAAA':
-                                out.write(f'address=/{domain}/{value}\n')
-                            elif record_type == 'CNAME':
-                                out.write(f'cname={domain},{value}\n')
+                            if domain and value:
+                                if record_type == 'A':
+                                    out.write(f'address=/{domain}/{value}\n')
+                                elif record_type == 'AAAA':
+                                    out.write(f'address=/{domain}/{value}\n')
+                                elif record_type == 'CNAME':
+                                    out.write(f'cname={domain},{value}\n')
+            else:
+                # Fallback for dict-based zones (legacy)
+                for zone_name, zone_data in zones_list.items():
+                    if 'records' in zone_data:
+                        for record in zone_data['records']:
+                            domain = record.get('domain', '')
+                            record_type = record.get('type', 'A')
+                            value = record.get('value', '')
+
+                            if domain and value:
+                                if record_type == 'A':
+                                    out.write(f'address=/{domain}/{value}\n')
+                                elif record_type == 'AAAA':
+                                    out.write(f'address=/{domain}/{value}\n')
+                                elif record_type == 'CNAME':
+                                    out.write(f'cname={domain},{value}\n')
 
     print("[+] DNS records configured")
 except Exception as e:
