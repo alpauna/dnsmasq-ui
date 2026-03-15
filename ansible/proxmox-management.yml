@@ -1,0 +1,237 @@
+---
+# Proxmox Infrastructure Management Playbook
+# Manages Proxmox cluster nodes: configuration, monitoring, and maintenance
+
+- name: Proxmox Infrastructure Management
+  hosts: proxmox_nodes
+  gather_facts: yes
+  become: yes
+  vars:
+    # Proxmox version to verify
+    proxmox_min_version: "7.0"
+
+    # Network settings
+    network_bridge: "vmbr0"
+    network_vlan_aware: true
+
+    # Storage monitoring
+    storage_check_interval: 3600  # Check every hour
+    storage_warning_threshold: 80  # Warn at 80% usage
+    storage_critical_threshold: 90  # Alert at 90% usage
+
+    # Firewall settings
+    enable_cluster_firewall: false  # Set to true for production
+
+  tasks:
+    - name: "Cluster Status - Verify node is in cluster"
+      command: pvecm status
+      register: cluster_status
+      ignore_errors: yes
+      tags: [status, cluster]
+
+    - name: "Cluster Status - Display cluster info"
+      debug:
+        var: cluster_status.stdout_lines
+      tags: [status, cluster]
+      when: cluster_status.rc == 0
+
+    - name: "Node Info - Get node details"
+      command: pveversion
+      register: proxmox_version
+      tags: [status, info]
+
+    - name: "Node Info - Display version"
+      debug:
+        msg: "Proxmox Version: {{ proxmox_version.stdout }}"
+      tags: [status, info]
+
+    - name: "Storage - Check available storage"
+      command: pvesh get /storage --output-format=json
+      register: storage_info
+      tags: [storage, monitoring]
+
+    - name: "Storage - Check storage usage"
+      shell: |
+        df -BG /var/lib/vz | tail -1 | awk '{print "Total: " $2 " Used: " $3 " Available: " $4 " Usage: " int($3/$2*100) "%"}'
+      register: storage_usage
+      tags: [storage, monitoring]
+
+    - name: "Storage - Display usage"
+      debug:
+        msg: "{{ storage_usage.stdout }}"
+      tags: [storage, monitoring]
+
+    - name: "VMs - List all VMs on node"
+      command: pvesh get /nodes/{{ proxmox_node }}/qemu --output-format=json
+      register: vm_list
+      tags: [vms, status]
+
+    - name: "VMs - Show running VMs"
+      debug:
+        msg: "Running VMs: {{ vm_list.stdout | from_json | map(attribute='name') | list }}"
+      tags: [vms, status]
+      when: vm_list.rc == 0
+
+    - name: "Network - Check network interfaces"
+      command: ip addr show
+      register: network_info
+      tags: [network, status]
+
+    - name: "Network - Verify bridges are configured"
+      shell: |
+        ip link show | grep -E "^[0-9]+:" | grep -i bridge | wc -l
+      register: bridge_count
+      tags: [network, config]
+
+    - name: "Network - Display bridge information"
+      debug:
+        msg: "Found {{ bridge_count.stdout }} bridge interfaces"
+      tags: [network, config]
+
+    - name: "Services - Check core services status"
+      shell: |
+        echo "=== Proxmox Services Status ===" && \
+        systemctl status pvestatd --no-pager | head -5 && \
+        systemctl status pveproxy --no-pager | head -5 && \
+        systemctl status pvedaemon --no-pager | head -5
+      register: services_status
+      ignore_errors: yes
+      tags: [services, monitoring]
+
+    - name: "Services - Display status"
+      debug:
+        var: services_status.stdout_lines
+      tags: [services, monitoring]
+
+    - name: "HA - Check HA resources (if enabled)"
+      command: ha-manager status
+      register: ha_status
+      ignore_errors: yes
+      tags: [ha, status]
+
+    - name: "HA - Display HA status"
+      debug:
+        var: ha_status.stdout_lines
+      tags: [ha, status]
+      when: ha_status.rc == 0
+
+    - name: "Firewall - Get firewall status"
+      command: pf status
+      register: firewall_status
+      ignore_errors: yes
+      tags: [firewall, security]
+
+    - name: "Firewall - Display firewall rules count"
+      shell: |
+        pf rules | wc -l || echo "Firewall rules: N/A"
+      register: firewall_rules
+      ignore_errors: yes
+      tags: [firewall, security]
+
+    - name: "Firewall - Show firewall status"
+      debug:
+        msg: "Firewall Rules: {{ firewall_rules.stdout }}"
+      tags: [firewall, security]
+
+    - name: "Backups - Check for recent backups"
+      shell: |
+        find /var/lib/vz/dump -type f -mtime -1 2>/dev/null | wc -l || echo "0"
+      register: recent_backups
+      tags: [backups, monitoring]
+
+    - name: "Backups - Display recent backup count"
+      debug:
+        msg: "Recent backups (< 24h): {{ recent_backups.stdout }}"
+      tags: [backups, monitoring]
+
+    - name: "Logs - Check system logs for errors"
+      shell: |
+        journalctl -p err -n 5 --no-pager 2>/dev/null || tail -5 /var/log/syslog | grep -i error || echo "No recent errors"
+      register: system_errors
+      ignore_errors: yes
+      tags: [logs, monitoring]
+
+    - name: "Logs - Display recent errors"
+      debug:
+        var: system_errors.stdout_lines
+      tags: [logs, monitoring]
+
+    - name: "Replication - Check replication status (if enabled)"
+      shell: |
+        ls -la /etc/pve/.replication.* 2>/dev/null | wc -l || echo "0"
+      register: replication_status
+      tags: [replication, status]
+
+    - name: "Replication - Display replication status"
+      debug:
+        msg: "Replication configurations found: {{ replication_status.stdout }}"
+      tags: [replication, status]
+
+    - name: "Performance - Get node load"
+      shell: |
+        uptime | awk -F'load average:' '{print $2}'
+      register: node_load
+      tags: [performance, monitoring]
+
+    - name: "Performance - Get memory usage"
+      shell: |
+        free -h | grep Mem | awk '{print "Used: " $3 " Total: " $2 " Available: " $7}'
+      register: memory_usage
+      tags: [performance, monitoring]
+
+    - name: "Performance - Display metrics"
+      debug:
+        msg: |
+          Load Average: {{ node_load.stdout }}
+          Memory: {{ memory_usage.stdout }}
+      tags: [performance, monitoring]
+
+    # DNS Server Integration Check (if this node hosts DNS)
+    - name: "DNS Servers - Check if DNS servers are running on this node"
+      shell: |
+        qm list 2>/dev/null | grep -E "dns0[1-3]|builder" || echo "No DNS VMs found"
+      register: dns_vms
+      ignore_errors: yes
+      tags: [dns, vms]
+
+    - name: "DNS Servers - Display running DNS VMs"
+      debug:
+        var: dns_vms.stdout_lines
+      tags: [dns, vms]
+
+  handlers:
+    - name: "Restart PVE services"
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - pvedaemon
+        - pveproxy
+        - pvestatd
+      tags: [never, restart-services]
+
+# Summary and reporting tasks
+- name: "Proxmox Cluster Summary Report"
+  hosts: proxmox_nodes
+  gather_facts: no
+  run_once: yes
+  tags: [always]
+  tasks:
+    - name: "Summary - Collect all node statuses"
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════╗
+          ║           Proxmox Infrastructure Report                    ║
+          ╠════════════════════════════════════════════════════════════╣
+          ║ Cluster Nodes: pve01, pve03, pve04, pve06                 ║
+          ║ Management Interface: pve3 (192.168.7.13)                 ║
+          ║ Network Range: 192.168.7.11 - 192.168.7.16                ║
+          ║                                                            ║
+          ║ For more details, run:                                    ║
+          ║   ansible-playbook proxmox-management.yml                 ║
+          ║   ansible-playbook proxmox-management.yml -t status       ║
+          ║   ansible-playbook proxmox-management.yml -t storage      ║
+          ║   ansible-playbook proxmox-management.yml -t vms          ║
+          ║   ansible-playbook proxmox-management.yml -t monitoring   ║
+          ║   ansible-playbook proxmox-management.yml -t performance  ║
+          ╚════════════════════════════════════════════════════════════╝

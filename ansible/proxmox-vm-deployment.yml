@@ -1,0 +1,259 @@
+---
+# Proxmox VM Deployment Playbook
+# Deploy and manage VMs on Proxmox cluster with cloud-init
+
+- name: "Deploy VM to Proxmox with Cloud-init"
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    # VM Configuration (can be overridden with -e)
+    proxmox_node: "pve3"
+    proxmox_host: "192.168.7.13"
+    proxmox_user: "root"
+    proxmox_password: "{{ lookup('env', 'PROXMOX_PASSWORD') | default('Hpy@7400adm') }}"
+
+    # VM Defaults
+    vm_name: "builder"
+    vm_id: 9100
+    vm_cores: 4
+    vm_memory: 4096
+    vm_disk_size: 30
+    vm_storage: "c-vm"
+    vm_mac: "bc:24:11:65:e1:01"
+    vm_bridge: "vmbr0"
+
+    # Cloud-init Defaults
+    cloud_init_user: "debian"
+    cloud_init_hostname: "builder"
+    cloud_init_domain: "ap.alshowto.com"
+    cloud_init_ip: "192.168.0.253/23"
+    cloud_init_gateway: "192.168.0.1"
+    cloud_init_dns:
+      - "192.168.0.250"
+      - "1.1.1.1"
+      - "8.8.8.8"
+
+    # Ubuntu ISO configuration
+    ubuntu_iso: "ubuntu-22.04-live-server-amd64.iso"
+    ubuntu_iso_url: "https://releases.ubuntu.com/22.04/{{ ubuntu_iso }}"
+
+  tasks:
+    - name: "Validation - Check Proxmox connectivity"
+      uri:
+        url: "https://{{ proxmox_host }}:8006/api2/json/version"
+        method: GET
+        user: "{{ proxmox_user }}@pam"
+        password: "{{ proxmox_password }}"
+        validate_certs: no
+      register: proxmox_version
+      failed_when: proxmox_version.status != 200
+      tags: [validate, proxmox]
+
+    - name: "Validation - Display Proxmox version"
+      debug:
+        msg: "Proxmox Version: {{ proxmox_version.json.data.version }}"
+      tags: [validate, proxmox]
+
+    - name: "SSH Key - Check for SSH public key"
+      stat:
+        path: "~/.ssh/id_rsa.pub"
+      register: ssh_key_stat
+      tags: [validate, ssh]
+
+    - name: "SSH Key - Read SSH public key"
+      slurp:
+        src: "~/.ssh/id_rsa.pub"
+      register: ssh_key_content
+      when: ssh_key_stat.stat.exists
+      tags: [validate, ssh]
+
+    - name: "SSH Key - Generate SSH key if missing"
+      shell: |
+        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N "" -C "proxmox-deployment"
+      when: not ssh_key_stat.stat.exists
+      tags: [validate, ssh]
+
+    - name: "Setup - Create temporary cloud-init directory"
+      file:
+        path: "/tmp/cloud-init-{{ vm_id }}"
+        state: directory
+        mode: '0755'
+      tags: [setup, cloud-init]
+
+    - name: "Cloud-init - Generate user-data"
+      copy:
+        dest: "/tmp/cloud-init-{{ vm_id }}/user-data.yml"
+        content: |
+          #cloud-config
+          hostname: {{ cloud_init_hostname }}
+          fqdn: {{ cloud_init_hostname }}.{{ cloud_init_domain }}
+
+          users:
+            - name: {{ cloud_init_user }}
+              gecos: System User
+              groups: sudo,docker
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              ssh_authorized_keys:
+                - {{ ssh_key_content.content | b64decode | trim }}
+
+          packages:
+            - docker.io
+            - docker-compose
+            - git
+            - curl
+            - wget
+            - jq
+            - vim
+            - net-tools
+            - iproute2
+            - openssh-server
+            - openssh-client
+            - python3-docker
+            - python3-dotenv
+            - ansible
+            - dnsmasq
+            - keepalived
+
+          package_update: true
+          package_upgrade: true
+
+          runcmd:
+            - systemctl enable docker
+            - systemctl start docker
+            - usermod -aG docker {{ cloud_init_user }}
+            - systemctl enable ssh
+            - echo "System initialization complete"
+
+          timezone: UTC
+
+          final_message: "System configured and ready - Cloud-init completed"
+      tags: [cloud-init, user-data]
+
+    - name: "Cloud-init - Generate network-config"
+      copy:
+        dest: "/tmp/cloud-init-{{ vm_id }}/network-config.yml"
+        content: |
+          version: 2
+          ethernets:
+            eth0:
+              dhcp4: false
+              dhcp6: false
+              addresses:
+                - {{ cloud_init_ip }}
+              gateway4: {{ cloud_init_gateway }}
+              nameservers:
+                addresses:
+          {% for dns in cloud_init_dns %}
+                  - {{ dns }}
+          {% endfor %}
+              optional: false
+      tags: [cloud-init, network-config]
+
+    - name: "Deploy - Display configuration summary"
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════╗
+          ║               VM Deployment Configuration                  ║
+          ╠════════════════════════════════════════════════════════════╣
+          ║ Proxmox Node: {{ proxmox_node }} ({{ proxmox_host }})    ║
+          ║                                                            ║
+          ║ VM Configuration:                                         ║
+          ║   Name: {{ vm_name }}                                     ║
+          ║   ID: {{ vm_id }}                                         ║
+          ║   Cores: {{ vm_cores }}                                   ║
+          ║   Memory: {{ vm_memory }} MB                              ║
+          ║   Disk: {{ vm_disk_size }} GB ({{ vm_storage }})          ║
+          ║   MAC: {{ vm_mac }}                                       ║
+          ║   Bridge: {{ vm_bridge }}                                 ║
+          ║                                                            ║
+          ║ Cloud-init Configuration:                                 ║
+          ║   Hostname: {{ cloud_init_hostname }}                     ║
+          ║   User: {{ cloud_init_user }}                             ║
+          ║   IP: {{ cloud_init_ip }}                                 ║
+          ║   Gateway: {{ cloud_init_gateway }}                       ║
+          ║                                                            ║
+          ║ Files generated in: /tmp/cloud-init-{{ vm_id }}/          ║
+          ╚════════════════════════════════════════════════════════════╝
+      tags: [always, summary]
+
+    - name: "Deploy - Instructions"
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════╗
+          ║                 MANUAL DEPLOYMENT STEPS                    ║
+          ╠════════════════════════════════════════════════════════════╣
+          ║ 1. Verify Ubuntu ISO on pve3:                             ║
+          ║    ssh root@192.168.7.13                                  ║
+          ║    ls -la /var/lib/vz/template/iso/{{ ubuntu_iso }}      ║
+          ║                                                            ║
+          ║ 2. If not present, download:                              ║
+          ║    cd /var/lib/vz/template/iso/                           ║
+          ║    wget {{ ubuntu_iso_url }}                              ║
+          ║                                                            ║
+          ║ 3. Copy cloud-init files to pve3:                         ║
+          ║    scp /tmp/cloud-init-{{ vm_id }}/* \                    ║
+          ║      root@192.168.7.13:/var/lib/vz/snippets/              ║
+          ║                                                            ║
+          ║ 4. Create VM with cloud-init:                             ║
+          ║    qm create {{ vm_id }} --name {{ vm_name }} \           ║
+          ║      --machine pc --bios seabios \                        ║
+          ║      --cores {{ vm_cores }} --memory {{ vm_memory }} \    ║
+          ║      --scsi0 {{ vm_storage }}:{{ vm_disk_size }} \        ║
+          ║      --net0 virtio={{ vm_mac }},bridge={{ vm_bridge }} \  ║
+          ║      --ide2 local:cloudinit --agent 1                     ║
+          ║                                                            ║
+          ║ 5. Attach ISO:                                            ║
+          ║    qm set {{ vm_id }} --ide2 \                            ║
+          ║      local:iso/{{ ubuntu_iso }},media=cdrom               ║
+          ║                                                            ║
+          ║ 6. Link cloud-init:                                       ║
+          ║    qm set {{ vm_id }} -cicustom \                         ║
+          ║      "local:snippets/user-data.yml,\                      ║
+          ║       local:snippets/network-config.yml"                  ║
+          ║                                                            ║
+          ║ 7. Start VM:                                              ║
+          ║    qm start {{ vm_id }}                                   ║
+          ║    qm terminal {{ vm_id }}  # For installation console    ║
+          ║                                                            ║
+          ║ 8. After cloud-init finishes (3-5 mins):                  ║
+          ║    ping {{ cloud_init_ip.split('/')[0] }}                 ║
+          ║    ssh {{ cloud_init_user }}@{{ cloud_init_ip.split('/')[0] }} ║
+          ╚════════════════════════════════════════════════════════════╝
+      tags: [always, instructions]
+
+  handlers:
+    - name: "Show cloud-init files location"
+      debug:
+        msg: "Cloud-init files are in /tmp/cloud-init-{{ vm_id }}/"
+
+# Playbook to monitor deployed VM
+- name: "Monitor Deployed VM"
+  hosts: proxmox_nodes
+  gather_facts: no
+  vars:
+    vm_id: 9100
+  tags: [monitor]
+  tasks:
+    - name: "Monitor - Check VM status"
+      shell: |
+        qm status {{ vm_id }} 2>/dev/null || echo "VM not found"
+      register: vm_status
+      tags: [monitor, status]
+
+    - name: "Monitor - Display VM status"
+      debug:
+        var: vm_status.stdout
+      tags: [monitor, status]
+
+    - name: "Monitor - Get VM details"
+      shell: |
+        qm config {{ vm_id }} 2>/dev/null | head -20 || echo "VM not found"
+      register: vm_config
+      ignore_errors: yes
+      tags: [monitor, config]
+
+    - name: "Monitor - Show VM configuration"
+      debug:
+        var: vm_config.stdout_lines
+      tags: [monitor, config]
