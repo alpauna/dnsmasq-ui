@@ -5,7 +5,7 @@ ethernets:
     match:
       macaddress: "bc:24:11:65:e1:01"
     addresses:
-      - 192.168.0.253/24
+      - 192.168.0.253/23
     gateway4: 192.168.0.1
     nameservers:
       addresses:

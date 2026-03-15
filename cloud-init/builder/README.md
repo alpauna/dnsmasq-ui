@@ -5,7 +5,7 @@ This directory contains cloud-init configuration for the dnsmasq-ui builder VM.
 ## Configuration Details
 
 - **Hostname**: builder
-- **IP Address**: 192.168.0.253/24
+- **IP Address**: 192.168.0.253/23
 - **MAC Address**: bc:24:11:65:e1:01
 - **Gateway**: 192.168.0.1
 - **DNS**: 192.168.0.250 (dnsmasq-ui VIP), 1.1.1.1, 8.8.8.8
@@ -58,7 +58,7 @@ This directory contains cloud-init configuration for the dnsmasq-ui builder VM.
 4. **Verify networking**:
    ```bash
    ip addr show
-   # Should show: 192.168.0.253/24
+   # Should show: 192.168.0.253/23
    ```
 
 ### Verify SSH Access
@@ -163,7 +163,7 @@ cloud-init query --pretty
 cat /var/log/cloud-init.log
 
 # Manual network configuration
-sudo ip addr add 192.168.0.253/24 dev eth0
+sudo ip addr add 192.168.0.253/23 dev eth0
 sudo ip route add default via 192.168.0.1
 sudo systemctl restart networking
 ```

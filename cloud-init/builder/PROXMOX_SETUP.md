@@ -140,7 +140,7 @@ After reboot:
 1. VM should boot and apply cloud-init
 2. Cloud-init will:
    - Set hostname to `builder`
-   - Configure network (192.168.0.253/24)
+   - Configure network (192.168.0.253/23)
    - Install Docker, Ansible, Git, etc.
    - Set up SSH keys
    - Enable services
@@ -195,7 +195,7 @@ Building DNS node image...
 Starting test cluster (dns01, dns02, dns03)...
 
 Test Cluster Running
-Network: dnsmasq-net (172.20.0.0/24)
+Network: dnsmasq-net (172.20.0.0/23)
 
 Servers:
   dns01: 172.20.0.231 (SSH: ssh root@172.20.0.231)
@@ -235,7 +235,7 @@ docker exec -it dns01 bash
 
 # Check VIP is assigned to MASTER (dns01)
 ip addr | grep 172.20.0.250
-# Should show: inet 172.20.0.250/24 scope global secondary eth0
+# Should show: inet 172.20.0.250/23 scope global secondary eth0
 
 # Check keepalived status
 systemctl status keepalived
@@ -294,7 +294,7 @@ tail -f /var/log/cloud-init.log
 cat /etc/netplan/99-cloud-init.yaml
 
 # Manually set network
-sudo ip addr add 192.168.0.253/24 dev eth0
+sudo ip addr add 192.168.0.253/23 dev eth0
 sudo ip route add default via 192.168.0.1
 
 # Or reboot

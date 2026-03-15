@@ -3,7 +3,7 @@
 ## Network Configuration
 Hostname:       builder
 FQDN:           builder.ap.alshowto.com
-IP Address:     192.168.0.253/24
+IP Address:     192.168.0.253/23
 Gateway:        192.168.0.1
 MAC Address:    bc:24:11:65:e1:01
 DNS:            192.168.0.250 (dnsmasq-ui VIP), 1.1.1.1, 8.8.8.8
