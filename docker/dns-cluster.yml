@@ -1,0 +1,78 @@
+version: '3.8'
+
+networks:
+  dnsmasq-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  zones-data:
+
+services:
+  dns01:
+    build: ./dns-node
+    container_name: dns01
+    hostname: dns01
+    networks:
+      dnsmasq-net:
+        ipv4_address: 172.20.0.231
+    environment:
+      - KEEPALIVED_STATE=MASTER
+      - KEEPALIVED_PRIORITY=150
+      - KEEPALIVED_VIP=172.20.0.250
+      - KEEPALIVED_INTERFACE=eth0
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "22:2201"
+
+  dns02:
+    build: ./dns-node
+    container_name: dns02
+    hostname: dns02
+    networks:
+      dnsmasq-net:
+        ipv4_address: 172.20.0.232
+    environment:
+      - KEEPALIVED_STATE=BACKUP
+      - KEEPALIVED_PRIORITY=100
+      - KEEPALIVED_VIP=172.20.0.250
+      - KEEPALIVED_INTERFACE=eth0
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "22:2202"
+
+  dns03:
+    build: ./dns-node
+    container_name: dns03
+    hostname: dns03
+    networks:
+      dnsmasq-net:
+        ipv4_address: 172.20.0.233
+    environment:
+      - KEEPALIVED_STATE=BACKUP
+      - KEEPALIVED_PRIORITY=50
+      - KEEPALIVED_VIP=172.20.0.250
+      - KEEPALIVED_INTERFACE=eth0
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "22:2203"

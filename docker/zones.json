@@ -1,0 +1,47 @@
+{
+  "zones": {
+    "local.test": {
+      "name": "local.test",
+      "description": "Test local domain",
+      "type": "local",
+      "records": [
+        {
+          "domain": "example.local.test",
+          "type": "A",
+          "value": "192.168.1.100"
+        },
+        {
+          "domain": "test.local.test",
+          "type": "A",
+          "value": "192.168.1.101"
+        }
+      ]
+    }
+  },
+  "servers": [
+    {
+      "name": "dns01",
+      "ip": "172.20.0.231",
+      "hostname": "dns01",
+      "enabled": true
+    },
+    {
+      "name": "dns02",
+      "ip": "172.20.0.232",
+      "hostname": "dns02",
+      "enabled": true
+    },
+    {
+      "name": "dns03",
+      "ip": "172.20.0.233",
+      "hostname": "dns03",
+      "enabled": true
+    }
+  ],
+  "global": {
+    "upstream_dns": ["1.1.1.1", "8.8.8.8"],
+    "keepalive_vip": "172.20.0.250",
+    "keepalive_interface": "eth0",
+    "health_check_interval": 5
+  }
+}
