@@ -357,15 +357,45 @@ update_zones_config() {
 
     log "Updating zones.json with server configuration..."
 
+    # Convert arrays to JSON for passing via environment variables
+    local ips_json="["
+    for i in "${!ips[@]}"; do
+        ips_json+="\"${ips[$i]}\""
+        if [ $i -lt $((${#ips[@]} - 1)) ]; then
+            ips_json+=", "
+        fi
+    done
+    ips_json+="]"
+
+    local ipv6s_json="["
+    for i in "${!DNS_IPV6S[@]}"; do
+        ipv6s_json+="\"${DNS_IPV6S[$i]}\""
+        if [ $i -lt $((${#DNS_IPV6S[@]} - 1)) ]; then
+            ipv6s_json+=", "
+        fi
+    done
+    ipv6s_json+="]"
+
     # Use Python to update JSON while preserving structure
-    python3 << PYEOF
+    ZONES_FILE="$zones_file" \
+    NUM_SERVERS="$num_servers" \
+    KEEPALIVE_VIP="$keepalive_vip" \
+    GATEWAY_IP="$gateway_ip" \
+    SUBNET_CIDR="$subnet_cidr" \
+    IPS_ARRAY="$ips_json" \
+    IPV6S_ARRAY="$ipv6s_json" \
+    python3 << 'PYEOF'
 import json
 import sys
+import os
 
-zones_file = '$zones_file'
-num_servers = $num_servers
-ips = [${ips[@]/#/\"}]  # Quote each IP
-ipv6s = [${DNS_IPV6S[@]/#/\"}]  # Quote each IPv6
+zones_file = os.environ.get('ZONES_FILE')
+num_servers = int(os.environ.get('NUM_SERVERS', 0))
+ips_str = os.environ.get('IPS_ARRAY', '[]')
+ipv6s_str = os.environ.get('IPV6S_ARRAY', '[]')
+
+ips = json.loads(ips_str)
+ipv6s = json.loads(ipv6s_str)
 
 with open(zones_file, 'r') as f:
     config = json.load(f)
@@ -376,16 +406,14 @@ for i in range(num_servers):
     dns_num = i + 1
     server_name = f"dns{dns_num:02d}"
     servers[server_name] = {
-        "ip": ips[i].strip('\"'),
+        "ip": ips[i] if i < len(ips) else "",
         "hostname": server_name,
         "port": 22,
         "enabled": True
     }
     # Add IPv6 if available and not empty
-    if i < len(ipv6s):
-        ipv6 = ipv6s[i].strip('\"')
-        if ipv6:
-            servers[server_name]["ipv6"] = ipv6
+    if i < len(ipv6s) and ipv6s[i]:
+        servers[server_name]["ipv6"] = ipv6s[i]
 
 # Update servers with new configuration
 config['servers'] = servers
@@ -394,11 +422,16 @@ config['servers'] = servers
 if 'global' not in config:
     config['global'] = {}
 
-config['global']['keepalived_vip'] = '$keepalive_vip'
-if '$gateway_ip':
-    config['global']['gateway'] = '$gateway_ip'
-if '$subnet_cidr':
-    config['global']['subnet_cidr'] = '$subnet_cidr'
+keepalive_vip = os.environ.get('KEEPALIVE_VIP', '')
+gateway_ip = os.environ.get('GATEWAY_IP', '')
+subnet_cidr = os.environ.get('SUBNET_CIDR', '')
+
+if keepalive_vip:
+    config['global']['keepalived_vip'] = keepalive_vip
+if gateway_ip:
+    config['global']['gateway'] = gateway_ip
+if subnet_cidr:
+    config['global']['subnet_cidr'] = subnet_cidr
 
 with open(zones_file, 'w') as f:
     json.dump(config, f, indent=2)
