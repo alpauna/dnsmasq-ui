@@ -1,0 +1,76 @@
+#cloud-config
+# Cloud-init user-data for dnsmasq-ui builder VM
+# Hostname: builder
+# IP: 192.168.0.253
+# MAC: bc:24:11:65:e1:01
+
+hostname: builder
+fqdn: builder.ap.alshowto.com
+
+users:
+  - name: debian
+    gecos: Debian User
+    groups: sudo,docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC... (your SSH public key)
+
+packages:
+  - docker.io
+  - docker-compose
+  - git
+  - curl
+  - wget
+  - jq
+  - vim
+  - net-tools
+  - iproute2
+  - openssh-server
+  - openssh-client
+  - python3-docker
+  - python3-dotenv
+  - ansible
+  - dnsmasq
+  - keepalived
+
+package_update: true
+package_upgrade: true
+
+# Enable services
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker debian
+  - systemctl enable ssh
+
+# Create deployment directory
+write_files:
+  - path: /home/debian/.ssh/authorized_keys
+    permissions: '0600'
+    owner: debian:debian
+    content: |
+      ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC... (your SSH public key)
+
+  - path: /opt/deployment.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      echo "==================================="
+      echo "dnsmasq-ui Builder VM Ready"
+      echo "==================================="
+      echo ""
+      echo "To test the Docker cluster:"
+      echo "  cd /opt/dnsmasq-ui"
+      echo "  ./docker/build-test-cluster.sh"
+      echo ""
+      echo "To deploy to DNS servers:"
+      echo "  cd /opt/dnsmasq-ui/ansible"
+      echo "  ansible-playbook -i inventory.ini dnsmasq-setup.yml"
+      echo ""
+
+# Set timezone
+timezone: UTC
+
+# Ensure cloud-init doesn't regenerate on next boot
+final_message: "dnsmasq-ui builder VM configured and ready for deployment"

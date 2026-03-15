@@ -1,0 +1,52 @@
+# Builder VM Specifications
+
+## Network Configuration
+Hostname:       builder
+FQDN:           builder.ap.alshowto.com
+IP Address:     192.168.0.253/24
+Gateway:        192.168.0.1
+MAC Address:    bc:24:11:65:e1:01
+DNS:            192.168.0.250 (dnsmasq-ui VIP), 1.1.1.1, 8.8.8.8
+
+## VM Specifications (Recommended)
+vCPUs:          4+ (more for parallel deployments)
+RAM:            4-8 GB
+Disk:           20-50 GB
+OS:             Ubuntu 22.04 LTS
+
+## Use Cases
+1. Local testing: Run Docker test cluster
+2. Deployment hub: Run Ansible playbooks to deploy to real servers
+3. Development: Modify and test dnsmasq-ui configurations
+4. Cloud-init generator: Create configurations for VM deployments
+
+## Quick Commands
+After VM boots, clone the repository:
+    cd /opt
+    sudo git clone https://github.com/alpauna/dnsmasq-ui.git
+    sudo chown -R debian:debian /opt/dnsmasq-ui
+    cd /opt/dnsmasq-ui
+
+Test Docker cluster:
+    ./docker/build-test-cluster.sh
+
+Deploy to servers:
+    ./setup.sh
+    cd ansible
+    ansible-playbook -i inventory.ini dnsmasq-setup.yml
+    ansible-playbook -i inventory.ini dnsmasq-ui-ha.yml
+
+Generate cloud-init for VMs:
+    ./generate-cloud-init.sh
+
+## Pre-installed Services
+Docker & Docker Compose - for container testing
+Ansible - for remote deployments
+Git - for repository management
+dnsmasq - for DNS testing
+keepalived - for failover testing
+
+## SSH Access
+User:           debian (passwordless sudo)
+Key-based auth: Yes (pre-configured)
+Connection:     ssh debian@192.168.0.253
