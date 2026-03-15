@@ -25,12 +25,27 @@ if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
     ssh-keygen -A
 fi
 
-# Add authorized_keys if provided
+# Setup authorized_keys for SSH access
+mkdir -p /root/.ssh
+
+# Add authorized_keys from environment variable (SSH_PUBLIC_KEYS)
+# Support newline-separated keys for multiple authorized users
+if [ -n "$SSH_PUBLIC_KEYS" ]; then
+    echo "[*] Adding SSH public keys from SSH_PUBLIC_KEYS environment variable..."
+    echo "$SSH_PUBLIC_KEYS" >> /root/.ssh/authorized_keys
+fi
+
+# Add authorized_keys from volume mount (backward compatibility)
 if [ -f /tmp/authorized_keys ]; then
-    mkdir -p /root/.ssh
-    cp /tmp/authorized_keys /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
+    echo "[*] Adding SSH public keys from /tmp/authorized_keys..."
+    cat /tmp/authorized_keys >> /root/.ssh/authorized_keys
     rm /tmp/authorized_keys
+fi
+
+# Set proper permissions if keys were added
+if [ -f /root/.ssh/authorized_keys ]; then
+    chmod 600 /root/.ssh/authorized_keys
+    echo "[+] SSH authorized_keys configured"
 fi
 
 # Enable password login for root (for testing)
