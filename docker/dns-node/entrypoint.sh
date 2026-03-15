@@ -146,6 +146,90 @@ PYTHON_EOF
 fi
 
 # ============================================================================
+# Firewall Configuration (WireGuard DNS Access Control)
+# ============================================================================
+
+WG_FIREWALL_ENABLE=${WG_FIREWALL_ENABLE:-false}
+WG_INTERFACE=${WG_INTERFACE:-wg0}
+
+if [ "${WG_FIREWALL_ENABLE}" = "true" ]; then
+    echo "[*] Configuring firewall rules (WireGuard DNS access control)..."
+
+    # Function to safely add iptables rule (ignore if already exists)
+    add_rule() {
+        local chain=$1
+        local rule=$2
+        if ! iptables -C $chain $rule 2>/dev/null; then
+            iptables -A $chain $rule 2>/dev/null || true
+        fi
+    }
+
+    # Function for IPv6
+    add_rule_v6() {
+        local chain=$1
+        local rule=$2
+        if ! ip6tables -C $chain $rule 2>/dev/null; then
+            ip6tables -A $chain $rule 2>/dev/null || true
+        fi
+    }
+
+    # Set default policies to DROP (deny all)
+    iptables -P INPUT DROP 2>/dev/null || true
+    iptables -P FORWARD DROP 2>/dev/null || true
+    iptables -P OUTPUT ACCEPT 2>/dev/null || true
+
+    ip6tables -P INPUT DROP 2>/dev/null || true
+    ip6tables -P FORWARD DROP 2>/dev/null || true
+    ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
+
+    # IPv4 Rules
+    # ==========
+
+    # 1. Allow loopback (required for services)
+    add_rule "INPUT" "-i lo -j ACCEPT"
+
+    # 2. Allow SSH on eth0 (management/admin access)
+    add_rule "INPUT" "-i eth0 -p tcp --dport 22 -j ACCEPT"
+
+    # 3. Allow keepalived VRRP on eth0 (cluster heartbeat)
+    add_rule "INPUT" "-i eth0 -p 112 -j ACCEPT"
+
+    # 4. Allow established/related connections (important for DNS replies)
+    add_rule "INPUT" "-m state --state ESTABLISHED,RELATED -j ACCEPT"
+
+    # 5. Allow DNS (TCP/UDP 53) on WireGuard interface ONLY (main feature)
+    add_rule "INPUT" "-i ${WG_INTERFACE} -p tcp --dport 53 -j ACCEPT"
+    add_rule "INPUT" "-i ${WG_INTERFACE} -p udp --dport 53 -j ACCEPT"
+
+    # IPv6 Rules
+    # ==========
+
+    # 1. Allow loopback
+    add_rule_v6 "INPUT" "-i lo -j ACCEPT"
+
+    # 2. Allow SSH on eth0
+    add_rule_v6 "INPUT" "-i eth0 -p tcp --dport 22 -j ACCEPT"
+
+    # 3. Allow keepalived VRRP
+    add_rule_v6 "INPUT" "-i eth0 -p 112 -j ACCEPT"
+
+    # 4. Allow established/related
+    add_rule_v6 "INPUT" "-m state --state ESTABLISHED,RELATED -j ACCEPT"
+
+    # 5. Allow DNS on WireGuard interface
+    add_rule_v6 "INPUT" "-i ${WG_INTERFACE} -p tcp --dport 53 -j ACCEPT"
+    add_rule_v6 "INPUT" "-i ${WG_INTERFACE} -p udp --dport 53 -j ACCEPT"
+
+    echo "[+] Firewall rules configured:"
+    echo "    - DNS (53/TCP,UDP) allowed on ${WG_INTERFACE}"
+    echo "    - SSH (22/TCP) allowed on eth0 (management)"
+    echo "    - Keepalived (protocol 112) allowed on eth0"
+    echo "    - All other traffic blocked (implicit deny)"
+else
+    echo "[*] Firewall disabled (set WG_FIREWALL_ENABLE=true to enable)"
+fi
+
+# ============================================================================
 # Start Services
 # ============================================================================
 

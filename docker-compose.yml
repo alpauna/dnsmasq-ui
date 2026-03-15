@@ -36,6 +36,8 @@ services:
       - KEEPALIVED_VIP=172.20.0.252
       - KEEPALIVED_INTERFACE=eth0
       - NODE_HOSTNAME=dns01
+      - WG_FIREWALL_ENABLE=false
+      - WG_INTERFACE=wg0
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -61,6 +63,8 @@ services:
       - KEEPALIVED_VIP=172.20.0.252
       - KEEPALIVED_INTERFACE=eth0
       - NODE_HOSTNAME=dns02
+      - WG_FIREWALL_ENABLE=false
+      - WG_INTERFACE=wg0
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -86,6 +90,8 @@ services:
       - KEEPALIVED_VIP=172.20.0.252
       - KEEPALIVED_INTERFACE=eth0
       - NODE_HOSTNAME=dns03
+      - WG_FIREWALL_ENABLE=false
+      - WG_INTERFACE=wg0
     cap_add:
       - NET_ADMIN
       - NET_RAW
