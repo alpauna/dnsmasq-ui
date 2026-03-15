@@ -85,10 +85,10 @@
       "port": 22,
       "enabled": true,
       "wireguard": {
-        "public_key": null,
+        "public_key": "cSu+MSAkgP69/uXMYSqYkukbMdRFpI/HbDXSHQRYTB4=",
         "tunnel_ip": "10.99.0.1",
         "listen_port": 51820,
-        "generated": null
+        "generated": "2026-03-15T14:22:34.507636"
       }
     },
     "dns02": {
@@ -97,10 +97,10 @@
       "port": 22,
       "enabled": true,
       "wireguard": {
-        "public_key": null,
+        "public_key": "YCjA6la5W8EQx3y1PfGoCbDjBlFdxCIU2QzAIoQ5F2g=",
         "tunnel_ip": "10.99.0.2",
         "listen_port": 51820,
-        "generated": null
+        "generated": "2026-03-15T14:22:34.507790"
       }
     },
     "dns03": {
@@ -109,10 +109,10 @@
       "port": 22,
       "enabled": true,
       "wireguard": {
-        "public_key": null,
+        "public_key": "9e21YiKMDOj//dmcx3MjBblR8fGBwy16LepxmRt05Qc=",
         "tunnel_ip": "10.99.0.3",
         "listen_port": 51820,
-        "generated": null
+        "generated": "2026-03-15T14:22:34.507914"
       }
     }
   },
