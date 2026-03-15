@@ -11,11 +11,11 @@ echo "dnsmasq-ui Docker Test Cluster"
 echo "==================================================================="
 echo ""
 echo "Building DNS node image..."
-docker compose -f "$SCRIPT_DIR/dns-cluster.yml" build
+docker-compose -f "$SCRIPT_DIR/dns-cluster.yml" build
 
 echo ""
 echo "Starting test cluster (dns01, dns02, dns03)..."
-docker compose -f "$SCRIPT_DIR/dns-cluster.yml" up -d
+docker-compose -f "$SCRIPT_DIR/dns-cluster.yml" up -d
 
 echo ""
 echo "Waiting for containers to be ready..."
@@ -25,7 +25,7 @@ echo ""
 echo "==================================================================="
 echo "Test Cluster Running"
 echo "==================================================================="
-docker compose -f "$SCRIPT_DIR/dns-cluster.yml" ps
+docker-compose -f "$SCRIPT_DIR/dns-cluster.yml" ps
 
 echo ""
 echo "Network: dnsmasq-net (172.20.0.0/24)"
@@ -40,7 +40,7 @@ echo "DNS Queries:"
 echo "  dig @172.20.0.250 example.com"
 echo ""
 echo "To stop the cluster:"
-echo "  docker compose -f $SCRIPT_DIR/dns-cluster.yml down"
+echo "  docker-compose -f $SCRIPT_DIR/dns-cluster.yml down"
 echo ""
 echo "To view logs:"
 echo "  docker logs dns01"
