@@ -1,0 +1,7 @@
+version: 2
+ethernets:
+  eth0:
+    dhcp4: true
+    match:
+      macaddress: __MAC_ADDRESS__
+    optional: false

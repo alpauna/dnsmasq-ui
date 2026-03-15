@@ -94,6 +94,11 @@ test_ssh() {
     fi
 }
 
+# Generate random MAC address (QEMU/KVM format: 52:54:00:XX:XX:XX)
+generate_mac() {
+    printf "52:54:00:%02x:%02x:%02x" $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256))
+}
+
 # Generate Ansible inventory
 generate_inventory() {
     local output_file="$SCRIPT_DIR/ansible/inventory.ini"
@@ -380,6 +385,73 @@ PYEOF
     success "zones.json updated with $num_servers servers"
 }
 
+# Generate Docker Compose for test cluster
+generate_docker_compose() {
+    local output_file="$SCRIPT_DIR/docker/dns-cluster.yml"
+    local num_servers=$1
+    local keepalive_vip=$2
+    shift 2
+    local ips=("$@")
+
+    log "Generating Docker Compose for test cluster..."
+
+    cat > "$output_file" << 'EOF'
+version: '3.8'
+
+networks:
+  dnsmasq-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+services:
+EOF
+
+    for i in "${!ips[@]}"; do
+        local dns_num=$((i + 1))
+        local server_name="dns$(printf "%02d" $dns_num)"
+        local container_ip="172.20.0.$((230 + i))"
+        local priority=$((150 - (i * 10)))
+        local state="MASTER"
+        if [ $i -gt 0 ]; then
+            state="BACKUP"
+        fi
+
+        cat >> "$output_file" << EOF
+
+  $server_name:
+    build:
+      context: ./dns-node
+      dockerfile: Dockerfile
+    container_name: $server_name
+    hostname: $server_name
+    networks:
+      dnsmasq-net:
+        ipv4_address: $container_ip
+    environment:
+      - KEEPALIVED_STATE=$state
+      - KEEPALIVED_PRIORITY=$priority
+      - KEEPALIVED_VIP=$keepalive_vip
+      - KEEPALIVED_INTERFACE=eth0
+      - KEEPALIVED_VRID=51
+      - NODE_HOSTNAME=$server_name
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    volumes:
+      - ../zones.json:/etc/dnsmasq-ui/zones.json:ro
+      - ./test-keys/id_rsa.pub:/tmp/authorized_keys:ro
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+EOF
+    done
+
+    success "Docker Compose generated at $output_file"
+}
+
 # Main setup flow
 main() {
     header "dnsmasq-ui Interactive Setup"
@@ -392,84 +464,154 @@ main() {
     SSH_USER=${SSH_USER:-debian}
     log "Using SSH user: $SSH_USER"
 
-    # Get number of servers
-    read -p "Number of DNS servers [3]: " NUM_SERVERS
-    NUM_SERVERS=${NUM_SERVERS:-3}
+    # Get deployment target
+    header "Deployment Target"
+    echo "Which deployment type do you want?"
+    echo "  1. Existing servers (SSH-based, Ansible deployment)"
+    echo "  2. Docker local test (create containers locally)"
+    echo "  3. Proxmox VMs (generate cloud-init files) [future]"
+    echo ""
+    read -p "Select deployment target [1]: " DEPLOYMENT_TARGET
+    DEPLOYMENT_TARGET=${DEPLOYMENT_TARGET:-1}
 
-    if ! [[ $NUM_SERVERS =~ ^[0-9]+$ ]] || [ $NUM_SERVERS -lt 1 ]; then
-        error "Invalid number of servers. Must be >= 1"
+    # Auto-configure Docker mode
+    if [ "$DEPLOYMENT_TARGET" = "2" ]; then
+        log "Docker test cluster mode selected"
+        DOCKER_MODE=true
+        NUM_SERVERS=3
+        DNS_IPS=("172.20.0.231" "172.20.0.232" "172.20.0.233")
+        KEEPALIVE_VIP="172.20.0.250"
+        NETWORK_TYPE="static"
+    else
+        DOCKER_MODE=false
+
+        # Get number of servers
+        read -p "Number of DNS servers [3]: " NUM_SERVERS
+        NUM_SERVERS=${NUM_SERVERS:-3}
     fi
 
-    log "Configuring for $NUM_SERVERS DNS server(s)"
-    echo ""
-
-    # Get server addresses
-    header "DNS Server Addresses"
-    echo "Enter DNS server addresses as:"
-    echo "  - Single IP: 192.168.0.231"
-    echo "  - Range: 192.168.0.231-233 (generates .231, .232, .233)"
-    echo "  - List: 192.168.0.231, 192.168.0.232, 192.168.0.233"
-    echo ""
-
-    read -p "Enter $NUM_SERVERS server address(es): " SERVER_INPUT
-
-    # Parse and validate addresses
-    mapfile -t DNS_IPS < <(parse_ip_range "$SERVER_INPUT")
-
-    if [ ${#DNS_IPS[@]} -ne $NUM_SERVERS ]; then
-        error "Expected $NUM_SERVERS addresses, got ${#DNS_IPS[@]}"
-    fi
-
-    # Validate each IP
-    log "Validating IP addresses..."
-    for ip in "${DNS_IPS[@]}"; do
-        if ! validate_ip "$ip"; then
-            error "Invalid IP address: $ip"
+    if [ "$DOCKER_MODE" != "true" ]; then
+        if ! [[ $NUM_SERVERS =~ ^[0-9]+$ ]] || [ $NUM_SERVERS -lt 1 ]; then
+            error "Invalid number of servers. Must be >= 1"
         fi
-        success "Valid: $ip"
-    done
-    echo ""
 
-    # Get keepalived VIP
-    header "Keepalived Virtual IP (VIP)"
-    echo "The VIP is a shared IP address used for failover."
-    echo "It will be assigned to the MASTER server and move to a BACKUP if the MASTER fails."
-    echo "Both DNS (port 53) and the UI (port 5000) will use this VIP."
-    echo ""
-    read -p "VIP address [192.168.0.250]: " KEEPALIVE_VIP
-    KEEPALIVE_VIP=${KEEPALIVE_VIP:-192.168.0.250}
+        log "Configuring for $NUM_SERVERS DNS server(s)"
+        echo ""
 
-    if ! validate_ip "$KEEPALIVE_VIP"; then
-        error "Invalid VIP address: $KEEPALIVE_VIP"
-    fi
-    log "Using VIP: $KEEPALIVE_VIP"
-    echo ""
+        # Get network type (static or DHCP)
+        header "Network Configuration"
+        echo "How should servers be configured?"
+        echo "  1. Static IP addresses (you specify each IP)"
+        echo "  2. DHCP (we'll generate MAC addresses)"
+        echo ""
+        read -p "Select network type [1]: " NETWORK_CHOICE
+        NETWORK_CHOICE=${NETWORK_CHOICE:-1}
 
-    # Test SSH connectivity
-    header "Testing SSH Connectivity"
-    echo "Testing SSH access to servers (this may take a moment)..."
-    echo ""
-
-    local all_connected=true
-    for i in "${!DNS_IPS[@]}"; do
-        local dns_num=$((i + 1))
-        local server_name="dns$(printf "%02d" $dns_num)"
-        local ip=${DNS_IPS[$i]}
-
-        if test_ssh "$ip" "$SSH_USER"; then
-            success "SSH to $server_name ($ip): OK"
+        if [ "$NETWORK_CHOICE" = "2" ]; then
+            NETWORK_TYPE="dhcp"
         else
-            warning "SSH to $server_name ($ip): FAILED"
-            all_connected=false
+            NETWORK_TYPE="static"
         fi
-    done
-    echo ""
 
-    if [ "$all_connected" = false ]; then
-        warning "Some servers are not accessible via SSH"
-        read -p "Continue anyway? [y/N]: " continue_anyway
-        if [[ ! $continue_anyway =~ ^[Yy]$ ]]; then
-            error "Setup cancelled"
+        if [ "$NETWORK_TYPE" = "dhcp" ]; then
+            # Generate MAC addresses
+            header "Generating MAC Addresses"
+            echo "MAC addresses for DHCP-based deployment:"
+            echo ""
+            echo "┌────────┬──────────────────────────────┐"
+            echo "│ Server │ MAC Address                  │"
+            echo "├────────┼──────────────────────────────┤"
+
+            declare -A MACS
+            for ((i=0; i<NUM_SERVERS; i++)); do
+                local dns_num=$((i + 1))
+                local server_name="dns$(printf "%02d" $dns_num)"
+                local mac=$(generate_mac)
+                MACS["$server_name"]="$mac"
+                printf "│ %s     │ %s │\n" "$server_name" "$mac"
+            done
+            echo "└────────┴──────────────────────────────┘"
+            echo ""
+            echo "After creating DHCP reservations with these MACs,"
+            echo "enter the IPs your DHCP server will assign:"
+            echo ""
+
+            # Prompt for reserved IPs
+            mapfile -t DNS_IPS < <(for i in $(seq 1 $NUM_SERVERS); do
+                read -p "DNS$i IP address: " ip
+                echo "$ip"
+            done)
+        else
+            # Static IP mode
+            # Get server addresses
+            header "DNS Server Addresses"
+            echo "Enter DNS server addresses as:"
+            echo "  - Single IP: 192.168.0.231"
+            echo "  - Range: 192.168.0.231-233 (generates .231, .232, .233)"
+            echo "  - List: 192.168.0.231, 192.168.0.232, 192.168.0.233"
+            echo ""
+
+            read -p "Enter $NUM_SERVERS server address(es): " SERVER_INPUT
+
+            # Parse and validate addresses
+            mapfile -t DNS_IPS < <(parse_ip_range "$SERVER_INPUT")
+        fi
+
+        if [ ${#DNS_IPS[@]} -ne $NUM_SERVERS ]; then
+            error "Expected $NUM_SERVERS addresses, got ${#DNS_IPS[@]}"
+        fi
+
+        # Validate each IP
+        log "Validating IP addresses..."
+        for ip in "${DNS_IPS[@]}"; do
+            if ! validate_ip "$ip"; then
+                error "Invalid IP address: $ip"
+            fi
+            success "Valid: $ip"
+        done
+        echo ""
+
+        # Get keepalived VIP
+        header "Keepalived Virtual IP (VIP)"
+        echo "The VIP is a shared IP address used for failover."
+        echo "It will be assigned to the MASTER server and move to a BACKUP if the MASTER fails."
+        echo "Both DNS (port 53) and the UI (port 5000) will use this VIP."
+        echo ""
+        read -p "VIP address [192.168.0.250]: " KEEPALIVE_VIP
+        KEEPALIVE_VIP=${KEEPALIVE_VIP:-192.168.0.250}
+
+        if ! validate_ip "$KEEPALIVE_VIP"; then
+            error "Invalid VIP address: $KEEPALIVE_VIP"
+        fi
+        log "Using VIP: $KEEPALIVE_VIP"
+        echo ""
+
+        # Test SSH connectivity
+        header "Testing SSH Connectivity"
+        echo "Testing SSH access to servers (this may take a moment)..."
+        echo ""
+
+        local all_connected=true
+        for i in "${!DNS_IPS[@]}"; do
+            local dns_num=$((i + 1))
+            local server_name="dns$(printf "%02d" $dns_num)"
+            local ip=${DNS_IPS[$i]}
+
+            if test_ssh "$ip" "$SSH_USER"; then
+                success "SSH to $server_name ($ip): OK"
+            else
+                warning "SSH to $server_name ($ip): FAILED"
+                all_connected=false
+            fi
+        done
+        echo ""
+
+        if [ "$all_connected" = false ]; then
+            warning "Some servers are not accessible via SSH"
+            read -p "Continue anyway? [y/N]: " continue_anyway
+            if [[ ! $continue_anyway =~ ^[Yy]$ ]]; then
+                error "Setup cancelled"
+            fi
         fi
     fi
 
@@ -477,6 +619,14 @@ main() {
     header "Configuration Summary"
     echo "SSH User:         $SSH_USER"
     echo "Number of Servers: $NUM_SERVERS"
+    echo "Network Type:     $([ "$DOCKER_MODE" = "true" ] && echo "Docker (local)" || echo "$NETWORK_TYPE")"
+    if [ "$DOCKER_MODE" != "true" ] && [ "$NETWORK_TYPE" = "dhcp" ] && [ -v MACS ]; then
+        echo ""
+        echo "MAC Addresses (for DHCP):"
+        for server_name in "${!MACS[@]}"; do
+            echo "  $server_name: ${MACS[$server_name]}"
+        done
+    fi
     echo "Keepalived VIP:   $KEEPALIVE_VIP"
     echo ""
     echo "Servers:"
@@ -488,7 +638,11 @@ main() {
         if [ $i -gt 0 ]; then
             state="BACKUP"
         fi
-        printf "  %s (%s): %s [priority: %d]\n" "$server_name" "${DNS_IPS[$i]}" "$state" "$priority"
+        if [ "$DOCKER_MODE" = "true" ]; then
+            printf "  %s (container %s): %s [priority: %d]\n" "$server_name" "${DNS_IPS[$i]}" "$state" "$priority"
+        else
+            printf "  %s (%s): %s [priority: %d]\n" "$server_name" "${DNS_IPS[$i]}" "$state" "$priority"
+        fi
     done
     echo ""
 
@@ -502,34 +656,74 @@ main() {
     header "Generating Configurations"
 
     generate_inventory "$SSH_USER" "${DNS_IPS[@]}"
-    generate_keepalived_playbook "$NUM_SERVERS" "$KEEPALIVE_VIP" "${DNS_IPS[@]}"
+    if [ "$DOCKER_MODE" != "true" ]; then
+        generate_keepalived_playbook "$NUM_SERVERS" "$KEEPALIVE_VIP" "${DNS_IPS[@]}"
+    fi
     update_zones_config "$NUM_SERVERS" "${DNS_IPS[@]}"
+
+    if [ "$DOCKER_MODE" = "true" ]; then
+        # Generate Docker Compose
+        generate_docker_compose "$NUM_SERVERS" "$KEEPALIVE_VIP" "${DNS_IPS[@]}"
+
+        # Create SSH test keypair if it doesn't exist
+        mkdir -p "$SCRIPT_DIR/docker/test-keys"
+        if [ ! -f "$SCRIPT_DIR/docker/test-keys/id_rsa" ]; then
+            log "Generating test SSH keypair..."
+            ssh-keygen -t rsa -b 4096 -f "$SCRIPT_DIR/docker/test-keys/id_rsa" -N "" -C "dnsmasq-ui-test"
+            success "SSH keypair generated"
+        fi
+    fi
 
     echo ""
     header "Setup Complete! ✓"
 
     echo "Configuration files generated:"
     echo "  ✓ ansible/inventory.ini"
-    echo "  ✓ ansible/dnsmasq-setup.yml"
+    if [ "$DOCKER_MODE" != "true" ]; then
+        echo "  ✓ ansible/dnsmasq-setup.yml"
+    else
+        echo "  ✓ docker/dns-cluster.yml"
+        echo "  ✓ docker/test-keys/id_rsa (SSH keypair)"
+    fi
     echo "  ✓ zones.json (updated)"
     echo ""
     echo "Next steps:"
     echo ""
-    echo "1. Review the generated files:"
-    echo "   cat ansible/inventory.ini"
-    echo "   cat ansible/dnsmasq-setup.yml"
-    echo ""
-    echo "2. Deploy with Ansible:"
-    echo "   cd ansible"
-    echo "   ansible-playbook -i inventory.ini dnsmasq-setup.yml"
-    echo ""
-    echo "3. Or use the deployment script:"
-    echo "   cd .."
-    echo "   ./deploy-keepalived.sh all"
-    echo ""
-    echo "4. Verify deployment:"
-    echo "   curl http://localhost:5000/api/status"
-    echo ""
+
+    if [ "$DOCKER_MODE" = "true" ]; then
+        echo "1. Build and start the test cluster:"
+        echo "   cd docker"
+        echo "   ./build-test-cluster.sh"
+        echo ""
+        echo "2. Verify the cluster is running:"
+        echo "   docker ps"
+        echo ""
+        echo "3. Test DNS queries:"
+        echo "   dig @172.20.0.250 example.com"
+        echo ""
+        echo "4. To stop the cluster:"
+        echo "   docker compose -f docker/dns-cluster.yml down"
+        echo ""
+    else
+        echo "1. Review the generated files:"
+        echo "   cat ansible/inventory.ini"
+        echo "   cat ansible/dnsmasq-setup.yml"
+        echo ""
+        echo "2. Deploy with Ansible:"
+        echo "   cd ansible"
+        echo "   ansible-playbook -i inventory.ini dnsmasq-setup.yml"
+        echo ""
+        echo "3. Or use the deployment script:"
+        echo "   cd .."
+        echo "   ./deploy-keepalived.sh all"
+        echo ""
+        echo "4. Generate cloud-init files (for VM deployments):"
+        echo "   ./generate-cloud-init.sh"
+        echo ""
+        echo "5. Verify deployment:"
+        echo "   curl http://192.168.0.250:5000/api/status"
+        echo ""
+    fi
 }
 
 # Run setup
