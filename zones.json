@@ -40,9 +40,14 @@
           "value": "192.168.0.233"
         },
         {
+          "domain": "mfc-printer.ad.alshowto.com",
+          "type": "A",
+          "value": "192.168.0.70"
+        },
+        {
           "domain": "middle-01.ad.alshowto.com",
           "type": "A",
-          "value": "192.168.0.252"
+          "value": "192.168.0.250"
         },
         {
           "domain": "esphome.ad.alshowto.com",
@@ -55,7 +60,32 @@
           "value": "middle-01.ad.alshowto.com"
         },
         {
+          "domain": "ha-tainer.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
           "domain": "ha.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "ma.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "music.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "nginx-proxy.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "piehole.ad.alshowto.com",
           "type": "CNAME",
           "value": "middle-01.ad.alshowto.com"
         },
@@ -66,6 +96,28 @@
         },
         {
           "domain": "proxmox.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "rtr.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "wordpress-dbadmin.ad.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        }
+      ]
+    },
+    {
+      "name": "cld.alshowto.com",
+      "description": "Cloud domain",
+      "type": "local",
+      "records": [
+        {
+          "domain": "nginx-proxy.cld.alshowto.com",
           "type": "CNAME",
           "value": "middle-01.ad.alshowto.com"
         }
