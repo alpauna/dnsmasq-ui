@@ -50,6 +50,11 @@
           "value": "192.168.0.250"
         },
         {
+          "domain": "middle-01.ad.alshowto.com",
+          "type": "AAAA",
+          "value": "2604:7a00:ea40:1860:be24:11ff:fed7:4cec"
+        },
+        {
           "domain": "esphome.ad.alshowto.com",
           "type": "CNAME",
           "value": "middle-01.ad.alshowto.com"
