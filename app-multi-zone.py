@@ -437,7 +437,8 @@ class ZoneManager:
                 'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 'fingerprint': fingerprint_hex,
                 'key_type': 'RSA',
-                'bits': pkey.get_bits()
+                'bits': pkey.get_bits(),
+                'public_key': f"{pkey.get_name()} {pkey.get_base64()} dnsmasq-ui"
             }
         except Exception as e:
             logger.error(f"Error reading SSH key: {str(e)}")

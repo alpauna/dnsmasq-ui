@@ -548,6 +548,17 @@
                     html += `<div class="key-info-item"><span class="key-info-label">Fingerprint</span><span class="key-info-value">${data.fingerprint}</span></div>`;
                     html += `<div class="key-info-item"><span class="key-info-label">Modified</span><span class="key-info-value">${new Date(data.modified).toLocaleString()}</span></div>`;
                     html += '</div>';
+
+                    if (data.public_key) {
+                        html += '<div class="alert alert-info" style="margin-top: 20px;">';
+                        html += '<strong>Public key</strong>: paste this into other devices\' authorized_keys ';
+                        html += '(switches, routers, anything not in the DNS server list that supports SSH key auth).';
+                        html += '</div>';
+                        html += '<div class="form-group"><label>Public Key</label>';
+                        html += `<div class="code-block">${escapeHtml(data.public_key)}</div>`;
+                        html += '<button class="copy-btn" onclick="copyToClipboard(this.previousElementSibling)">Copy Public Key</button></div>';
+                    }
+
                     container.innerHTML = html;
                 })
                 .catch(error => {
