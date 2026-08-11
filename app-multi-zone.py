@@ -94,6 +94,9 @@ SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
 SMTP_USER = os.getenv('SMTP_USER', '')
 SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
 SMTP_FROM = os.getenv('SMTP_FROM', SMTP_USER)
+# Used to build links in emails sent from background contexts (e.g. the
+# poller) that have no active Flask request to infer a URL from.
+DASHBOARD_URL = os.getenv('DASHBOARD_URL', 'http://192.168.0.233:5000')
 
 # Reverse proxy configuration
 PROXY_PATH_PREFIX = os.getenv('PROXY_PATH_PREFIX', '')  # e.g., '/dnsmasq-ui' for http://proxy/dnsmasq-ui/
@@ -163,13 +166,13 @@ def _enabled_2fa_methods(auth_config):
     tf = auth_config.get('two_factor', {})
     return [m for m in ('totp', 'email') if tf.get(m, {}).get('enabled')]
 
-def _send_email_code(to_addr, code):
+def _send_email(to_addr, subject, body):
     if not SMTP_SERVER or not to_addr:
-        logger.error("Email 2FA send failed: SMTP_SERVER or recipient address not configured")
+        logger.error(f"Email not sent ('{subject}'): SMTP_SERVER or recipient address not configured")
         return False, "Email delivery isn't configured (SMTP_SERVER not set)"
     try:
-        msg = MIMEText(f"Your dnsmasq-ui login code is: {code}\n\nThis code expires in 10 minutes.")
-        msg['Subject'] = 'dnsmasq-ui login code'
+        msg = MIMEText(body)
+        msg['Subject'] = subject
         msg['From'] = SMTP_FROM
         msg['To'] = to_addr
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
@@ -177,10 +180,16 @@ def _send_email_code(to_addr, code):
             if SMTP_USER:
                 server.login(SMTP_USER, SMTP_PASSWORD)
             server.send_message(msg)
-        return True, "Code sent"
+        return True, "Sent"
     except Exception as e:
-        logger.error(f"Failed to send 2FA email to {to_addr}: {e}")
+        logger.error(f"Failed to send email ('{subject}') to {to_addr}: {e}")
         return False, f"Failed to send email: {e}"
+
+def _send_email_code(to_addr, code):
+    return _send_email(
+        to_addr, 'dnsmasq-ui login code',
+        f"Your dnsmasq-ui login code is: {code}\n\nThis code expires in 10 minutes."
+    )
 
 @app.before_request
 def _require_login():
@@ -338,6 +347,7 @@ class ZoneManager:
         self.zones_file = zones_file
         self.config = self._load_config()
         self._vault_key = None  # in-memory only; never persisted to disk
+        self._vault_lock_notified = False  # avoid re-emailing every poll cycle for the same lock
 
     def _load_config(self):
         """Load zones and servers configuration."""
@@ -748,11 +758,34 @@ class ZoneManager:
         except InvalidToken:
             return False, "Incorrect admin password"
         self._vault_key = key
+        self._vault_lock_notified = False  # a future lock should send a fresh notice
         return True, "Vault unlocked"
 
     def lock_vault(self):
         """Drop the cached key from memory."""
         self._vault_key = None
+
+    def _notify_vault_locked(self):
+        """Email a heads-up that the vault is locked and password-gated
+        polling is failing — notification only, not an unlock mechanism.
+        The recipient still has to log in and enter the vault password
+        normally; email compromise alone can't unlock anything. Sent at
+        most once per lock (reset when unlock_vault succeeds) to avoid
+        spamming every poll cycle."""
+        auth_config = _load_auth() or {}
+        to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+        if not to_addr:
+            logger.error("Vault is locked but no notification email address is configured (enable email 2FA to set one)")
+            return
+        sent, _ = _send_email(
+            to_addr, 'dnsmasq-ui: credential vault is locked',
+            "The device-credentials vault is locked (likely after a service restart), "
+            "so password-gated dynamic host polling is failing.\n\n"
+            f"Log in and unlock it from the Configuration page:\n{DASHBOARD_URL}/config\n\n"
+            "This email is a notification only, it doesn't unlock anything by itself."
+        )
+        if sent:
+            self._vault_lock_notified = True
 
     def _load_device_credentials(self):
         """Decrypt and return all stored device credentials as
@@ -1157,10 +1190,15 @@ expect eof
         results = {}
         changed_any = False
 
-        for entry in self.config.get('dynamic_hosts', []):
-            if not entry.get('enabled', True):
-                continue
+        entries = [e for e in self.config.get('dynamic_hosts', []) if e.get('enabled', True)]
+        needs_vault = any(
+            e.get('enable_password_ref') or e.get('ssh_password_ref') or e.get('login_password_ref')
+            for e in entries
+        )
+        if needs_vault and not self.vault_unlocked() and not self._vault_lock_notified:
+            self._notify_vault_locked()
 
+        for entry in entries:
             domain = entry['domain']
             record_type = entry.get('record_type', 'AAAA')
             zone = self.get_zone(entry['zone'])
