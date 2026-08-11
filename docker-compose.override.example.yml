@@ -20,15 +20,3 @@ services:
     volumes:
       - ./zones-docker.json:/etc/dnsmasq-ui/zones.json
       - ./wireguard-keys-docker.json:/etc/dnsmasq-ui/wireguard-keys.json:ro
-
-  dns01:
-    volumes:
-      - ./zones-docker.json:/etc/dnsmasq-ui/zones.json:ro
-
-  dns02:
-    volumes:
-      - ./zones-docker.json:/etc/dnsmasq-ui/zones.json:ro
-
-  dns03:
-    volumes:
-      - ./zones-docker.json:/etc/dnsmasq-ui/zones.json:ro

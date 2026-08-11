@@ -122,62 +122,13 @@ if ! grep -q "^listen-address=" /etc/dnsmasq.conf; then
     echo "listen-address=0.0.0.0" >> /etc/dnsmasq.conf
 fi
 
-# Load DNS records from zones.json if present
-if [ -f /etc/dnsmasq-ui/zones.json ]; then
-    echo "[*] Processing DNS records from zones.json..."
-
-    # Parse zones.json and generate dnsmasq address records
-    # Using simple grep/awk approach since jq may not be available
-    python3 << 'PYTHON_EOF'
-import json
-import os
-
-try:
-    with open('/etc/dnsmasq-ui/zones.json', 'r') as f:
-        config = json.load(f)
-
-    # Generate dnsmasq configuration from zones
-    with open('/etc/dnsmasq.d/zones.conf', 'w') as out:
-        if 'zones' in config:
-            # Handle zones as a list (not a dict)
-            zones_list = config['zones']
-            if isinstance(zones_list, list):
-                for zone_data in zones_list:
-                    if 'records' in zone_data:
-                        for record in zone_data['records']:
-                            domain = record.get('domain', '')
-                            record_type = record.get('type', 'A')
-                            value = record.get('value', '')
-
-                            if domain and value:
-                                if record_type == 'A':
-                                    out.write(f'address=/{domain}/{value}\n')
-                                elif record_type == 'AAAA':
-                                    out.write(f'address=/{domain}/{value}\n')
-                                elif record_type == 'CNAME':
-                                    out.write(f'cname={domain},{value}\n')
-            else:
-                # Fallback for dict-based zones (legacy)
-                for zone_name, zone_data in zones_list.items():
-                    if 'records' in zone_data:
-                        for record in zone_data['records']:
-                            domain = record.get('domain', '')
-                            record_type = record.get('type', 'A')
-                            value = record.get('value', '')
-
-                            if domain and value:
-                                if record_type == 'A':
-                                    out.write(f'address=/{domain}/{value}\n')
-                                elif record_type == 'AAAA':
-                                    out.write(f'address=/{domain}/{value}\n')
-                                elif record_type == 'CNAME':
-                                    out.write(f'cname={domain},{value}\n')
-
-    print("[+] DNS records configured")
-except Exception as e:
-    print(f"[!] Failed to load zones.json: {e}")
-PYTHON_EOF
-fi
+# DNS records are pushed by dnsmasq-ui's Deploy action directly to
+# DNSMASQ_RECORDS_FILE over SSH (see app-multi-zone.py:_ssh_update). This
+# script used to also generate /etc/dnsmasq.d/zones.conf from zones.json at
+# boot, but that ran once and never refreshed, so it went stale and conflicted
+# with records pushed later via Deploy (dnsmasq loads every file in
+# conf-dir). Generating config here has been removed to keep Deploy the only
+# source of truth.
 
 # ============================================================================
 # Firewall Configuration (WireGuard DNS Access Control)

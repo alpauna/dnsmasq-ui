@@ -52,7 +52,7 @@
         {
           "domain": "middle-01.ad.alshowto.com",
           "type": "AAAA",
-          "value": "2604:7a00:ea40:1860:be24:11ff:fed7:4cec"
+          "value": "2605:4a80:b004:b120:be24:11ff:fed7:4cec"
         },
         {
           "domain": "esphome.ad.alshowto.com",
@@ -137,7 +137,7 @@
   ],
   "servers": {
     "dns01": {
-      "ip": "172.20.0.231",
+      "ip": "192.168.0.231",
       "hostname": "dns01",
       "port": 22,
       "enabled": true,
@@ -149,7 +149,7 @@
       }
     },
     "dns02": {
-      "ip": "172.20.0.232",
+      "ip": "192.168.0.232",
       "hostname": "dns02",
       "port": 22,
       "enabled": true,
@@ -161,7 +161,7 @@
       }
     },
     "dns03": {
-      "ip": "172.20.0.233",
+      "ip": "192.168.0.233",
       "hostname": "dns03",
       "port": 22,
       "enabled": true,
@@ -178,7 +178,7 @@
       "1.1.1.1",
       "8.8.8.8"
     ],
-    "keepalive_vip": "192.168.0.252",
+    "keepalive_vip": "192.168.0.230",
     "keepalive_interval": 300,
     "wireguard": {
       "enabled": true,

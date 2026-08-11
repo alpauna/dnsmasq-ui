@@ -42,8 +42,6 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    volumes:
-      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
     ports:
       - "2201:22"
       - "5301:53/tcp"
@@ -70,8 +68,6 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    volumes:
-      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
     ports:
       - "2202:22"
       - "5302:53/tcp"
@@ -98,8 +94,6 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    volumes:
-      - ./zones.json:/etc/dnsmasq-ui/zones.json:ro
     ports:
       - "2203:22"
       - "5303:53/tcp"

@@ -76,7 +76,7 @@ class ZoneManager:
                 'servers': {},
                 'global': {
                     'upstream_dns': ['1.1.1.1', '8.8.8.8'],
-                    'keepalive_vip': '192.168.0.252',
+                    'keepalive_vip': '192.168.0.230',
                     'keepalive_interval': 300
                 }
             }
@@ -211,15 +211,15 @@ class ZoneManager:
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
 
-            # Write config and restart
-            cmd = f"echo '{config_content}' | sudo tee {DNSMASQ_RECORDS_FILE} > /dev/null && sudo systemctl restart dnsmasq"
+            # Write config and reload (containers run dnsmasq directly, no systemd)
+            cmd = f"echo '{config_content}' | sudo tee {DNSMASQ_RECORDS_FILE} > /dev/null && sudo pkill -HUP dnsmasq"
             stdin, stdout, stderr = ssh.exec_command(cmd)
             error = stderr.read().decode()
             ssh.close()
 
             if error:
                 return False, error
-            return True, "Config updated and dnsmasq restarted"
+            return True, "Config updated and dnsmasq reloaded"
 
         except Exception as e:
             return False, str(e)
@@ -263,7 +263,8 @@ class ZoneManager:
                 return False, False
 
             # Check if this is the master by checking VIP assignment
-            stdin, stdout, stderr = ssh.exec_command("ip addr show | grep -q 172.20.0.252 && echo MASTER || echo BACKUP")
+            vip = self.config.get('global', {}).get('keepalive_vip', '192.168.0.230')
+            stdin, stdout, stderr = ssh.exec_command(f"ip addr show | grep -q {vip} && echo MASTER || echo BACKUP")
             output = stdout.read().decode().strip()
             ssh.close()
 
