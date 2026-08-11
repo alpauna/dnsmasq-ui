@@ -17,7 +17,7 @@
         {
           "domain": "10g-sw01.ad.alshowto.com",
           "type": "AAAA",
-          "value": "2604:7a00:ea40:5630:5ea6:e6ff:fe27:417c"
+          "value": "2605:4a80:b004:b120:5ea6:e6ff:fe27:417c"
         },
         {
           "domain": "10g-sw02.ad.alshowto.com",
@@ -196,9 +196,37 @@
       "interface": "eth0",
       "ssh_user": null,
       "enabled": true,
-      "last_checked": null,
-      "last_value": null,
+      "last_checked": "2026-08-11T18:35:21.508604",
+      "last_value": "2605:4a80:b004:b120:be24:11ff:fed7:4cec",
       "last_updated": null
+    },
+    {
+      "domain": "10g-sw01.ad.alshowto.com",
+      "zone": "ad.alshowto.com",
+      "record_type": "AAAA",
+      "target_host": "192.168.0.2",
+      "interface": "eth0",
+      "ssh_user": "admin",
+      "enabled": true,
+      "last_checked": "2026-08-11T18:35:38.200522",
+      "last_value": "2605:4a80:b004:b120:5ea6:e6ff:fe27:417c",
+      "last_updated": "2026-08-11T18:35:38.201059",
+      "connection": "docker",
+      "ssh_extra_args": [
+        "-o",
+        "KexAlgorithms=+diffie-hellman-group1-sha1",
+        "-o",
+        "HostKeyAlgorithms=+ssh-dss",
+        "-o",
+        "MACs=+hmac-sha1,hmac-md5",
+        "-c",
+        "aes128-cbc"
+      ],
+      "enable_command": "enable",
+      "cli_prompt_regex": "[>#]\\s*$",
+      "logout_command": "exit",
+      "detect_command": "show ipv6 interface",
+      "detect_regex": "([0-9a-fA-F:]+), subnet is"
     }
   ]
 }
