@@ -414,6 +414,110 @@ that behavior to every record:
 - Manage tracked hosts from the **Configuration** page in the dashboard, or
   via the [API](#dynamic-dns-tracking-1) directly.
 
+#### Advanced: Non-Linux Devices (Switches, Routers)
+
+The basic example above assumes a Linux host with `ip addr` — fine for
+servers and VMs, but switches/routers have their own CLI and no `eth0` to
+query. Three additional fields cover that, and `connection` picks how the
+command actually gets run. Iterate on `detect_command`/`detect_regex`
+against a real device via `POST /api/dynamic-hosts/test` (or the "Test
+Detection" button in the dashboard) before saving — it returns the raw
+command output and either the extracted address or why extraction failed,
+so you're not guessing blind against hardware you can only reach once at a
+time.
+
+**Cisco-style switch behind an old DSA SSH host key**, validated against a
+real TP-Link `TL-SX3008F-1`: paramiko rejects the key outright (non-standard
+DSA modulus size `cryptography` refuses to parse), and modern OpenSSH
+(9.8+) has dropped `ssh-dss` support entirely, so neither the default
+connection nor `cli` can even complete the handshake. `connection: "docker"`
+runs the session inside a container with an older OpenSSH client
+(`docker/legacy-ssh/`, built automatically on first use) that still
+negotiates the legacy algorithms. This switch's embedded SSH server also
+only supports an interactive session, not one-shot `ssh host command`
+execution, and has a separate privileged mode (`enable`) gating `show`
+commands — both handled by driving the session through expect rather than
+a plain command:
+
+```json
+{
+  "domain": "10g-sw01.ad.alshowto.com",
+  "zone": "ad.alshowto.com",
+  "record_type": "AAAA",
+  "target_host": "192.168.0.2",
+  "ssh_user": "admin",
+  "enabled": true,
+  "connection": "docker",
+  "ssh_extra_args": [
+    "-o", "KexAlgorithms=+diffie-hellman-group1-sha1",
+    "-o", "HostKeyAlgorithms=+ssh-dss",
+    "-o", "MACs=+hmac-sha1,hmac-md5",
+    "-c", "aes128-cbc"
+  ],
+  "enable_command": "enable",
+  "cli_prompt_regex": "[>#]\\s*$",
+  "logout_command": "exit",
+  "detect_command": "show ipv6 interface",
+  "detect_regex": "([0-9a-fA-F:]+), subnet is"
+}
+```
+
+The regex specifically anchors on `, subnet is` (unique to the global
+unicast address line in this switch's `show ipv6 interface` output) rather
+than a generic IPv6 pattern, because the same output also contains a
+link-local address (`fe80::...`) that a naive regex would match first —
+worth checking the raw output via `/api/dynamic-hosts/test` for exactly
+this kind of false-match risk before trusting a regex.
+
+**A device requiring a privileged-mode password, or that doesn't accept the
+SSH key at all**: `enable_password_ref`/`ssh_password_ref` reference a name
+in the encrypted device-credentials vault (see below) rather than embedding
+a plaintext password in `zones.json`:
+
+```json
+{
+  "domain": "old-router.ad.alshowto.com",
+  "zone": "ad.alshowto.com",
+  "record_type": "A",
+  "target_host": "192.168.0.3",
+  "ssh_user": "admin",
+  "enabled": true,
+  "connection": "docker",
+  "ssh_password_ref": "old-router-login",
+  "enable_command": "enable",
+  "enable_password_ref": "old-router-enable",
+  "detect_command": "show ip interface brief",
+  "detect_regex": "Vlan1\\s+(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})"
+}
+```
+
+Both `*_password_ref` values are just keys — the actual passwords are set
+separately via the Configuration page's Device Credentials section (or
+`PUT /api/device-credentials/<key>`), encrypted at rest, and require
+unlocking the vault once per service restart before they're usable (see
+Two-Factor Authentication's sibling section above for the general
+unlock-once-per-restart pattern — same idea, different vault).
+
+**A device with legacy algorithms but a modern-enough SSH server to still
+support one-shot commands** (no interactive-only CLI, no DSA host key
+paramiko can't parse) doesn't need the full `docker` treatment —
+`connection: "cli"` shells out to the host's own `ssh` binary, which is
+usually enough:
+
+```json
+{
+  "domain": "old-nas.ad.alshowto.com",
+  "zone": "ad.alshowto.com",
+  "record_type": "A",
+  "target_host": "192.168.0.4",
+  "ssh_user": "admin",
+  "enabled": true,
+  "connection": "cli",
+  "ssh_extra_args": ["-o", "HostKeyAlgorithms=+ssh-rsa"],
+  "detect_command": "ip -4 -o addr show eth0 scope global | awk '{print $4}' | cut -d/ -f1"
+}
+```
+
 ### Environment Variables
 
 ```bash
