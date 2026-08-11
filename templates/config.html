@@ -1215,12 +1215,15 @@
                 });
         }
 
+        let cachedDynamicHosts = [];
+
         function loadDynamicHosts() {
             fetch('/api/dynamic-hosts')
                 .then(response => response.json())
                 .then(data => {
                     let html = '';
                     const hosts = data.dynamic_hosts || [];
+                    cachedDynamicHosts = hosts;
                     if (hosts.length === 0) {
                         html = '<p style="padding: 20px; grid-column: 1/-1;">No hosts tracked yet</p>';
                     } else {
@@ -1247,6 +1250,7 @@
                                 <p><strong>Last checked:</strong> ${lastChecked}</p>
                                 <p><strong>Last updated:</strong> ${lastUpdated}</p>
                                 <div style="margin-top: 10px; display: flex; gap: 8px;">
+                                    <button class="btn btn-secondary btn-sm" onclick="editDynamicHost('${h.domain}')">Edit</button>
                                     <button class="btn btn-secondary btn-sm" onclick="toggleDynamicHost('${h.domain}', ${!h.enabled})">${h.enabled ? 'Disable' : 'Enable'}</button>
                                     <button class="btn btn-secondary btn-sm" onclick="deleteDynamicHost('${h.domain}')">Remove</button>
                                 </div>
@@ -1479,39 +1483,122 @@
                 });
         }
 
+        let editingDynamicHostDomain = null;
+
         function addDynamicHost(event) {
             event.preventDefault();
 
             const payload = collectDynamicHostPayload();
+            const isEdit = editingDynamicHostDomain !== null;
+            const url = isEdit
+                ? `/api/dynamic-hosts/${encodeURIComponent(editingDynamicHostDomain)}`
+                : '/api/dynamic-hosts';
+            const method = isEdit ? 'PUT' : 'POST';
 
             const btn = event.target.querySelector('button[type="submit"]');
             btn.disabled = true;
-            btn.innerHTML = '<span class="loading"></span> Adding...';
+            btn.innerHTML = `<span class="loading"></span> ${isEdit ? 'Saving...' : 'Adding...'}`;
 
-            fetch('/api/dynamic-hosts', {
-                method: 'POST',
+            fetch(url, {
+                method: method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             })
                 .then(response => response.json())
                 .then(data => {
                     btn.disabled = false;
-                    btn.innerHTML = 'Track Host';
 
                     if (data.success) {
-                        document.getElementById('dynamic-add-result').innerHTML = '<div class="alert alert-success">Host added — it will be checked on the next poll.</div>';
-                        document.getElementById('dynamic-host-form').reset();
+                        document.getElementById('dynamic-add-result').innerHTML =
+                            `<div class="alert alert-success">${isEdit ? 'Host updated.' : 'Host added — it will be checked on the next poll.'}</div>`;
+                        if (isEdit) {
+                            cancelEditDynamicHost();
+                        } else {
+                            btn.innerHTML = 'Track Host';
+                            document.getElementById('dynamic-host-form').reset();
+                        }
                         loadDynamicHosts();
                     } else {
+                        btn.innerHTML = isEdit ? 'Save Changes' : 'Track Host';
                         document.getElementById('dynamic-add-result').innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
                     }
                 })
                 .catch(error => {
                     btn.disabled = false;
-                    btn.innerHTML = 'Track Host';
+                    btn.innerHTML = isEdit ? 'Save Changes' : 'Track Host';
                     console.error('Error:', error);
-                    document.getElementById('dynamic-add-result').innerHTML = '<div class="alert alert-error">Error adding tracked host</div>';
+                    document.getElementById('dynamic-add-result').innerHTML = '<div class="alert alert-error">Error saving tracked host</div>';
                 });
+        }
+
+        function editDynamicHost(domain) {
+            const entry = cachedDynamicHosts.find(h => h.domain === domain);
+            if (!entry) return;
+
+            editingDynamicHostDomain = domain;
+
+            document.getElementById('dh-zone').value = entry.zone || '';
+            document.getElementById('dh-domain').value = entry.domain || '';
+            document.getElementById('dh-domain').disabled = true;
+            document.getElementById('dh-zone').disabled = true;
+            document.getElementById('dh-record-type').value = entry.record_type || 'AAAA';
+            document.getElementById('dh-record-type').disabled = true;
+            document.getElementById('dh-target').value = entry.target_host || '';
+            document.getElementById('dh-ssh-user').value = entry.ssh_user || '';
+            document.getElementById('dh-interface').value = entry.interface || 'eth0';
+            document.getElementById('dh-connection').value = entry.connection || 'paramiko';
+            document.getElementById('dh-ssh-extra-args').value = (entry.ssh_extra_args || []).join(' ');
+            document.getElementById('dh-detect-command').value = entry.detect_command || '';
+            document.getElementById('dh-detect-regex').value = entry.detect_regex || '';
+            document.getElementById('dh-cli-prompt-regex').value = entry.cli_prompt_regex || '';
+            document.getElementById('dh-enable-command').value = entry.enable_command || '';
+            document.getElementById('dh-enable-password-ref').value = entry.enable_password_ref || '';
+            document.getElementById('dh-ssh-password-ref').value = entry.ssh_password_ref || '';
+            document.getElementById('dh-logout-command').value = entry.logout_command || 'exit';
+            document.getElementById('dh-detect-url').value = entry.detect_url || '';
+            document.getElementById('dh-login-url').value = entry.login_url || '';
+            document.getElementById('dh-login-fields').value = entry.login_fields ? JSON.stringify(entry.login_fields) : '';
+            document.getElementById('dh-login-password-field').value = entry.login_password_field || '';
+            document.getElementById('dh-login-password-transform').value = entry.login_password_transform || 'none';
+            document.getElementById('dh-login-password-ref').value = entry.login_password_ref || '';
+            document.getElementById('dh-session-param-regex').value = entry.session_param_regex || '';
+            document.getElementById('dh-session-param-name').value = entry.session_param_name || 'session_id';
+            document.getElementById('dh-verify-tls').checked = entry.verify_tls !== false;
+
+            updateDynamicHostFormVisibility();
+
+            const details = document.querySelector('#dynamic-host-form details');
+            if (entry.connection && entry.connection !== 'paramiko') {
+                details.open = true;
+            }
+
+            const submitBtn = document.querySelector('#dynamic-host-form button[type="submit"]');
+            submitBtn.innerHTML = 'Save Changes';
+            if (!document.getElementById('dh-cancel-edit')) {
+                const cancelBtn = document.createElement('button');
+                cancelBtn.type = 'button';
+                cancelBtn.id = 'dh-cancel-edit';
+                cancelBtn.className = 'btn btn-secondary';
+                cancelBtn.style.marginLeft = '10px';
+                cancelBtn.textContent = 'Cancel Edit';
+                cancelBtn.onclick = cancelEditDynamicHost;
+                submitBtn.insertAdjacentElement('afterend', cancelBtn);
+            }
+
+            document.getElementById('dynamic-host-form').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function cancelEditDynamicHost() {
+            editingDynamicHostDomain = null;
+            document.getElementById('dynamic-host-form').reset();
+            document.getElementById('dh-domain').disabled = false;
+            document.getElementById('dh-zone').disabled = false;
+            document.getElementById('dh-record-type').disabled = false;
+            updateDynamicHostFormVisibility();
+            const submitBtn = document.querySelector('#dynamic-host-form button[type="submit"]');
+            submitBtn.innerHTML = 'Track Host';
+            const cancelBtn = document.getElementById('dh-cancel-edit');
+            if (cancelBtn) cancelBtn.remove();
         }
 
         function toggleDynamicHost(domain, enabled) {
