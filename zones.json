@@ -186,5 +186,19 @@
       "listen_port": 51820,
       "persistent_keepalive": 25
     }
-  }
+  },
+  "dynamic_hosts": [
+    {
+      "domain": "middle-01.ad.alshowto.com",
+      "zone": "ad.alshowto.com",
+      "record_type": "AAAA",
+      "target_host": "192.168.0.250",
+      "interface": "eth0",
+      "ssh_user": null,
+      "enabled": true,
+      "last_checked": null,
+      "last_value": null,
+      "last_updated": null
+    }
+  ]
 }

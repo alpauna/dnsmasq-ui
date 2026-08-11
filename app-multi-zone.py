@@ -21,6 +21,8 @@ from cryptography.hazmat.backends import default_backend
 import hashlib
 import base64
 import ipaddress
+import threading
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -69,9 +71,9 @@ class ZoneManager:
         """Load zones and servers configuration."""
         try:
             with open(self.zones_file) as f:
-                return json.load(f)
+                config = json.load(f)
         except:
-            return {
+            config = {
                 'zones': [],
                 'servers': {},
                 'global': {
@@ -80,6 +82,8 @@ class ZoneManager:
                     'keepalive_interval': 300
                 }
             }
+        config.setdefault('dynamic_hosts', [])
+        return config
 
     def save_config(self):
         """Save zones configuration to file."""
@@ -279,6 +283,134 @@ class ZoneManager:
             return is_master, keepalived_running
         except:
             return False, False
+
+    def get_dynamic_hosts(self):
+        """Get all dynamic-address tracked hosts."""
+        return self.config.get('dynamic_hosts', [])
+
+    def add_dynamic_host(self, domain, zone_name, target_host, interface='eth0',
+                          record_type='AAAA', ssh_user=None, enabled=True):
+        """Track a host whose address (e.g. DHCPv6-assigned) should be polled
+        and kept in sync with its DNS record, selected explicitly per-host
+        rather than applying to every record."""
+        if not self.get_zone(zone_name):
+            return False, "Zone not found"
+
+        for entry in self.config['dynamic_hosts']:
+            if entry['domain'] == domain and entry['record_type'] == record_type:
+                return False, "Already tracked"
+
+        self.config['dynamic_hosts'].append({
+            'domain': domain,
+            'zone': zone_name,
+            'record_type': record_type,
+            'target_host': target_host,
+            'interface': interface,
+            'ssh_user': ssh_user,
+            'enabled': enabled,
+            'last_checked': None,
+            'last_value': None,
+            'last_updated': None
+        })
+        self.save_config()
+        return True, "Dynamic host added"
+
+    def update_dynamic_host(self, domain, **fields):
+        """Update fields (target_host, interface, ssh_user, enabled) on a tracked host."""
+        for entry in self.config['dynamic_hosts']:
+            if entry['domain'] == domain:
+                entry.update({k: v for k, v in fields.items()
+                              if k in ('target_host', 'interface', 'ssh_user', 'enabled')})
+                self.save_config()
+                return True, "Dynamic host updated"
+        return False, "Not found"
+
+    def delete_dynamic_host(self, domain):
+        """Stop tracking a host."""
+        before = len(self.config['dynamic_hosts'])
+        self.config['dynamic_hosts'] = [e for e in self.config['dynamic_hosts'] if e['domain'] != domain]
+        self.save_config()
+        return before != len(self.config['dynamic_hosts']), "Dynamic host removed"
+
+    def _detect_current_address(self, target_host, interface, record_type='AAAA', ssh_user=None):
+        """SSH into target_host and read its current global address on interface.
+
+        Excludes link-local and IPv6 privacy/temporary addresses so a
+        DHCPv6- or SLAAC-assigned global address is what gets returned.
+        """
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(target_host, username=ssh_user or SSH_USER, key_filename=SSH_KEY, timeout=5)
+
+            if record_type == 'AAAA':
+                cmd = (
+                    f"ip -6 -o addr show {interface} scope global | "
+                    "grep -v temporary | awk '{print $4}' | cut -d/ -f1 | head -1"
+                )
+            else:
+                cmd = f"ip -4 -o addr show {interface} scope global | awk '{{print $4}}' | cut -d/ -f1 | head -1"
+
+            stdin, stdout, stderr = ssh.exec_command(cmd)
+            address = stdout.read().decode().strip()
+            ssh.close()
+            return address or None
+        except Exception as e:
+            logger.error(f"Failed to detect address on {target_host}: {e}")
+            return None
+
+    def poll_dynamic_hosts(self):
+        """Check every enabled tracked host for an address change and, if
+        changed, update its DNS record and redeploy once at the end.
+
+        Returns:
+            dict: {'changes': {domain: {...}}, 'deployed': bool}
+        """
+        results = {}
+        changed_any = False
+
+        for entry in self.config.get('dynamic_hosts', []):
+            if not entry.get('enabled', True):
+                continue
+
+            domain = entry['domain']
+            record_type = entry.get('record_type', 'AAAA')
+            zone = self.get_zone(entry['zone'])
+            if not zone:
+                results[domain] = {'changed': False, 'error': 'zone not found'}
+                continue
+
+            current = self._detect_current_address(
+                entry['target_host'], entry.get('interface', 'eth0'),
+                record_type, entry.get('ssh_user')
+            )
+            entry['last_checked'] = datetime.now().isoformat()
+
+            if not current:
+                results[domain] = {'changed': False, 'error': 'detection failed'}
+                continue
+
+            existing = next((r['value'] for r in zone['records']
+                              if r['domain'] == domain and r['type'] == record_type), None)
+
+            if current == existing:
+                results[domain] = {'changed': False, 'value': current}
+            else:
+                if existing is None:
+                    self.add_record(entry['zone'], domain, record_type, current)
+                else:
+                    self.update_record(entry['zone'], domain, record_type, current)
+                entry['last_updated'] = datetime.now().isoformat()
+                results[domain] = {'changed': True, 'old': existing, 'new': current}
+                changed_any = True
+
+            entry['last_value'] = current
+
+        self.save_config()
+        if changed_any:
+            self.deploy_to_servers()
+
+        return {'changes': results, 'deployed': changed_any}
 
     def get_ssh_key_info(self):
         """Get current SSH key information."""
@@ -1079,6 +1211,44 @@ def api_status():
         'wg_enabled': wg_enabled
     })
 
+@app.route('/api/dynamic-hosts', methods=['GET'])
+def api_dynamic_hosts_list():
+    """API: List dynamically-tracked hosts (e.g. DHCPv6 clients kept in sync)."""
+    return jsonify({'dynamic_hosts': manager.get_dynamic_hosts()})
+
+@app.route('/api/dynamic-hosts', methods=['POST'])
+def api_dynamic_hosts_add():
+    """API: Start tracking a specific host's address for automatic DNS updates."""
+    data = request.json
+    success, message = manager.add_dynamic_host(
+        domain=data['domain'],
+        zone_name=data['zone'],
+        target_host=data['target_host'],
+        interface=data.get('interface', 'eth0'),
+        record_type=data.get('record_type', 'AAAA'),
+        ssh_user=data.get('ssh_user'),
+        enabled=data.get('enabled', True)
+    )
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/dynamic-hosts/<domain>', methods=['PUT'])
+def api_dynamic_hosts_update(domain):
+    """API: Update a tracked host, e.g. enable/disable or change target/interface."""
+    data = request.json
+    success, message = manager.update_dynamic_host(domain, **data)
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/dynamic-hosts/<domain>', methods=['DELETE'])
+def api_dynamic_hosts_delete(domain):
+    """API: Stop tracking a host."""
+    success, message = manager.delete_dynamic_host(domain)
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/dynamic-hosts/poll', methods=['POST'])
+def api_dynamic_hosts_poll():
+    """API: Immediately poll all tracked hosts and deploy any changes."""
+    return jsonify(manager.poll_dynamic_hosts())
+
 @app.route('/config')
 def config_page():
     """Configuration page for SSH keys and server management."""
@@ -1320,5 +1490,20 @@ def not_found(error):
 def server_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
+DYNAMIC_POLL_INTERVAL = int(os.getenv('DYNAMIC_POLL_INTERVAL', '300'))
+
+def _dynamic_host_poller():
+    """Background loop: periodically sync tracked hosts' DNS records to their
+    current address (e.g. after a DHCPv6 lease renewal)."""
+    while True:
+        time.sleep(DYNAMIC_POLL_INTERVAL)
+        try:
+            result = manager.poll_dynamic_hosts()
+            if result['deployed']:
+                logger.info(f"Dynamic host poll applied changes: {result['changes']}")
+        except Exception as e:
+            logger.error(f"Dynamic host poll failed: {e}")
+
 if __name__ == '__main__':
+    threading.Thread(target=_dynamic_host_poller, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=False)
