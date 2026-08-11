@@ -424,13 +424,40 @@
                     <input type="text" id="dh-target" placeholder="192.168.0.250" required>
                 </div>
                 <div class="form-group">
-                    <label for="dh-interface">Network Interface</label>
-                    <input type="text" id="dh-interface" value="eth0" required>
-                </div>
-                <div class="form-group">
                     <label for="dh-ssh-user">SSH User (optional, defaults to the server's configured SSH user)</label>
                     <input type="text" id="dh-ssh-user" placeholder="debian">
                 </div>
+
+                <details style="margin-bottom: 20px;">
+                    <summary style="cursor: pointer; color: #667eea; font-weight: 500; margin-bottom: 15px;">Advanced (for non-Linux devices like switches)</summary>
+
+                    <div class="form-group" style="margin-top: 15px;">
+                        <label for="dh-interface">Network Interface (Linux hosts only, e.g. eth0)</label>
+                        <input type="text" id="dh-interface" value="eth0">
+                    </div>
+                    <div class="form-group">
+                        <label for="dh-connection">Connection Method</label>
+                        <select id="dh-connection">
+                            <option value="paramiko" selected>paramiko (default)</option>
+                            <option value="cli">system ssh binary (for devices paramiko can't negotiate with)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="dh-ssh-extra-args">Extra SSH Flags (only used with "system ssh binary", space-separated)</label>
+                        <input type="text" id="dh-ssh-extra-args" placeholder="-o KexAlgorithms=+diffie-hellman-group1-sha1 -o HostKeyAlgorithms=+ssh-dss -c aes128-cbc">
+                    </div>
+                    <div class="form-group">
+                        <label for="dh-detect-command">Custom Detect Command (overrides the default `ip addr` check — needed for switches/routers with their own CLI)</label>
+                        <input type="text" id="dh-detect-command" placeholder="show ip interface brief">
+                    </div>
+                    <div class="form-group">
+                        <label for="dh-detect-regex">Detect Regex (required if using a custom command — first capture group, or whole match, is used as the address)</label>
+                        <input type="text" id="dh-detect-regex" placeholder="(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})">
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="testDynamicHostDetection()">Test Detection (doesn't save)</button>
+                    <div id="dynamic-test-result" style="margin-top: 15px;"></div>
+                </details>
+
                 <button type="submit" class="btn btn-primary">Track Host</button>
             </form>
             <div id="dynamic-add-result" style="margin-top: 15px;"></div>
@@ -873,11 +900,17 @@
                             const statusIcon = h.enabled ? '🟢' : '⚫';
                             const lastChecked = h.last_checked ? new Date(h.last_checked).toLocaleString() : 'never';
                             const lastUpdated = h.last_updated ? new Date(h.last_updated).toLocaleString() : 'never';
+                            const connectionNote = h.connection && h.connection !== 'paramiko'
+                                ? `<p><strong>Connection:</strong> ${h.connection}</p>` : '';
+                            const detectNote = h.detect_command
+                                ? `<p><strong>Detect command:</strong> ${h.detect_command}</p>` : '';
                             html += `<div class="server-item">
                                 <h4>${statusIcon} ${h.domain}</h4>
                                 <p><strong>Zone:</strong> ${h.zone}</p>
                                 <p><strong>Type:</strong> ${h.record_type}</p>
-                                <p><strong>Target:</strong> ${h.target_host} (${h.interface})</p>
+                                <p><strong>Target:</strong> ${h.target_host}${h.detect_command ? '' : ' (' + h.interface + ')'}</p>
+                                ${connectionNote}
+                                ${detectNote}
                                 <p><strong>Current value:</strong> ${h.last_value || 'unknown'}</p>
                                 <p><strong>Last checked:</strong> ${lastChecked}</p>
                                 <p><strong>Last updated:</strong> ${lastUpdated}</p>
@@ -908,17 +941,52 @@
                 .catch(error => console.error('Error loading zones:', error));
         }
 
-        function addDynamicHost(event) {
-            event.preventDefault();
-
-            const payload = {
+        function collectDynamicHostPayload() {
+            const extraArgsRaw = document.getElementById('dh-ssh-extra-args').value.trim();
+            return {
                 zone: document.getElementById('dh-zone').value,
                 domain: document.getElementById('dh-domain').value.trim(),
                 record_type: document.getElementById('dh-record-type').value,
                 target_host: document.getElementById('dh-target').value.trim(),
                 interface: document.getElementById('dh-interface').value.trim() || 'eth0',
-                ssh_user: document.getElementById('dh-ssh-user').value.trim() || null
+                ssh_user: document.getElementById('dh-ssh-user').value.trim() || null,
+                connection: document.getElementById('dh-connection').value,
+                ssh_extra_args: extraArgsRaw ? extraArgsRaw.split(/\s+/) : [],
+                detect_command: document.getElementById('dh-detect-command').value.trim() || null,
+                detect_regex: document.getElementById('dh-detect-regex').value.trim() || null
             };
+        }
+
+        function testDynamicHostDetection() {
+            const payload = collectDynamicHostPayload();
+            const resultDiv = document.getElementById('dynamic-test-result');
+            resultDiv.innerHTML = '<span class="loading"></span> Testing...';
+
+            fetch('/api/dynamic-hosts/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(response => response.json())
+                .then(data => {
+                    let html = `<div class="code-block">Command: ${escapeHtml(data.command)}\nConnection: ${escapeHtml(data.connection)}\n\nRaw output:\n${escapeHtml(data.raw_output || '(none)')}</div>`;
+                    if (data.detected_address) {
+                        html += `<div class="alert alert-success">Detected address: <strong>${data.detected_address}</strong></div>`;
+                    } else {
+                        html += `<div class="alert alert-error">${data.error || 'Detection failed'}</div>`;
+                    }
+                    resultDiv.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error testing detection:', error);
+                    resultDiv.innerHTML = '<div class="alert alert-error">Error testing detection</div>';
+                });
+        }
+
+        function addDynamicHost(event) {
+            event.preventDefault();
+
+            const payload = collectDynamicHostPayload();
 
             const btn = event.target.querySelector('button[type="submit"]');
             btn.disabled = true;

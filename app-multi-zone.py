@@ -21,6 +21,7 @@ from cryptography.hazmat.backends import default_backend
 import hashlib
 import base64
 import ipaddress
+import re
 import threading
 import time
 
@@ -289,10 +290,24 @@ class ZoneManager:
         return self.config.get('dynamic_hosts', [])
 
     def add_dynamic_host(self, domain, zone_name, target_host, interface='eth0',
-                          record_type='AAAA', ssh_user=None, enabled=True):
+                          record_type='AAAA', ssh_user=None, enabled=True,
+                          connection='paramiko', ssh_extra_args=None,
+                          detect_command=None, detect_regex=None):
         """Track a host whose address (e.g. DHCPv6-assigned) should be polled
         and kept in sync with its DNS record, selected explicitly per-host
-        rather than applying to every record."""
+        rather than applying to every record.
+
+        connection: 'paramiko' (default) or 'cli' — 'cli' shells out to the
+        system ssh binary instead, for devices paramiko can't negotiate
+        with (e.g. old switches with DSA host keys paramiko rejects).
+        ssh_extra_args: list of extra flags passed to the ssh CLI, only used
+        when connection='cli' (e.g. ["-o", "HostKeyAlgorithms=+ssh-dss"]).
+        detect_command/detect_regex: override the default `ip addr` based
+        detection with an arbitrary command and a regex (first capture
+        group, or whole match) to pull the address out of its output —
+        needed for non-Linux CLIs like switches that don't have an
+        `ip`/eth0-style interface to query.
+        """
         if not self.get_zone(zone_name):
             return False, "Zone not found"
 
@@ -308,6 +323,10 @@ class ZoneManager:
             'interface': interface,
             'ssh_user': ssh_user,
             'enabled': enabled,
+            'connection': connection,
+            'ssh_extra_args': ssh_extra_args or [],
+            'detect_command': detect_command,
+            'detect_regex': detect_regex,
             'last_checked': None,
             'last_value': None,
             'last_updated': None
@@ -316,11 +335,12 @@ class ZoneManager:
         return True, "Dynamic host added"
 
     def update_dynamic_host(self, domain, **fields):
-        """Update fields (target_host, interface, ssh_user, enabled) on a tracked host."""
+        """Update fields on a tracked host."""
+        allowed = ('target_host', 'interface', 'ssh_user', 'enabled', 'connection',
+                   'ssh_extra_args', 'detect_command', 'detect_regex')
         for entry in self.config['dynamic_hosts']:
             if entry['domain'] == domain:
-                entry.update({k: v for k, v in fields.items()
-                              if k in ('target_host', 'interface', 'ssh_user', 'enabled')})
+                entry.update({k: v for k, v in fields.items() if k in allowed})
                 self.save_config()
                 return True, "Dynamic host updated"
         return False, "Not found"
@@ -332,32 +352,114 @@ class ZoneManager:
         self.save_config()
         return before != len(self.config['dynamic_hosts']), "Dynamic host removed"
 
-    def _detect_current_address(self, target_host, interface, record_type='AAAA', ssh_user=None):
-        """SSH into target_host and read its current global address on interface.
-
-        Excludes link-local and IPv6 privacy/temporary addresses so a
-        DHCPv6- or SLAAC-assigned global address is what gets returned.
-        """
+    def _run_ssh_paramiko(self, target_host, command, ssh_user=None):
+        """Run command over SSH via paramiko. Returns stdout text, or None on failure."""
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(target_host, username=ssh_user or SSH_USER, key_filename=SSH_KEY, timeout=5)
+            stdin, stdout, stderr = ssh.exec_command(command)
+            output = stdout.read().decode()
+            ssh.close()
+            return output
+        except Exception as e:
+            logger.error(f"paramiko SSH to {target_host} failed: {e}")
+            return None
 
+    def _run_ssh_cli(self, target_host, command, ssh_user=None, extra_args=None):
+        """Run command over SSH via the system ssh binary. Used for devices
+        paramiko can't negotiate with (e.g. old switches with DSA host keys
+        outside paramiko's supported key sizes) — the system ssh client
+        doesn't share that limitation. Returns stdout text, or None on failure."""
+        ssh_args = [
+            'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+            '-o', 'StrictHostKeyChecking=accept-new', '-i', SSH_KEY
+        ]
+        ssh_args += extra_args or []
+        ssh_args.append(f"{ssh_user or SSH_USER}@{target_host}")
+        ssh_args.append(command)
+        try:
+            result = subprocess.run(ssh_args, capture_output=True, text=True, timeout=15)
+            if result.returncode != 0:
+                logger.error(f"ssh CLI to {target_host} exited {result.returncode}: {result.stderr.strip()}")
+                return None
+            return result.stdout
+        except Exception as e:
+            logger.error(f"ssh CLI to {target_host} failed: {e}")
+            return None
+
+    def test_dynamic_host(self, entry):
+        """Dry-run address detection for an entry (saved or not), returning
+        full debug info — command run, raw output, and either the detected
+        address or the reason detection failed. Meant for iterating on
+        detect_command/detect_regex against an unfamiliar device CLI (e.g. a
+        switch) before committing to a saved dynamic_hosts entry.
+        """
+        target_host = entry.get('target_host')
+        ssh_user = entry.get('ssh_user')
+        connection = entry.get('connection', 'paramiko')
+        record_type = entry.get('record_type', 'AAAA')
+        detect_command = entry.get('detect_command')
+        detect_regex = entry.get('detect_regex')
+
+        if detect_command:
+            command = detect_command
+        else:
+            interface = entry.get('interface', 'eth0')
             if record_type == 'AAAA':
-                cmd = (
+                command = (
                     f"ip -6 -o addr show {interface} scope global | "
                     "grep -v temporary | awk '{print $4}' | cut -d/ -f1 | head -1"
                 )
             else:
-                cmd = f"ip -4 -o addr show {interface} scope global | awk '{{print $4}}' | cut -d/ -f1 | head -1"
+                command = f"ip -4 -o addr show {interface} scope global | awk '{{print $4}}' | cut -d/ -f1 | head -1"
 
-            stdin, stdout, stderr = ssh.exec_command(cmd)
-            address = stdout.read().decode().strip()
-            ssh.close()
-            return address or None
-        except Exception as e:
-            logger.error(f"Failed to detect address on {target_host}: {e}")
-            return None
+        if connection == 'cli':
+            output = self._run_ssh_cli(target_host, command, ssh_user, entry.get('ssh_extra_args'))
+        else:
+            output = self._run_ssh_paramiko(target_host, command, ssh_user)
+
+        result = {'command': command, 'connection': connection, 'raw_output': output}
+
+        if output is None:
+            result['error'] = 'SSH command failed — see server logs for details'
+            return result
+
+        if detect_command:
+            if not detect_regex:
+                result['error'] = 'detect_command is set without detect_regex; refusing to guess'
+                return result
+            match = re.search(detect_regex, output)
+            if not match:
+                result['error'] = 'detect_regex did not match the command output'
+                return result
+            address = match.group(1) if match.groups() else match.group(0)
+        else:
+            address = output.strip()
+
+        if not address:
+            result['error'] = 'no address extracted'
+            return result
+
+        # Sanity-check it's actually a valid address of the expected family
+        # before letting it anywhere near a DNS record.
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError:
+            result['error'] = f"'{address}' is not a valid IP address"
+            return result
+        if (record_type == 'AAAA') != (parsed.version == 6):
+            result['error'] = f"'{address}' is IPv{parsed.version}, expected {record_type}"
+            return result
+
+        result['detected_address'] = address
+        return result
+
+    def _detect_current_address(self, entry):
+        """Read a tracked host's current address per its entry config.
+        Returns the address string, or None if detection failed.
+        """
+        return self.test_dynamic_host(entry).get('detected_address')
 
     def poll_dynamic_hosts(self):
         """Check every enabled tracked host for an address change and, if
@@ -380,10 +482,7 @@ class ZoneManager:
                 results[domain] = {'changed': False, 'error': 'zone not found'}
                 continue
 
-            current = self._detect_current_address(
-                entry['target_host'], entry.get('interface', 'eth0'),
-                record_type, entry.get('ssh_user')
-            )
+            current = self._detect_current_address(entry)
             entry['last_checked'] = datetime.now().isoformat()
 
             if not current:
@@ -1228,7 +1327,11 @@ def api_dynamic_hosts_add():
         interface=data.get('interface', 'eth0'),
         record_type=data.get('record_type', 'AAAA'),
         ssh_user=data.get('ssh_user'),
-        enabled=data.get('enabled', True)
+        enabled=data.get('enabled', True),
+        connection=data.get('connection', 'paramiko'),
+        ssh_extra_args=data.get('ssh_extra_args'),
+        detect_command=data.get('detect_command'),
+        detect_regex=data.get('detect_regex')
     )
     return jsonify({'success': success, 'message': message})
 
@@ -1249,6 +1352,13 @@ def api_dynamic_hosts_delete(domain):
 def api_dynamic_hosts_poll():
     """API: Immediately poll all tracked hosts and deploy any changes."""
     return jsonify(manager.poll_dynamic_hosts())
+
+@app.route('/api/dynamic-hosts/test', methods=['POST'])
+def api_dynamic_hosts_test():
+    """API: Dry-run detection against arbitrary settings (not necessarily a
+    saved entry) — for iterating on detect_command/detect_regex against a
+    device's CLI without committing to zones.json each attempt."""
+    return jsonify(manager.test_dynamic_host(request.json))
 
 @app.route('/config')
 def config_page():
