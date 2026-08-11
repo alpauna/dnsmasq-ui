@@ -211,15 +211,22 @@ class ZoneManager:
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
 
-            # Write config and reload (containers run dnsmasq directly, no systemd)
-            cmd = f"echo '{config_content}' | sudo tee {DNSMASQ_RECORDS_FILE} > /dev/null && sudo pkill -HUP dnsmasq"
+            # Write config and do a full restart. SIGHUP only reloads /etc/hosts-style
+            # dynamic data; address=/cname= directives from conf-dir are parsed once
+            # at startup and need a real restart to pick up changes. Falls back to
+            # pkill+respawn on hosts without systemd (e.g. the Docker dns-node image).
+            cmd = (
+                f"echo '{config_content}' | sudo tee {DNSMASQ_RECORDS_FILE} > /dev/null && "
+                "(sudo systemctl restart dnsmasq 2>/dev/null || "
+                "(sudo pkill dnsmasq; sleep 1; sudo /usr/sbin/dnsmasq -C /etc/dnsmasq.conf &))"
+            )
             stdin, stdout, stderr = ssh.exec_command(cmd)
             error = stderr.read().decode()
             ssh.close()
 
             if error:
                 return False, error
-            return True, "Config updated and dnsmasq reloaded"
+            return True, "Config updated and dnsmasq restarted"
 
         except Exception as e:
             return False, str(e)
