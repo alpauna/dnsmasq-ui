@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ 'Set Admin Password' if mode == 'setup' else 'Sign In' }} - dnsmasq-ui</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 40px;
+            width: 100%;
+            max-width: 380px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        h1 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+
+        p.subtitle {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 25px;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        .form-group label {
+            display: block;
+            color: #333;
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        .form-group input[type="password"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            background: #667eea;
+            color: white;
+            transition: background 0.2s;
+        }
+
+        .btn:hover {
+            background: #5568d3;
+        }
+
+        .alert-error {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+            border-radius: 4px;
+            padding: 12px;
+            font-size: 13px;
+            margin-bottom: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        {% if mode == 'setup' %}
+            <h1>Set Admin Password</h1>
+            <p class="subtitle">First-time setup — this password protects the dnsmasq-ui dashboard.</p>
+            {% if error %}<div class="alert-error">{{ error }}</div>{% endif %}
+            <form method="POST" action="{{ url_for('setup_page') }}">
+                <div class="form-group">
+                    <label for="password">Password (min 8 characters)</label>
+                    <input type="password" id="password" name="password" required autofocus>
+                </div>
+                <div class="form-group">
+                    <label for="confirm">Confirm Password</label>
+                    <input type="password" id="confirm" name="confirm" required>
+                </div>
+                <button type="submit" class="btn">Set Password &amp; Continue</button>
+            </form>
+        {% else %}
+            <h1>dnsmasq-ui</h1>
+            <p class="subtitle">Sign in to continue.</p>
+            {% if error %}<div class="alert-error">{{ error }}</div>{% endif %}
+            <form method="POST" action="{{ url_for('login_page', next=request.args.get('next')) }}">
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required autofocus>
+                </div>
+                <button type="submit" class="btn">Sign In</button>
+            </form>
+        {% endif %}
+    </div>
+</body>
+</html>

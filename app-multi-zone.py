@@ -4,14 +4,15 @@ dnsmasq-ui v2: Enhanced web UI with multi-zone support.
 Manages dnsmasq DNS records across multiple servers and zones.
 """
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for, send_file
+from flask import Flask, render_template, request, jsonify, redirect, url_for, send_file, session
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import generate_password_hash, check_password_hash
 import json
 import os
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import paramiko
 import logging
 from cryptography.hazmat.primitives import serialization
@@ -67,6 +68,13 @@ DEVICE_CREDENTIALS_FILE = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(ZONES_FILE)), 'device-credentials.json')
 )
 LEGACY_SSH_IMAGE = os.getenv('LEGACY_SSH_IMAGE', 'dnsmasq-ui-legacy-ssh')
+# Dashboard login. Single shared admin password (hashed with Werkzeug's
+# scrypt-based generate_password_hash) plus a persisted session-signing
+# secret — both gitignored, never in zones.json. Set on first run via /setup.
+AUTH_FILE = os.getenv(
+    'AUTH_FILE',
+    os.path.join(os.path.dirname(os.path.abspath(ZONES_FILE)), 'auth.json')
+)
 LEGACY_SSH_DOCKERFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docker', 'legacy-ssh')
 
 # Reverse proxy configuration
@@ -83,6 +91,94 @@ def log_request():
     method = request.method
     path = request.path
     logger.info(f"{client_ip} {method} {path}")
+
+def _load_auth():
+    """Load dashboard login config. Returns None if /setup hasn't run yet."""
+    if not os.path.exists(AUTH_FILE):
+        return None
+    try:
+        with open(AUTH_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load auth config: {e}")
+        return None
+
+def _save_auth(data):
+    fd = os.open(AUTH_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f, indent=2)
+
+# Session-signing secret: persisted once /setup completes so sessions survive
+# restarts. Until then, a per-process random value — any sessions started
+# before setup are meaningless anyway (there's no password to have logged in
+# with), so losing them on restart is fine.
+_auth_config = _load_auth()
+app.secret_key = _auth_config['secret_key'] if _auth_config else os.urandom(32).hex()
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'false').lower() == 'true'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+
+_PUBLIC_PATHS = {'/setup', '/login', '/favicon.ico'}
+
+@app.before_request
+def _require_login():
+    if request.path in _PUBLIC_PATHS or request.path.startswith('/static/'):
+        return
+    auth_config = _load_auth()
+    if not auth_config or not auth_config.get('password_hash'):
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'Dashboard setup required'}), 401
+        return redirect(url_for('setup_page'))
+    if not session.get('logged_in'):
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'Authentication required'}), 401
+        return redirect(url_for('login_page', next=request.path))
+
+@app.route('/setup', methods=['GET', 'POST'])
+def setup_page():
+    """First-run: set the dashboard's admin password."""
+    auth_config = _load_auth()
+    if auth_config and auth_config.get('password_hash'):
+        return redirect(url_for('login_page'))
+
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        confirm = request.form.get('confirm', '')
+        if len(password) < 8:
+            return render_template('login.html', mode='setup', error='Password must be at least 8 characters')
+        if password != confirm:
+            return render_template('login.html', mode='setup', error='Passwords do not match')
+
+        secret_key = os.urandom(32).hex()
+        _save_auth({'password_hash': generate_password_hash(password), 'secret_key': secret_key})
+        app.secret_key = secret_key
+        session.permanent = True
+        session['logged_in'] = True
+        return redirect(url_for('index'))
+
+    return render_template('login.html', mode='setup')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login_page():
+    auth_config = _load_auth()
+    if not auth_config or not auth_config.get('password_hash'):
+        return redirect(url_for('setup_page'))
+
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        if check_password_hash(auth_config['password_hash'], password):
+            session.permanent = True
+            session['logged_in'] = True
+            next_path = request.args.get('next') or url_for('index')
+            return redirect(next_path)
+        return render_template('login.html', mode='login', error='Incorrect password')
+
+    return render_template('login.html', mode='login')
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return redirect(url_for('login_page'))
 
 class ZoneManager:
     """Manages DNS zones and records."""
