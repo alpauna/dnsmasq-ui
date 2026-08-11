@@ -147,7 +147,7 @@
         {
           "domain": "wifi.mgmt.alshowto.com",
           "type": "A",
-          "value": "192.168.7.80"
+          "value": "192.168.7.21"
         }
       ]
     }
@@ -249,7 +249,7 @@
       "domain": "wifi.mgmt.alshowto.com",
       "zone": "mgmt.alshowto.com",
       "record_type": "AAAA",
-      "target_host": "192.168.7.80",
+      "target_host": "192.168.7.21",
       "interface": "eth0",
       "ssh_user": null,
       "enabled": true,
@@ -257,8 +257,8 @@
       "last_value": null,
       "last_updated": null,
       "connection": "http",
-      "detect_url": "http://192.168.7.80/index.asp",
-      "login_url": "http://192.168.7.80/login.cgi",
+      "detect_url": "http://192.168.7.21/index.asp",
+      "login_url": "http://192.168.7.21/login.cgi",
       "login_fields": {
         "submit_button": "login",
         "change_action": "",
