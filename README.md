@@ -904,9 +904,62 @@ server=8.8.8.8
 - **Password Authentication**: Optional fallback for initial setup when keys aren't available yet
 - **Credentials Storage**: SSH keys should be stored securely at `~/.ssh/id_rsa` with 0600 permissions
 - **Network**: Run dnsmasq-ui on protected network or behind firewall
-- **Access Control**: Consider adding authentication layer (e.g., reverse proxy auth) for production use
+- **Access Control**: The dashboard requires a login (see Dashboard Authentication below) — set this up before exposing the port beyond a trusted network
 - **Reverse Proxy**: Full support for X-Forwarded headers when deployed behind nginx/Traefik/HAProxy
 - **Logs**: Client IP tracking via X-Forwarded-For headers automatically logged
+
+### Dashboard Authentication
+
+Every route requires login except `/setup` and `/login`; API requests without
+a valid session get a `401` instead of leaking data.
+
+- **First run**: visiting the dashboard redirects to `/setup` to choose an
+  admin password (min. 8 characters). There's one shared password — this
+  isn't a multi-user system.
+- **Login/logout**: `/login`, and a Logout link in the dashboard and
+  Configuration page headers (`POST /logout`).
+- **Session**: signed cookie (`HttpOnly`), survives service restarts once a
+  password has been set, since the signing secret is persisted alongside the
+  password hash in `auth.json`.
+- **Forgot the password**: there's no reset flow by design (single shared
+  password, no email). Delete `auth.json` on the server and restart
+  `dnsmasq-ui.service` — `/setup` runs again on the next visit.
+  ```bash
+  ssh debian@<server> "rm /opt/dnsmasq-ui/auth.json && sudo systemctl restart dnsmasq-ui"
+  ```
+- **Known limitation**: no CSRF token protection on state-changing
+  POST/PUT/DELETE endpoints yet. Acceptable for a private LAN tool; worth
+  hardening before exposing this beyond that.
+- **Testing the login programmatically**: use `curl --data-urlencode`, not
+  `-d`, if the password contains `&` or other reserved URL characters — `-d`
+  sends the value unencoded, so the receiving form parser treats `&` as a
+  field separator and silently truncates the password at that point.
+  ```bash
+  # Wrong — truncates at the & if the password contains one:
+  curl -c cookies.txt -d "password=$PASSWORD" http://<server>:5000/login
+
+  # Correct — percent-encodes reserved characters first:
+  curl -c cookies.txt --data-urlencode "password=$PASSWORD" http://<server>:5000/login
+  curl -b cookies.txt http://<server>:5000/api/zones
+  ```
+
+### Where Files Live on the Server
+
+`AUTH_FILE`, `DEVICE_CREDENTIALS_FILE`, and `WG_KEYS_FILE` all default to the
+same directory as `ZONES_CONFIG` (`/opt/dnsmasq-ui` in a typical deployment)
+unless overridden via their respective environment variables:
+
+| File | Path | Purpose |
+|---|---|---|
+| Zone/server config | `/opt/dnsmasq-ui/zones.json` | tracked in git |
+| Dashboard login | `/opt/dnsmasq-ui/auth.json` | `0600`, gitignored |
+| Device-credential vault | `/opt/dnsmasq-ui/device-credentials.json` | `0600`, gitignored, encrypted at rest |
+| WireGuard keys | `/opt/dnsmasq-ui/wireguard-keys.json` | `0600`, gitignored |
+| SSH private key | `~/.ssh/id_rsa` (e.g. `/home/debian/.ssh/id_rsa`) | outside the app directory entirely |
+| Deployed dnsmasq config | `/etc/dnsmasq.d/local-records.conf` | on each DNS server, not the dashboard host |
+
+None of the `0600` files above are readable by `git pull`/`push` — they're
+gitignored and stay local to whichever server the dashboard runs on.
 
 ## Initial Setup Workflow
 
