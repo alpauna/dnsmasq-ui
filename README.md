@@ -921,9 +921,13 @@ a valid session get a `401` instead of leaking data.
 - **Session**: signed cookie (`HttpOnly`), survives service restarts once a
   password has been set, since the signing secret is persisted alongside the
   password hash in `auth.json`.
-- **Forgot the password**: there's no reset flow by design (single shared
-  password, no email). Delete `auth.json` on the server and restart
-  `dnsmasq-ui.service` — `/setup` runs again on the next visit.
+- **Forgot the password (or locked out of 2FA)**: there's no reset flow by
+  design (single shared password, no separate account-recovery email).
+  Delete `auth.json` on the server and restart `dnsmasq-ui.service` —
+  this wipes the password hash *and* any TOTP/email 2FA config together
+  (they live in the same file), and `/setup` runs again on the next visit.
+  There's no way to reset just the password while keeping 2FA enabled, or
+  vice versa.
   ```bash
   ssh debian@<server> "rm /opt/dnsmasq-ui/auth.json && sudo systemctl restart dnsmasq-ui"
   ```
@@ -1004,13 +1008,23 @@ gitignored and stay local to whichever server the dashboard runs on.
 ```
 SMTP_SERVER=mail.example.com
 SMTP_PORT=587
-SMTP_USER=admin
+SMTP_USER=admin@example.com
 SMTP_PASSWORD=your-smtp-password
 SMTP_FROM=admin@example.com
 ```
 The systemd unit references it via `EnvironmentFile=-/opt/dnsmasq-ui/smtp.env`
 (the leading `-` makes it optional — the app starts fine without email 2FA
 configured, that feature just won't work until the file exists).
+
+**Troubleshooting `535 5.7.8 authentication failed`**: this is an
+auth-layer rejection, not TLS/connectivity — `smtplib` calls `starttls()`
+before `login()`, so getting a clean SMTP error response back means the
+connection and encryption already succeeded and only the credentials were
+rejected. The most common cause: `SMTP_USER` needs to be the **full email
+address** (`admin@example.com`), not just the mailbox's local part
+(`admin`) — many mail servers require the full address for SASL auth even
+though the account is technically just "admin". Update `smtp.env` and
+`sudo systemctl restart dnsmasq-ui` to pick up the change.
 
 ## Initial Setup Workflow
 
