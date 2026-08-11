@@ -3,6 +3,10 @@
 **Date**: 2026-03-15
 **Issue**: DNS queries timeout over WireGuard tunnel while ping works
 **Status**: 🔧 In Progress - Fix applied, containers rebuilding
+**Scope**: This is about the Docker dns-node test cluster (`docker-compose.yml`,
+172.20.0.x), not the real production servers (192.168.0.231-233). For the
+production middle-01 record incident, see the Troubleshooting section in
+README.md.
 
 ---
 

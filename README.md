@@ -1091,6 +1091,75 @@ ssh debian@192.168.0.231 dig @127.0.0.1 example.ad.alshowto.com
 ssh debian@192.168.0.231 sudo tail -f /var/log/dnsmasq/dnsmasq.log
 ```
 
+### Deploy succeeds but the DNS answer doesn't change
+
+If `POST /api/deploy` (or the Deploy button) reports success but `dig`/`getent`
+still return the old value for a record you just edited, check these in order:
+
+1. **`zones.json`'s `servers` section points at the wrong hosts.** It must list
+   the real DNS server IPs (e.g. `192.168.0.231-233`), not the Docker
+   dns-node test cluster's bridge-network IPs (`172.20.0.x` from
+   `docker-compose.yml`). Deploy will SSH into whatever's listed there —
+   if that's the Docker cluster, it updates a test environment nobody
+   queries while production keeps serving stale records.
+   ```bash
+   python3 -c "import json; print(json.load(open('zones.json'))['servers'])"
+   ```
+
+2. **dnsmasq was only sent `SIGHUP`, not restarted.** `SIGHUP` reloads
+   `/etc/hosts`-style dynamic data but does **not** re-parse `address=`/
+   `cname=` directives from `conf-dir` files — those are only read at
+   process startup. `_ssh_update()` in `app-multi-zone.py` does a full
+   `systemctl restart dnsmasq` (with a pkill+respawn fallback for the
+   non-systemd Docker image) for exactly this reason. Confirm the process
+   actually restarted:
+   ```bash
+   ssh debian@192.168.0.231 "sudo journalctl -u dnsmasq -n 5 --no-pager"
+   # Should show a fresh "started, version ..." line with a new PID,
+   # not just "read /etc/hosts"
+   ```
+
+3. **The `keepalive_vip` in `zones.json`/config doesn't match reality.**
+   Don't assume the VIP is whatever a doc or default says — confirm against
+   the live `keepalived.conf` on the boxes:
+   ```bash
+   ssh debian@192.168.0.231 "sudo grep -A2 virtual_ipaddress /etc/keepalived/keepalived.conf"
+   ```
+   A stale/guessed VIP value here has previously caused a real IP collision
+   with another host on the network — see the Aug 2026 middle-01 incident
+   below.
+
+### Incident: middle-01 record wrong + Deploy not reaching production (Aug 2026)
+
+`middle-01.ad.alshowto.com` resolved to the wrong AAAA record for months
+despite the dashboard and `zones.json` showing the correct value. Root
+causes, in case a similar symptom shows up again:
+
+- `zones.json`'s `servers` section had been switched to Docker test-cluster
+  IPs (`172.20.0.231-233`) during earlier WireGuard-mesh testing and never
+  switched back, so every Deploy silently updated a test environment
+  instead of `192.168.0.231-233`.
+- `_ssh_update()` restarted dnsmasq via `sudo systemctl restart dnsmasq`,
+  which briefly got "fixed" to `pkill -HUP` based on debugging done against
+  the (non-systemd) Docker test cluster — but the real servers run genuine
+  systemd, and `SIGHUP` doesn't reload `address=`/`cname=` records anyway.
+- `check_keepalived_status()` had the keepalive VIP hardcoded to a Docker
+  address (`172.20.0.252`) instead of reading `zones.json`'s
+  `global.keepalive_vip`.
+- The AAAA value itself had been guessed/fabricated by an earlier fix
+  ("actual Proxmox VM address") without checking `ip a` on the real host,
+  and was wrong.
+- The real keepalive VIP had previously collided with middle-01's own
+  static IP (both briefly `192.168.0.250`) and had to be moved to
+  `192.168.0.230` — a good reminder that VIP/static-IP assignments should
+  be verified against the live network, not assumed from docs or examples.
+
+Lesson: when a record looks right in `zones.json` but wrong on the wire,
+verify against ground truth at every hop — the target server list, the
+actual live config file on disk, whether the service actually reloaded it,
+and the value itself against the real host — rather than trusting the
+previous fix's commit message.
+
 ### keepalive check failing
 
 ```bash
