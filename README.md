@@ -534,6 +534,7 @@ export WG_KEYS_FILE=wireguard-keys.json                # Private keys file (giti
 
 # Dynamic DNS Tracking
 export DYNAMIC_POLL_INTERVAL=300                        # Seconds between dynamic_hosts checks
+export DASHBOARD_URL=http://192.168.0.233:5000          # Used in links for emails sent from background contexts
 
 # Reverse Proxy Support
 export PROXY_PATH_PREFIX=/dnsmasq-ui                    # URL path prefix (optional)
@@ -1088,6 +1089,32 @@ instead of being locked into one.
   protected the same way (`0600`, gitignored) — not further encrypted, since
   unlike the device-credentials vault, verifying a TOTP code has to happen
   *during* login itself, before any "vault unlock" step could exist.
+
+### Vault-Locked Email Notification
+
+Every service restart drops the in-memory device-credentials vault key
+(see Two-Factor Authentication above for the same tradeoff applied to
+TOTP/email), so password-gated `dynamic_hosts` polling silently fails
+until someone happens to check. If email 2FA is configured, `dnsmasq-ui`
+emails that address once per lock period when a poll finds the vault
+locked and at least one enabled entry needs it
+(`enable_password_ref`/`ssh_password_ref`/`login_password_ref` set).
+
+**This is a notification, not an unlock mechanism, on purpose.** An
+email-based unlock (a link or code that unlocks without the vault
+password) was considered and rejected — it would mean anyone who can read
+that email can unlock the vault, collapsing the two-factor separation the
+vault exists for down to "however well-secured your email account is."
+The email just links to `/config`; you still log in and enter the vault
+password normally.
+
+- Sent at most once per lock (resets on the next successful unlock, so a
+  future lock — e.g. the next restart — sends a fresh notice)
+- Recipient is whatever address email 2FA is configured for — no separate
+  notification-recipient setting
+- `DASHBOARD_URL` env var (default `http://192.168.0.233:5000`) controls
+  the link in the email, since a background poll has no browser request
+  to infer an address from
 
 ### Where Files Live on the Server
 
