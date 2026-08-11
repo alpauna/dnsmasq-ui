@@ -375,6 +375,44 @@ The main configuration file that defines zones, servers, and global settings:
 - **zones**: Array of DNS zones with records
 - **servers**: Dictionary of DNS servers to manage
 - **global**: Global settings (upstream DNS, VIP, health check interval)
+- **dynamic_hosts**: Hosts with dynamically-assigned addresses to keep in sync (see below)
+
+### Dynamic DNS Tracking (dynamic_hosts)
+
+Some hosts get their address from DHCPv6/SLAAC (e.g. via a router like
+opnsense) instead of a static assignment, so a record set once in `zones.json`
+goes stale whenever the lease renews with a new address. `dynamic_hosts`
+lets you opt specific records into automatic tracking instead of applying
+that behavior to every record:
+
+```json
+"dynamic_hosts": [
+  {
+    "domain": "middle-01.ad.alshowto.com",
+    "zone": "ad.alshowto.com",
+    "record_type": "AAAA",
+    "target_host": "192.168.0.250",
+    "interface": "eth0",
+    "ssh_user": null,
+    "enabled": true,
+    "last_checked": null,
+    "last_value": null,
+    "last_updated": null
+  }
+]
+```
+
+- **target_host**: IP/hostname dnsmasq-ui SSHes into to read the host's own
+  current address (needs a static IP, or at least one stable way to reach it)
+- **interface**: network interface on `target_host` to read the address from
+- **record_type**: `AAAA` or `A` — the field being kept in sync
+- A background job (interval set by `DYNAMIC_POLL_INTERVAL`, default 300s)
+  checks every enabled entry, and if the live address differs from the
+  stored record, updates `zones.json` and redeploys to all DNS servers
+  automatically. `last_checked`/`last_value`/`last_updated` are written back
+  after each check.
+- Manage tracked hosts from the **Configuration** page in the dashboard, or
+  via the [API](#dynamic-dns-tracking-1) directly.
 
 ### Environment Variables
 
@@ -389,6 +427,9 @@ export SSH_USER=debian                                   # SSH username for serv
 
 # WireGuard Configuration
 export WG_KEYS_FILE=wireguard-keys.json                # Private keys file (gitignored)
+
+# Dynamic DNS Tracking
+export DYNAMIC_POLL_INTERVAL=300                        # Seconds between dynamic_hosts checks
 
 # Reverse Proxy Support
 export PROXY_PATH_PREFIX=/dnsmasq-ui                    # URL path prefix (optional)
@@ -640,6 +681,30 @@ curl http://localhost:5000/api/status
 # }
 ```
 
+### Dynamic DNS Tracking
+
+```bash
+# List tracked hosts
+curl http://localhost:5000/api/dynamic-hosts
+
+# Start tracking a host (record_type/interface/ssh_user/enabled are optional)
+curl -X POST http://localhost:5000/api/dynamic-hosts \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "middle-01.ad.alshowto.com", "zone": "ad.alshowto.com", "target_host": "192.168.0.250", "interface": "eth0", "record_type": "AAAA"}'
+
+# Enable/disable or change a tracked host
+curl -X PUT http://localhost:5000/api/dynamic-hosts/middle-01.ad.alshowto.com \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+
+# Stop tracking a host
+curl -X DELETE http://localhost:5000/api/dynamic-hosts/middle-01.ad.alshowto.com
+
+# Force an immediate poll of all tracked hosts (also runs automatically
+# every DYNAMIC_POLL_INTERVAL seconds)
+curl -X POST http://localhost:5000/api/dynamic-hosts/poll
+```
+
 ### SSH Key Management
 
 ```bash
@@ -759,7 +824,16 @@ curl http://localhost:5000/api/wireguard/status
   - Smart recommendation to switch to grid view when zones > 3
 
 ### Configuration Page
-The configuration page (`/config`) provides SSH key and server management:
+The configuration page (`/config`) provides SSH key, server, and dynamic-DNS management:
+
+#### Dynamic DNS Tracking
+- **Tracked Hosts**: Cards showing each tracked host's zone, record type,
+  target, current value, and last-checked/last-updated times
+- **Poll Now**: Trigger an immediate check instead of waiting for the
+  background interval
+- **Track a New Host**: Add a domain/zone/target/interface to start
+  keeping a record in sync with the host's own current address
+- **Enable/Disable/Remove**: Per-host controls, no need to hand-edit `zones.json`
 
 #### SSH Key Management
 - **View Current Key**: Display key fingerprint, type, size, and modification time
