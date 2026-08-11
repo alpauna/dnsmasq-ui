@@ -41,6 +41,10 @@ ZONES_FILE = os.getenv('ZONES_CONFIG', 'zones.json')
 DNSMASQ_RECORDS_FILE = os.getenv('DNSMASQ_RECORDS_FILE', '/etc/dnsmasq.d/local-records.conf')
 SSH_KEY = os.getenv('SSH_KEY', os.path.expanduser('~/.ssh/id_rsa'))
 SSH_USER = os.getenv('SSH_USER', 'debian')
+# Resolved as an absolute path rather than relying on PATH — the systemd
+# unit sets PATH to just the venv's bin dir, which hides /usr/bin/ssh from
+# subprocess-based lookups.
+SSH_BIN = next((p for p in ('/usr/bin/ssh', '/bin/ssh', '/usr/local/bin/ssh') if os.path.exists(p)), 'ssh')
 WG_KEYS_FILE = os.getenv(
     'WG_KEYS_FILE',
     os.path.join(os.path.dirname(os.path.abspath(ZONES_FILE)), 'wireguard-keys.json')
@@ -372,7 +376,7 @@ class ZoneManager:
         outside paramiko's supported key sizes) — the system ssh client
         doesn't share that limitation. Returns stdout text, or None on failure."""
         ssh_args = [
-            'ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+            SSH_BIN, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
             '-o', 'StrictHostKeyChecking=accept-new', '-i', SSH_KEY
         ]
         ssh_args += extra_args or []
