@@ -473,6 +473,7 @@
                             <option value="paramiko" selected>paramiko (default)</option>
                             <option value="cli">system ssh binary (for devices paramiko can't negotiate with)</option>
                             <option value="docker">docker + legacy ssh client (for devices too old for even the host's own ssh, e.g. switches with DSA host keys — also required if the device's CLI only supports interactive sessions, not one-shot commands)</option>
+                            <option value="http">web UI scrape (for routers/devices with no SSH at all, only an HTML status page)</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -508,6 +509,51 @@
                         <div class="form-group">
                             <label for="dh-logout-command">Logout Command ("docker" only)</label>
                             <input type="text" id="dh-logout-command" value="exit">
+                        </div>
+                    </div>
+
+                    <div id="dh-http-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="dh-detect-url">Status Page URL ("http" only — fetched after login, if configured, and checked against Detect Regex above)</label>
+                            <input type="text" id="dh-detect-url" placeholder="http://192.168.7.111/index.asp">
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-verify-tls">
+                                <input type="checkbox" id="dh-verify-tls" checked style="width: auto; display: inline-block; margin-right: 6px;">
+                                Verify TLS certificate (uncheck for self-signed certs)
+                            </label>
+                        </div>
+                        <div class="alert alert-info">Leave Login URL blank if the status page needs no login.</div>
+                        <div class="form-group">
+                            <label for="dh-login-url">Login URL</label>
+                            <input type="text" id="dh-login-url" placeholder="http://192.168.7.111/login.cgi">
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-login-fields">Static Login Form Fields (JSON object — everything the login form POSTs besides the password)</label>
+                            <textarea id="dh-login-fields" rows="3" placeholder='{"submit_button": "login", "action": "Apply", "wait_time": "19", "http_username": "admin"}'></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-login-password-field">Password Field Name</label>
+                            <input type="text" id="dh-login-password-field" placeholder="http_passwd">
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-login-password-transform">Password Transform</label>
+                            <select id="dh-login-password-transform">
+                                <option value="none" selected>none (sent as plain text)</option>
+                                <option value="linksys_md5">linksys_md5 (client-side JS-scrambled MD5, validated against a real Linksys E5400)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-login-password-ref">Login Password (stored separately — see Device Credentials below)</label>
+                            <select id="dh-login-password-ref"><option value="">(none)</option></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-session-param-regex">Session Param Regex (optional — for devices that track login via a URL query parameter instead of a cookie; capture group is the session value)</label>
+                            <input type="text" id="dh-session-param-regex" placeholder="session_id=([a-f0-9]+)">
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-session-param-name">Session Param Name (appended to Status Page URL as ?name=value)</label>
+                            <input type="text" id="dh-session-param-name" value="session_id">
                         </div>
                     </div>
 
@@ -1184,13 +1230,17 @@
                             const lastUpdated = h.last_updated ? new Date(h.last_updated).toLocaleString() : 'never';
                             const connectionNote = h.connection && h.connection !== 'paramiko'
                                 ? `<p><strong>Connection:</strong> ${h.connection}</p>` : '';
-                            const detectNote = h.detect_command
-                                ? `<p><strong>Detect command:</strong> ${h.detect_command}</p>` : '';
+                            const detectNote = h.connection === 'http'
+                                ? (h.detect_url ? `<p><strong>Status page:</strong> ${h.detect_url}</p>` : '')
+                                : (h.detect_command ? `<p><strong>Detect command:</strong> ${h.detect_command}</p>` : '');
+                            const targetNote = h.connection === 'http'
+                                ? h.target_host
+                                : `${h.target_host}${h.detect_command ? '' : ' (' + h.interface + ')'}`;
                             html += `<div class="server-item">
                                 <h4>${statusIcon} ${h.domain}</h4>
                                 <p><strong>Zone:</strong> ${h.zone}</p>
                                 <p><strong>Type:</strong> ${h.record_type}</p>
-                                <p><strong>Target:</strong> ${h.target_host}${h.detect_command ? '' : ' (' + h.interface + ')'}</p>
+                                <p><strong>Target:</strong> ${targetNote}</p>
                                 ${connectionNote}
                                 ${detectNote}
                                 <p><strong>Current value:</strong> ${h.last_value || 'unknown'}</p>
@@ -1225,6 +1275,16 @@
 
         function collectDynamicHostPayload() {
             const extraArgsRaw = document.getElementById('dh-ssh-extra-args').value.trim();
+            const loginFieldsRaw = document.getElementById('dh-login-fields').value.trim();
+            let loginFields = null;
+            if (loginFieldsRaw) {
+                try {
+                    loginFields = JSON.parse(loginFieldsRaw);
+                } catch (e) {
+                    alert('Static Login Form Fields must be valid JSON: ' + e.message);
+                    throw e;
+                }
+            }
             return {
                 zone: document.getElementById('dh-zone').value,
                 domain: document.getElementById('dh-domain').value.trim(),
@@ -1240,13 +1300,23 @@
                 enable_command: document.getElementById('dh-enable-command').value.trim() || null,
                 enable_password_ref: document.getElementById('dh-enable-password-ref').value || null,
                 ssh_password_ref: document.getElementById('dh-ssh-password-ref').value || null,
-                logout_command: document.getElementById('dh-logout-command').value.trim() || 'exit'
+                logout_command: document.getElementById('dh-logout-command').value.trim() || 'exit',
+                detect_url: document.getElementById('dh-detect-url').value.trim() || null,
+                login_url: document.getElementById('dh-login-url').value.trim() || null,
+                login_fields: loginFields,
+                login_password_field: document.getElementById('dh-login-password-field').value.trim() || null,
+                login_password_transform: document.getElementById('dh-login-password-transform').value,
+                login_password_ref: document.getElementById('dh-login-password-ref').value || null,
+                session_param_regex: document.getElementById('dh-session-param-regex').value.trim() || null,
+                session_param_name: document.getElementById('dh-session-param-name').value.trim() || 'session_id',
+                verify_tls: document.getElementById('dh-verify-tls').checked
             };
         }
 
         function updateDynamicHostFormVisibility() {
-            const isDocker = document.getElementById('dh-connection').value === 'docker';
-            document.getElementById('dh-docker-fields').style.display = isDocker ? 'block' : 'none';
+            const connection = document.getElementById('dh-connection').value;
+            document.getElementById('dh-docker-fields').style.display = connection === 'docker' ? 'block' : 'none';
+            document.getElementById('dh-http-fields').style.display = connection === 'http' ? 'block' : 'none';
         }
 
         function loadDeviceCredentials() {
@@ -1260,6 +1330,7 @@
                         keys.map(k => `<option value="${k}">${k}</option>`).join('');
                     document.getElementById('dh-enable-password-ref').innerHTML = options;
                     document.getElementById('dh-ssh-password-ref').innerHTML = options;
+                    document.getElementById('dh-login-password-ref').innerHTML = options;
 
                     let listHtml = '';
                     if (keys.length === 0) {

@@ -33,6 +33,10 @@ import re
 import secrets
 import threading
 import time
+import urllib.request
+import urllib.parse
+import urllib.error
+import ssl
 
 app = Flask(__name__)
 CORS(app)
@@ -306,6 +310,27 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
+def _linksys_md5_password_transform(password):
+    """Replicates the client-side password scrambling in this router's
+    login.asp en_value() JS function (not real security, just obscurity —
+    a fixed transform with no server-provided nonce). Validated against a
+    real Linksys E5400: buffer = password + zero-padded length, then a
+    64-char cycle through that buffer, MD5'd."""
+    buffer1 = password
+    length2 = len(password)
+    buffer1 += (f"0{length2}" if length2 < 10 else str(length2))
+    length2 += 2
+    pseed2 = ''.join(buffer1[p % length2] for p in range(64))
+    return hashlib.md5(pseed2.encode()).hexdigest()
+
+# Registry of known web-UI login password transforms, keyed by the name a
+# dynamic_hosts entry sets in login_password_transform. Add to this as new
+# devices get validated — don't guess a device's scheme blind.
+_PASSWORD_TRANSFORMS = {
+    'none': lambda pw: pw,
+    'linksys_md5': _linksys_md5_password_transform,
+}
+
 class ZoneManager:
     """Manages DNS zones and records."""
 
@@ -541,12 +566,16 @@ class ZoneManager:
                           detect_command=None, detect_regex=None,
                           cli_prompt_regex=None, enable_command=None,
                           enable_password_ref=None, logout_command='exit',
-                          ssh_password_ref=None):
+                          ssh_password_ref=None, detect_url=None, login_url=None,
+                          login_fields=None, login_password_field=None,
+                          login_password_transform='none', login_password_ref=None,
+                          session_param_regex=None, session_param_name='session_id',
+                          verify_tls=True):
         """Track a host whose address (e.g. DHCPv6-assigned) should be polled
         and kept in sync with its DNS record, selected explicitly per-host
         rather than applying to every record.
 
-        connection: 'paramiko' (default), 'cli', or 'docker'.
+        connection: 'paramiko' (default), 'cli', 'docker', or 'http'.
         - 'cli' shells out to the host's own ssh binary instead of paramiko,
           for devices paramiko can't negotiate with.
         - 'docker' runs an interactive session inside a container with an
@@ -554,6 +583,9 @@ class ZoneManager:
           SSH servers too old for even the host's own ssh, and whose CLI
           only supports interactive sessions rather than one-shot command
           execution (common on embedded switch CLIs).
+        - 'http' fetches a device's web UI instead of using SSH at all, for
+          devices (routers) that only expose status via HTML. Uses
+          detect_url/login_url/etc. below instead of target_host+a command.
         ssh_extra_args: extra flags passed to ssh, for 'cli'/'docker'
         (e.g. ["-o", "HostKeyAlgorithms=+ssh-dss"]).
         detect_command/detect_regex: override the default `ip addr` based
@@ -568,6 +600,20 @@ class ZoneManager:
         commands work. enable_password_ref looks up the actual password
         from DEVICE_CREDENTIALS_FILE by key — never stored in zones.json.
         logout_command: sent to end the session cleanly (default 'exit').
+        detect_url: page to fetch (after login, if configured) and run
+        detect_regex against — required for 'http'.
+        login_url/login_fields/login_password_field/login_password_transform/
+        login_password_ref: if the page needs a login first. login_fields is
+        the static form data to POST; login_password_field names which field
+        gets the (possibly transformed) password; login_password_transform
+        picks a known vendor-specific obfuscation scheme (see
+        _PASSWORD_TRANSFORMS) since some embedded web UIs scramble the
+        password client-side in JS rather than sending it plain.
+        session_param_regex/session_param_name: some devices track the
+        login session via a URL query parameter instead of a cookie —
+        session_param_regex extracts it from the login response,
+        session_param_name is the query param name to append to detect_url.
+        verify_tls: set False for self-signed-cert devices.
         """
         if not self.get_zone(zone_name):
             return False, "Zone not found"
@@ -593,6 +639,15 @@ class ZoneManager:
             'enable_password_ref': enable_password_ref,
             'logout_command': logout_command,
             'ssh_password_ref': ssh_password_ref,
+            'detect_url': detect_url,
+            'login_url': login_url,
+            'login_fields': login_fields or {},
+            'login_password_field': login_password_field,
+            'login_password_transform': login_password_transform,
+            'login_password_ref': login_password_ref,
+            'session_param_regex': session_param_regex,
+            'session_param_name': session_param_name,
+            'verify_tls': verify_tls,
             'last_checked': None,
             'last_value': None,
             'last_updated': None
@@ -605,7 +660,10 @@ class ZoneManager:
         allowed = ('target_host', 'interface', 'ssh_user', 'enabled', 'connection',
                    'ssh_extra_args', 'detect_command', 'detect_regex',
                    'cli_prompt_regex', 'enable_command', 'enable_password_ref',
-                   'logout_command', 'ssh_password_ref')
+                   'logout_command', 'ssh_password_ref', 'detect_url', 'login_url',
+                   'login_fields', 'login_password_field', 'login_password_transform',
+                   'login_password_ref', 'session_param_regex', 'session_param_name',
+                   'verify_tls')
         for entry in self.config['dynamic_hosts']:
             if entry['domain'] == domain:
                 entry.update({k: v for k, v in fields.items() if k in allowed})
@@ -926,6 +984,77 @@ expect eof
             logger.error(f"ssh CLI to {target_host} failed: {e}")
             return None
 
+    def _run_http_scrape(self, entry):
+        """Fetch a device's web UI (optionally logging in first) and return
+        the page text for detect_regex to run against — for routers/devices
+        that only expose status via HTML, no SSH/CLI at all.
+
+        Login (if login_url is set) is fully vendor-specific — embedded web
+        UIs commonly obfuscate the password client-side in JS before POSTing
+        (not real security, just obscurity) and track the session via a URL
+        query parameter instead of a cookie, as validated against a real
+        Linksys E5400. login_password_transform picks which known scheme to
+        replicate; add new entries to _PASSWORD_TRANSFORMS as new devices are
+        validated rather than trying to guess a device's scheme blind.
+        """
+        verify_tls = entry.get('verify_tls', True)
+        ctx = None
+        if not verify_tls:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+        detect_url = entry.get('detect_url')
+        if not detect_url:
+            logger.error(f"http connection for {entry.get('domain')} needs detect_url")
+            return None
+
+        login_url = entry.get('login_url')
+        if login_url:
+            password = None
+            if entry.get('login_password_ref'):
+                password = self._load_device_credentials().get(entry['login_password_ref'])
+            transform_name = entry.get('login_password_transform', 'none')
+            transform = _PASSWORD_TRANSFORMS.get(transform_name)
+            if not transform:
+                logger.error(f"Unknown login_password_transform '{transform_name}' for {entry.get('domain')}")
+                return None
+
+            fields = dict(entry.get('login_fields') or {})
+            if entry.get('login_password_field') and password is not None:
+                fields[entry['login_password_field']] = transform(password)
+
+            try:
+                body = urllib.parse.urlencode(fields).encode()
+                req = urllib.request.Request(
+                    login_url, data=body, method='POST',
+                    headers={'Content-Type': 'application/x-www-form-urlencoded'}
+                )
+                with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                    login_response_text = resp.read().decode('utf-8', errors='replace')
+            except Exception as e:
+                logger.error(f"Login to {login_url} failed for {entry.get('domain')}: {e}")
+                return None
+
+            session_regex = entry.get('session_param_regex')
+            if session_regex:
+                match = re.search(session_regex, login_response_text)
+                if not match:
+                    logger.error(f"Login for {entry.get('domain')} succeeded but session_param_regex found nothing")
+                    return None
+                session_value = match.group(1) if match.groups() else match.group(0)
+                param_name = entry.get('session_param_name', 'session_id')
+                sep = '&' if '?' in detect_url else '?'
+                detect_url = f"{detect_url}{sep}{param_name}={session_value}"
+
+        try:
+            req = urllib.request.Request(detect_url, method='GET')
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                return resp.read().decode('utf-8', errors='replace')
+        except Exception as e:
+            logger.error(f"Fetching {detect_url} failed for {entry.get('domain')}: {e}")
+            return None
+
     def test_dynamic_host(self, entry):
         """Dry-run address detection for an entry (saved or not), returning
         full debug info — command run, raw output, and either the detected
@@ -940,39 +1069,51 @@ expect eof
         detect_command = entry.get('detect_command')
         detect_regex = entry.get('detect_regex')
 
-        if detect_command:
-            command = detect_command
+        if connection == 'http':
+            # No SSH "command" concept here — detect_url is what gets
+            # fetched (post-login, if configured), and detect_regex is
+            # always required since there's no generic "default" way to
+            # find an address in an arbitrary HTML page the way `ip addr`
+            # works as a Linux default.
+            command = entry.get('detect_url', '')
+            output = self._run_http_scrape(entry)
         else:
-            interface = entry.get('interface', 'eth0')
-            if record_type == 'AAAA':
-                command = (
-                    f"ip -6 -o addr show {interface} scope global | "
-                    "grep -v temporary | awk '{print $4}' | cut -d/ -f1 | head -1"
-                )
+            if detect_command:
+                command = detect_command
             else:
-                command = f"ip -4 -o addr show {interface} scope global | awk '{{print $4}}' | cut -d/ -f1 | head -1"
+                interface = entry.get('interface', 'eth0')
+                if record_type == 'AAAA':
+                    command = (
+                        f"ip -6 -o addr show {interface} scope global | "
+                        "grep -v temporary | awk '{print $4}' | cut -d/ -f1 | head -1"
+                    )
+                else:
+                    command = f"ip -4 -o addr show {interface} scope global | awk '{{print $4}}' | cut -d/ -f1 | head -1"
 
-        if connection == 'docker':
-            output = self._run_ssh_docker(
-                target_host, command, ssh_user, entry.get('ssh_extra_args'),
-                entry.get('cli_prompt_regex', r'[>#]\s*$'),
-                entry.get('enable_command'), entry.get('enable_password_ref'),
-                entry.get('logout_command', 'exit'), entry.get('ssh_password_ref')
-            )
-        elif connection == 'cli':
-            output = self._run_ssh_cli(target_host, command, ssh_user, entry.get('ssh_extra_args'))
-        else:
-            output = self._run_ssh_paramiko(target_host, command, ssh_user)
+            if connection == 'docker':
+                output = self._run_ssh_docker(
+                    target_host, command, ssh_user, entry.get('ssh_extra_args'),
+                    entry.get('cli_prompt_regex', r'[>#]\s*$'),
+                    entry.get('enable_command'), entry.get('enable_password_ref'),
+                    entry.get('logout_command', 'exit'), entry.get('ssh_password_ref')
+                )
+            elif connection == 'cli':
+                output = self._run_ssh_cli(target_host, command, ssh_user, entry.get('ssh_extra_args'))
+            else:
+                output = self._run_ssh_paramiko(target_host, command, ssh_user)
 
         result = {'command': command, 'connection': connection, 'raw_output': output}
 
         if output is None:
-            result['error'] = 'SSH command failed — see server logs for details'
+            result['error'] = (
+                'HTTP request failed — see server logs for details' if connection == 'http'
+                else 'SSH command failed — see server logs for details'
+            )
             return result
 
-        if detect_command:
+        if connection == 'http' or detect_command:
             if not detect_regex:
-                result['error'] = 'detect_command is set without detect_regex; refusing to guess'
+                result['error'] = 'detect_regex is required for this connection type; refusing to guess'
                 return result
             match = re.search(detect_regex, output)
             if not match:
@@ -1881,7 +2022,16 @@ def api_dynamic_hosts_add():
         enable_command=data.get('enable_command'),
         enable_password_ref=data.get('enable_password_ref'),
         logout_command=data.get('logout_command', 'exit'),
-        ssh_password_ref=data.get('ssh_password_ref')
+        ssh_password_ref=data.get('ssh_password_ref'),
+        detect_url=data.get('detect_url'),
+        login_url=data.get('login_url'),
+        login_fields=data.get('login_fields'),
+        login_password_field=data.get('login_password_field'),
+        login_password_transform=data.get('login_password_transform', 'none'),
+        login_password_ref=data.get('login_password_ref'),
+        session_param_regex=data.get('session_param_regex'),
+        session_param_name=data.get('session_param_name', 'session_id'),
+        verify_tls=data.get('verify_tls', True)
     )
     return jsonify({'success': success, 'message': message})
 
