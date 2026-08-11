@@ -147,7 +147,7 @@
         {
           "domain": "wifi.mgmt.alshowto.com",
           "type": "A",
-          "value": "192.168.7.111"
+          "value": "192.168.7.80"
         }
       ]
     }
@@ -213,7 +213,7 @@
       "interface": "eth0",
       "ssh_user": null,
       "enabled": true,
-      "last_checked": "2026-08-11T21:29:17.292834",
+      "last_checked": "2026-08-11T21:51:09.216620",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fed7:4cec",
       "last_updated": null
     },
@@ -225,7 +225,7 @@
       "interface": "eth0",
       "ssh_user": "admin",
       "enabled": true,
-      "last_checked": "2026-08-11T21:29:36.225514",
+      "last_checked": "2026-08-11T21:51:26.087620",
       "last_value": "2605:4a80:b004:b120:5ea6:e6ff:fe27:417c",
       "last_updated": "2026-08-11T18:35:38.201059",
       "connection": "docker",
@@ -249,16 +249,16 @@
       "domain": "wifi.mgmt.alshowto.com",
       "zone": "mgmt.alshowto.com",
       "record_type": "AAAA",
-      "target_host": "192.168.7.111",
+      "target_host": "192.168.7.80",
       "interface": "eth0",
       "ssh_user": null,
       "enabled": true,
-      "last_checked": "2026-08-11T21:29:46.236363",
+      "last_checked": "2026-08-11T21:51:36.093413",
       "last_value": null,
       "last_updated": null,
       "connection": "http",
-      "detect_url": "http://192.168.7.111/index.asp",
-      "login_url": "http://192.168.7.111/login.cgi",
+      "detect_url": "http://192.168.7.80/index.asp",
+      "login_url": "http://192.168.7.80/login.cgi",
       "login_fields": {
         "submit_button": "login",
         "change_action": "",
