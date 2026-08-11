@@ -437,23 +437,48 @@
                     </div>
                     <div class="form-group">
                         <label for="dh-connection">Connection Method</label>
-                        <select id="dh-connection">
+                        <select id="dh-connection" onchange="updateDynamicHostFormVisibility()">
                             <option value="paramiko" selected>paramiko (default)</option>
                             <option value="cli">system ssh binary (for devices paramiko can't negotiate with)</option>
+                            <option value="docker">docker + legacy ssh client (for devices too old for even the host's own ssh, e.g. switches with DSA host keys — also required if the device's CLI only supports interactive sessions, not one-shot commands)</option>
                         </select>
                     </div>
                     <div class="form-group">
-                        <label for="dh-ssh-extra-args">Extra SSH Flags (only used with "system ssh binary", space-separated)</label>
-                        <input type="text" id="dh-ssh-extra-args" placeholder="-o KexAlgorithms=+diffie-hellman-group1-sha1 -o HostKeyAlgorithms=+ssh-dss -c aes128-cbc">
+                        <label for="dh-ssh-extra-args">Extra SSH Flags (used with "system ssh binary" or "docker", space-separated)</label>
+                        <input type="text" id="dh-ssh-extra-args" placeholder="-o KexAlgorithms=+diffie-hellman-group1-sha1 -o HostKeyAlgorithms=+ssh-dss -o MACs=+hmac-sha1,hmac-md5 -c aes128-cbc">
                     </div>
                     <div class="form-group">
-                        <label for="dh-detect-command">Custom Detect Command (overrides the default `ip addr` check — needed for switches/routers with their own CLI)</label>
-                        <input type="text" id="dh-detect-command" placeholder="show ip interface brief">
+                        <label for="dh-detect-command">Custom Detect Command (overrides the default `ip addr` check — required for "docker", needed for any switch/router with its own CLI)</label>
+                        <input type="text" id="dh-detect-command" placeholder="show ip interface">
                     </div>
                     <div class="form-group">
                         <label for="dh-detect-regex">Detect Regex (required if using a custom command — first capture group, or whole match, is used as the address)</label>
-                        <input type="text" id="dh-detect-regex" placeholder="(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})">
+                        <input type="text" id="dh-detect-regex" placeholder="Primary IP address is ([0-9.]+)">
                     </div>
+
+                    <div id="dh-docker-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="dh-cli-prompt-regex">CLI Prompt Regex ("docker" only — matches the device's shell prompt so the script knows a command finished)</label>
+                            <input type="text" id="dh-cli-prompt-regex" placeholder="[>#]\s*$">
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-enable-command">Privileged-Mode Command ("docker" only, optional — e.g. Cisco-style `enable` needed before show commands work)</label>
+                            <input type="text" id="dh-enable-command" placeholder="enable">
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-enable-password-ref">Privileged-Mode Password (optional, stored separately — see Device Credentials below)</label>
+                            <select id="dh-enable-password-ref"><option value="">(none)</option></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-ssh-password-ref">Login Password (optional — only if the device doesn't accept the SSH key; stored separately, see Device Credentials below)</label>
+                            <select id="dh-ssh-password-ref"><option value="">(none)</option></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="dh-logout-command">Logout Command ("docker" only)</label>
+                            <input type="text" id="dh-logout-command" value="exit">
+                        </div>
+                    </div>
+
                     <button type="button" class="btn btn-secondary btn-sm" onclick="testDynamicHostDetection()">Test Detection (doesn't save)</button>
                     <div id="dynamic-test-result" style="margin-top: 15px;"></div>
                 </details>
@@ -461,6 +486,57 @@
                 <button type="submit" class="btn btn-primary">Track Host</button>
             </form>
             <div id="dynamic-add-result" style="margin-top: 15px;"></div>
+
+            <h3 style="color: #333; margin: 25px 0 15px;">Device Credentials</h3>
+            <div class="alert alert-info">
+                Passwords referenced by "docker"-connection hosts above (privileged-mode/login
+                passwords for devices like switches). Encrypted at rest with a key derived from
+                an admin password you set here — never committed to git, never stored in plaintext.
+                <strong>The vault needs unlocking again after every service restart</strong> (the
+                background poller can't prompt for it, so it caches the key in memory only after
+                you unlock here).
+            </div>
+
+            <div id="vault-setup" style="display: none;">
+                <div class="alert alert-error">No admin password set yet — set one to start storing device credentials.</div>
+                <form onsubmit="initVault(event)" style="display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;">
+                    <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 150px;">
+                        <label for="vault-init-password">New Admin Password</label>
+                        <input type="password" id="vault-init-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Set Admin Password</button>
+                </form>
+            </div>
+
+            <div id="vault-locked" style="display: none;">
+                <div class="alert alert-info">Vault is locked. Unlock it to view/add/use device credentials.</div>
+                <form onsubmit="unlockVault(event)" style="display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;">
+                    <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 150px;">
+                        <label for="vault-unlock-password">Admin Password</label>
+                        <input type="password" id="vault-unlock-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Unlock Vault</button>
+                </form>
+            </div>
+
+            <div id="vault-unlocked-content" style="display: none;">
+                <button class="btn btn-secondary btn-sm" style="margin-bottom: 15px;" onclick="lockVault()">Lock Vault</button>
+                <div id="device-credentials-list" class="server-list" style="margin-bottom: 20px;">
+                    <p style="padding: 20px; grid-column: 1/-1;">Loading credentials...</p>
+                </div>
+                <form onsubmit="setDeviceCredential(event)" style="display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;">
+                    <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 150px;">
+                        <label for="dc-key">Credential Name</label>
+                        <input type="text" id="dc-key" placeholder="store-10g-sw-enable" required>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 150px;">
+                        <label for="dc-password">Password</label>
+                        <input type="password" id="dc-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-secondary">Save Credential</button>
+                </form>
+            </div>
+            <div id="device-credential-result" style="margin-top: 15px;"></div>
         </div>
 
         <div class="section">
@@ -953,8 +1029,151 @@
                 connection: document.getElementById('dh-connection').value,
                 ssh_extra_args: extraArgsRaw ? extraArgsRaw.split(/\s+/) : [],
                 detect_command: document.getElementById('dh-detect-command').value.trim() || null,
-                detect_regex: document.getElementById('dh-detect-regex').value.trim() || null
+                detect_regex: document.getElementById('dh-detect-regex').value.trim() || null,
+                cli_prompt_regex: document.getElementById('dh-cli-prompt-regex').value.trim() || null,
+                enable_command: document.getElementById('dh-enable-command').value.trim() || null,
+                enable_password_ref: document.getElementById('dh-enable-password-ref').value || null,
+                ssh_password_ref: document.getElementById('dh-ssh-password-ref').value || null,
+                logout_command: document.getElementById('dh-logout-command').value.trim() || 'exit'
             };
+        }
+
+        function updateDynamicHostFormVisibility() {
+            const isDocker = document.getElementById('dh-connection').value === 'docker';
+            document.getElementById('dh-docker-fields').style.display = isDocker ? 'block' : 'none';
+        }
+
+        function loadDeviceCredentials() {
+            // Key names populate the dynamic-host form's dropdowns regardless
+            // of lock state (only values are encrypted).
+            fetch('/api/device-credentials')
+                .then(response => response.json())
+                .then(data => {
+                    const keys = data.keys || [];
+                    const options = '<option value="">(none)</option>' +
+                        keys.map(k => `<option value="${k}">${k}</option>`).join('');
+                    document.getElementById('dh-enable-password-ref').innerHTML = options;
+                    document.getElementById('dh-ssh-password-ref').innerHTML = options;
+
+                    let listHtml = '';
+                    if (keys.length === 0) {
+                        listHtml = '<p style="padding: 20px; grid-column: 1/-1;">No credentials stored yet</p>';
+                    } else {
+                        for (const key of keys) {
+                            listHtml += `<div class="server-item">
+                                <h4>${key}</h4>
+                                <p>Password stored (hidden)</p>
+                                <button class="btn btn-secondary btn-sm" onclick="deleteDeviceCredential('${key}')">Remove</button>
+                            </div>`;
+                        }
+                    }
+                    document.getElementById('device-credentials-list').innerHTML = listHtml;
+                })
+                .catch(error => {
+                    console.error('Error loading device credentials:', error);
+                    document.getElementById('device-credentials-list').innerHTML = '<div class="alert alert-error">Error loading credentials</div>';
+                });
+
+            refreshVaultState();
+        }
+
+        function refreshVaultState() {
+            fetch('/api/device-credentials/vault')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('vault-setup').style.display = !data.initialized ? 'block' : 'none';
+                    document.getElementById('vault-locked').style.display = (data.initialized && !data.unlocked) ? 'block' : 'none';
+                    document.getElementById('vault-unlocked-content').style.display = data.unlocked ? 'block' : 'none';
+                })
+                .catch(error => console.error('Error checking vault state:', error));
+        }
+
+        function initVault(event) {
+            event.preventDefault();
+            const password = document.getElementById('vault-init-password').value;
+            fetch('/api/device-credentials/vault/init', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ admin_password: password })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('device-credential-result').innerHTML = data.success
+                        ? '<div class="alert alert-success">Admin password set — vault unlocked.</div>'
+                        : `<div class="alert alert-error">Error: ${data.message}</div>`;
+                    if (data.success) {
+                        document.getElementById('vault-init-password').value = '';
+                        loadDeviceCredentials();
+                    }
+                })
+                .catch(error => console.error('Error initializing vault:', error));
+        }
+
+        function unlockVault(event) {
+            event.preventDefault();
+            const password = document.getElementById('vault-unlock-password').value;
+            fetch('/api/device-credentials/vault/unlock', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ admin_password: password })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('device-credential-result').innerHTML = data.success
+                        ? '<div class="alert alert-success">Vault unlocked.</div>'
+                        : `<div class="alert alert-error">Error: ${data.message}</div>`;
+                    if (data.success) {
+                        document.getElementById('vault-unlock-password').value = '';
+                        loadDeviceCredentials();
+                    }
+                })
+                .catch(error => console.error('Error unlocking vault:', error));
+        }
+
+        function lockVault() {
+            fetch('/api/device-credentials/vault/lock', { method: 'POST' })
+                .then(response => response.json())
+                .then(() => {
+                    document.getElementById('device-credential-result').innerHTML = '<div class="alert alert-info">Vault locked.</div>';
+                    refreshVaultState();
+                })
+                .catch(error => console.error('Error locking vault:', error));
+        }
+
+        function setDeviceCredential(event) {
+            event.preventDefault();
+            const key = document.getElementById('dc-key').value.trim();
+            const password = document.getElementById('dc-password').value;
+            if (!key || !password) return;
+
+            fetch(`/api/device-credentials/${encodeURIComponent(key)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: password })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('device-credential-result').innerHTML = '<div class="alert alert-success">Credential saved.</div>';
+                        document.getElementById('dc-key').value = '';
+                        document.getElementById('dc-password').value = '';
+                        loadDeviceCredentials();
+                    } else {
+                        document.getElementById('device-credential-result').innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error saving credential:', error);
+                    document.getElementById('device-credential-result').innerHTML = '<div class="alert alert-error">Error saving credential</div>';
+                });
+        }
+
+        function deleteDeviceCredential(key) {
+            if (!confirm(`Remove stored credential "${key}"? Any tracked host referencing it will fail to authenticate until a new one is set.`)) return;
+            fetch(`/api/device-credentials/${encodeURIComponent(key)}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(() => loadDeviceCredentials())
+                .catch(error => console.error('Error removing credential:', error));
         }
 
         function testDynamicHostDetection() {
@@ -1078,6 +1297,7 @@
         loadSyncServers();
         loadDynamicHosts();
         loadZonesForDynamicForm();
+        loadDeviceCredentials();
         setInterval(loadServerStatus, 30000);
     </script>
 </body>

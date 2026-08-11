@@ -18,6 +18,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.fernet import Fernet, InvalidToken
 import hashlib
 import base64
 import ipaddress
@@ -45,10 +48,26 @@ SSH_USER = os.getenv('SSH_USER', 'debian')
 # unit sets PATH to just the venv's bin dir, which hides /usr/bin/ssh from
 # subprocess-based lookups.
 SSH_BIN = next((p for p in ('/usr/bin/ssh', '/bin/ssh', '/usr/local/bin/ssh') if os.path.exists(p)), 'ssh')
+DOCKER_BIN = next((p for p in ('/usr/bin/docker', '/usr/local/bin/docker') if os.path.exists(p)), 'docker')
+SUDO_BIN = next((p for p in ('/usr/bin/sudo', '/bin/sudo') if os.path.exists(p)), 'sudo')
+# The service account isn't in the docker group (avoids that standing,
+# effectively-root-equivalent grant); reuses the passwordless sudo access
+# already relied on elsewhere in this app for remote commands. -n fails
+# fast instead of hanging if sudo ever needs a password.
+DOCKER_CMD = [SUDO_BIN, '-n', DOCKER_BIN]
 WG_KEYS_FILE = os.getenv(
     'WG_KEYS_FILE',
     os.path.join(os.path.dirname(os.path.abspath(ZONES_FILE)), 'wireguard-keys.json')
 )
+# Device credentials (e.g. enable passwords for switches) — never stored in
+# zones.json, which is committed to git. Kept in a separate gitignored file
+# with restrictive permissions, same pattern as WG_KEYS_FILE.
+DEVICE_CREDENTIALS_FILE = os.getenv(
+    'DEVICE_CREDENTIALS_FILE',
+    os.path.join(os.path.dirname(os.path.abspath(ZONES_FILE)), 'device-credentials.json')
+)
+LEGACY_SSH_IMAGE = os.getenv('LEGACY_SSH_IMAGE', 'dnsmasq-ui-legacy-ssh')
+LEGACY_SSH_DOCKERFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docker', 'legacy-ssh')
 
 # Reverse proxy configuration
 PROXY_PATH_PREFIX = os.getenv('PROXY_PATH_PREFIX', '')  # e.g., '/dnsmasq-ui' for http://proxy/dnsmasq-ui/
@@ -71,6 +90,7 @@ class ZoneManager:
     def __init__(self, zones_file):
         self.zones_file = zones_file
         self.config = self._load_config()
+        self._vault_key = None  # in-memory only; never persisted to disk
 
     def _load_config(self):
         """Load zones and servers configuration."""
@@ -296,21 +316,36 @@ class ZoneManager:
     def add_dynamic_host(self, domain, zone_name, target_host, interface='eth0',
                           record_type='AAAA', ssh_user=None, enabled=True,
                           connection='paramiko', ssh_extra_args=None,
-                          detect_command=None, detect_regex=None):
+                          detect_command=None, detect_regex=None,
+                          cli_prompt_regex=None, enable_command=None,
+                          enable_password_ref=None, logout_command='exit',
+                          ssh_password_ref=None):
         """Track a host whose address (e.g. DHCPv6-assigned) should be polled
         and kept in sync with its DNS record, selected explicitly per-host
         rather than applying to every record.
 
-        connection: 'paramiko' (default) or 'cli' — 'cli' shells out to the
-        system ssh binary instead, for devices paramiko can't negotiate
-        with (e.g. old switches with DSA host keys paramiko rejects).
-        ssh_extra_args: list of extra flags passed to the ssh CLI, only used
-        when connection='cli' (e.g. ["-o", "HostKeyAlgorithms=+ssh-dss"]).
+        connection: 'paramiko' (default), 'cli', or 'docker'.
+        - 'cli' shells out to the host's own ssh binary instead of paramiko,
+          for devices paramiko can't negotiate with.
+        - 'docker' runs an interactive session inside a container with an
+          older OpenSSH client (see docker/legacy-ssh/), for devices with
+          SSH servers too old for even the host's own ssh, and whose CLI
+          only supports interactive sessions rather than one-shot command
+          execution (common on embedded switch CLIs).
+        ssh_extra_args: extra flags passed to ssh, for 'cli'/'docker'
+        (e.g. ["-o", "HostKeyAlgorithms=+ssh-dss"]).
         detect_command/detect_regex: override the default `ip addr` based
         detection with an arbitrary command and a regex (first capture
         group, or whole match) to pull the address out of its output —
         needed for non-Linux CLIs like switches that don't have an
-        `ip`/eth0-style interface to query.
+        `ip`/eth0-style interface to query. Required for 'docker'.
+        cli_prompt_regex: regex matching the device's shell prompt, used by
+        'docker' to know when a command has finished producing output.
+        enable_command/enable_password_ref: for Cisco-style CLIs with a
+        separate privileged mode (e.g. `enable`) needed before show
+        commands work. enable_password_ref looks up the actual password
+        from DEVICE_CREDENTIALS_FILE by key — never stored in zones.json.
+        logout_command: sent to end the session cleanly (default 'exit').
         """
         if not self.get_zone(zone_name):
             return False, "Zone not found"
@@ -331,6 +366,11 @@ class ZoneManager:
             'ssh_extra_args': ssh_extra_args or [],
             'detect_command': detect_command,
             'detect_regex': detect_regex,
+            'cli_prompt_regex': cli_prompt_regex or r'[>#]\s*$',
+            'enable_command': enable_command,
+            'enable_password_ref': enable_password_ref,
+            'logout_command': logout_command,
+            'ssh_password_ref': ssh_password_ref,
             'last_checked': None,
             'last_value': None,
             'last_updated': None
@@ -341,7 +381,9 @@ class ZoneManager:
     def update_dynamic_host(self, domain, **fields):
         """Update fields on a tracked host."""
         allowed = ('target_host', 'interface', 'ssh_user', 'enabled', 'connection',
-                   'ssh_extra_args', 'detect_command', 'detect_regex')
+                   'ssh_extra_args', 'detect_command', 'detect_regex',
+                   'cli_prompt_regex', 'enable_command', 'enable_password_ref',
+                   'logout_command', 'ssh_password_ref')
         for entry in self.config['dynamic_hosts']:
             if entry['domain'] == domain:
                 entry.update({k: v for k, v in fields.items() if k in allowed})
@@ -355,6 +397,276 @@ class ZoneManager:
         self.config['dynamic_hosts'] = [e for e in self.config['dynamic_hosts'] if e['domain'] != domain]
         self.save_config()
         return before != len(self.config['dynamic_hosts']), "Dynamic host removed"
+
+    def _load_vault_file(self):
+        """Load the raw credentials file. 'credentials' values are still
+        Fernet-encrypted at this point — this does not require the vault to
+        be unlocked, since key names and salt/verify aren't secret."""
+        if not os.path.exists(DEVICE_CREDENTIALS_FILE):
+            return {'salt': None, 'verify': None, 'credentials': {}}
+        try:
+            with open(DEVICE_CREDENTIALS_FILE, 'r') as f:
+                data = json.load(f)
+                data.setdefault('credentials', {})
+                return data
+        except Exception as e:
+            logger.error(f"Failed to load device credentials file: {e}")
+            return {'salt': None, 'verify': None, 'credentials': {}}
+
+    def _save_vault_file(self, data):
+        fd = os.open(DEVICE_CREDENTIALS_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def _derive_vault_key(self, password, salt):
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt,
+                          iterations=600000, backend=default_backend())
+        return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+
+    def vault_initialized(self):
+        """Whether an admin password has been set up for the credential vault."""
+        return bool(self._load_vault_file().get('salt'))
+
+    def vault_unlocked(self):
+        """Whether the derived key is currently cached in memory. Cleared on
+        process restart (and by lock_vault), so password-gated
+        dynamic_hosts entries need the vault unlocked again from the
+        Configuration page after every restart — the background poller has
+        no way to prompt for it itself."""
+        return self._vault_key is not None
+
+    def init_vault(self, admin_password):
+        """First-time setup: pick a new salt, derive a key from
+        admin_password, and store a verification marker (not any actual
+        credential) so future unlock attempts can be checked against it.
+        Refuses to run again once a vault exists — that would silently
+        orphan any credentials already encrypted under the old key."""
+        if self.vault_initialized():
+            return False, "Vault already initialized — use unlock instead"
+        salt = os.urandom(16)
+        key = self._derive_vault_key(admin_password, salt)
+        verify_token = Fernet(key).encrypt(b'dnsmasq-ui-vault-ok')
+        self._save_vault_file({
+            'salt': base64.b64encode(salt).decode(),
+            'verify': verify_token.decode(),
+            'credentials': {}
+        })
+        self._vault_key = key
+        return True, "Vault initialized and unlocked"
+
+    def unlock_vault(self, admin_password):
+        """Derive the key from the stored salt and check it against the
+        stored marker; cache it in memory (never written to disk) on
+        success."""
+        data = self._load_vault_file()
+        if not data.get('salt'):
+            return False, "Vault not initialized yet"
+        salt = base64.b64decode(data['salt'])
+        key = self._derive_vault_key(admin_password, salt)
+        try:
+            Fernet(key).decrypt(data['verify'].encode())
+        except InvalidToken:
+            return False, "Incorrect admin password"
+        self._vault_key = key
+        return True, "Vault unlocked"
+
+    def lock_vault(self):
+        """Drop the cached key from memory."""
+        self._vault_key = None
+
+    def _load_device_credentials(self):
+        """Decrypt and return all stored device credentials as
+        {key: plaintext_password}. Requires the vault to be unlocked;
+        returns {} (with a logged error) if locked."""
+        if not self.vault_unlocked():
+            logger.error("Device credential vault is locked; unlock it from the Configuration page")
+            return {}
+        data = self._load_vault_file()
+        fernet = Fernet(self._vault_key)
+        result = {}
+        for key, token in data.get('credentials', {}).items():
+            try:
+                result[key] = fernet.decrypt(token.encode()).decode()
+            except InvalidToken:
+                logger.error(f"Failed to decrypt stored credential '{key}' — vault key may not match")
+        return result
+
+    def set_device_credential(self, key, password):
+        """Encrypt and store a device credential under `key`, referenced
+        from a dynamic_hosts entry's enable_password_ref/ssh_password_ref —
+        never stored in zones.json itself, which is committed to git.
+        Requires the vault to be initialized and unlocked."""
+        if not self.vault_unlocked():
+            return False, "Vault is locked — initialize or unlock it first"
+        data = self._load_vault_file()
+        token = Fernet(self._vault_key).encrypt(password.encode())
+        data['credentials'][key] = token.decode()
+        try:
+            self._save_vault_file(data)
+            return True, "Credential saved"
+        except Exception as e:
+            logger.error(f"Failed to save device credential: {e}")
+            return False, str(e)
+
+    def delete_device_credential(self, key):
+        """Remove a stored device credential. Doesn't require the vault to
+        be unlocked, since deleting doesn't need to decrypt anything."""
+        data = self._load_vault_file()
+        if key not in data.get('credentials', {}):
+            return False, "Not found"
+        del data['credentials'][key]
+        self._save_vault_file(data)
+        return True, "Credential removed"
+
+    def list_device_credential_keys(self):
+        """List credential key names — doesn't require the vault unlocked,
+        since key names aren't encrypted, only values."""
+        return sorted(self._load_vault_file().get('credentials', {}).keys())
+
+    def _ensure_legacy_ssh_image(self):
+        """Build the legacy-ssh Docker image on first use if it's not
+        already present. Returns True if the image is available."""
+        check = subprocess.run(
+            DOCKER_CMD + ['image', 'inspect', LEGACY_SSH_IMAGE],
+            capture_output=True, timeout=10
+        )
+        if check.returncode == 0:
+            return True
+        logger.info(f"Building {LEGACY_SSH_IMAGE} image (first use)...")
+        build = subprocess.run(
+            DOCKER_CMD + ['build', '-t', LEGACY_SSH_IMAGE, LEGACY_SSH_DOCKERFILE_DIR],
+            capture_output=True, text=True, timeout=300
+        )
+        if build.returncode != 0:
+            logger.error(f"Failed to build {LEGACY_SSH_IMAGE}: {build.stderr}")
+            return False
+        return True
+
+    def _run_ssh_docker(self, target_host, command, ssh_user=None, extra_args=None,
+                         prompt_regex=r'[>#]\s*$', enable_command=None,
+                         enable_password_ref=None, logout_command='exit',
+                         ssh_password_ref=None):
+        """Run an interactive CLI session against a device inside a
+        container with an older OpenSSH client, for devices whose SSH
+        server can't be reached at all from the host (e.g. old switches
+        with DSA host keys outside modern OpenSSL's accepted parameter
+        sizes) AND that only support an interactive terminal session
+        rather than one-shot command execution (common on embedded switch
+        CLIs) — so plain `ssh host command` doesn't work even once the
+        crypto negotiates.
+
+        Drives login (answering a password prompt if the device doesn't
+        accept our key and ssh_password_ref is set) → optional
+        privileged-mode step (e.g. Cisco-style `enable`, with its own
+        optional password) → the actual command → logout, via a generated
+        expect script piped into the container. Both passwords are looked
+        up from DEVICE_CREDENTIALS_FILE by their *_ref key — never stored
+        in zones.json. Returns the command's captured output, or None on
+        failure.
+        """
+        if not self._ensure_legacy_ssh_image():
+            return None
+
+        creds = self._load_device_credentials()
+        enable_password = creds.get(enable_password_ref) if enable_password_ref else None
+        ssh_password = creds.get(ssh_password_ref) if ssh_password_ref else None
+
+        # expect script is static; all variable data flows in via env vars
+        # (not string-interpolated into the TCL source) to avoid needing to
+        # escape untrusted-shaped config data for TCL syntax. BatchMode is
+        # deliberately left off (unlike _run_ssh_cli) so a password prompt
+        # actually appears instead of being auto-rejected.
+        expect_script = r'''
+set timeout 15
+log_user 0
+set prompt_re $env(DH_PROMPT_RE)
+
+spawn sh -c "ssh -tt -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -o NumberOfPasswordPrompts=1 $env(DH_SSH_ARGS) -i /key $env(DH_USER)@$env(DH_TARGET)"
+
+expect {
+    timeout { puts "===ERROR==="; puts "timed out waiting for login prompt"; exit 1 }
+    eof { puts "===ERROR==="; puts "connection closed before login prompt"; exit 1 }
+    -re {[Pp]assword:} {
+        if {[info exists env(DH_SSH_PW)] && $env(DH_SSH_PW) ne ""} {
+            send "$env(DH_SSH_PW)\r"
+            exp_continue
+        } else {
+            puts "===ERROR==="; puts "device asked for a login password but none is configured (ssh_password_ref)"; exit 1
+        }
+    }
+    -re $prompt_re { }
+}
+
+if {[info exists env(DH_ENABLE_CMD)] && $env(DH_ENABLE_CMD) ne ""} {
+    send "$env(DH_ENABLE_CMD)\r"
+    expect {
+        timeout { puts "===ERROR==="; puts "timed out after enable command"; exit 1 }
+        -re {[Pp]assword} {
+            send "$env(DH_ENABLE_PW)\r"
+            expect -re $prompt_re
+        }
+        -re $prompt_re { }
+    }
+}
+
+send "$env(DH_DETECT_CMD)\r"
+expect {
+    timeout { puts "===ERROR==="; puts "timed out waiting for command output"; exit 1 }
+    -re $prompt_re { }
+}
+puts "===OUTPUT_START==="
+puts $expect_out(buffer)
+puts "===OUTPUT_END==="
+
+send "$env(DH_LOGOUT_CMD)\r"
+expect eof
+'''
+
+        dh_vars = {
+            'DH_TARGET': target_host,
+            'DH_USER': ssh_user or SSH_USER,
+            'DH_SSH_ARGS': ' '.join(extra_args or []),
+            'DH_PROMPT_RE': prompt_regex,
+            'DH_DETECT_CMD': command,
+            'DH_LOGOUT_CMD': logout_command,
+        }
+        if enable_command:
+            dh_vars['DH_ENABLE_CMD'] = enable_command
+            dh_vars['DH_ENABLE_PW'] = enable_password or ''
+        if ssh_password:
+            dh_vars['DH_SSH_PW'] = ssh_password
+
+        # sudo resets the environment by default, so subprocess.run(env=...)
+        # alone won't carry these through to docker — pass them as VAR=value
+        # arguments to sudo itself, which it explicitly honors per-command.
+        sudo_env_args = [f"{k}={v}" for k, v in dh_vars.items()]
+        docker_args = (
+            [SUDO_BIN, '-n'] + sudo_env_args + [DOCKER_BIN] +
+            ['run', '--rm', '-i', '--network', 'host', '-v', f'{SSH_KEY}:/key:ro']
+        )
+        for k in dh_vars:
+            docker_args += ['-e', k]
+        docker_args.append(LEGACY_SSH_IMAGE)
+
+        try:
+            result = subprocess.run(
+                docker_args, input=expect_script, capture_output=True, text=True,
+                timeout=45
+            )
+            output = result.stdout
+            if '===ERROR===' in output:
+                logger.error(f"Legacy SSH session to {target_host} failed: {output.split('===ERROR===', 1)[1].strip()}")
+                return None
+            if '===OUTPUT_START===' not in output:
+                logger.error(
+                    f"Legacy SSH session to {target_host} produced no captured output. "
+                    f"stdout={output!r} stderr={result.stderr!r}"
+                )
+                return None
+            return output.split('===OUTPUT_START===', 1)[1].split('===OUTPUT_END===', 1)[0]
+        except Exception as e:
+            logger.error(f"Legacy SSH session to {target_host} failed: {e}")
+            return None
 
     def _run_ssh_paramiko(self, target_host, command, ssh_user=None):
         """Run command over SSH via paramiko. Returns stdout text, or None on failure."""
@@ -418,7 +730,14 @@ class ZoneManager:
             else:
                 command = f"ip -4 -o addr show {interface} scope global | awk '{{print $4}}' | cut -d/ -f1 | head -1"
 
-        if connection == 'cli':
+        if connection == 'docker':
+            output = self._run_ssh_docker(
+                target_host, command, ssh_user, entry.get('ssh_extra_args'),
+                entry.get('cli_prompt_regex', r'[>#]\s*$'),
+                entry.get('enable_command'), entry.get('enable_password_ref'),
+                entry.get('logout_command', 'exit'), entry.get('ssh_password_ref')
+            )
+        elif connection == 'cli':
             output = self._run_ssh_cli(target_host, command, ssh_user, entry.get('ssh_extra_args'))
         else:
             output = self._run_ssh_paramiko(target_host, command, ssh_user)
@@ -1335,7 +1654,12 @@ def api_dynamic_hosts_add():
         connection=data.get('connection', 'paramiko'),
         ssh_extra_args=data.get('ssh_extra_args'),
         detect_command=data.get('detect_command'),
-        detect_regex=data.get('detect_regex')
+        detect_regex=data.get('detect_regex'),
+        cli_prompt_regex=data.get('cli_prompt_regex'),
+        enable_command=data.get('enable_command'),
+        enable_password_ref=data.get('enable_password_ref'),
+        logout_command=data.get('logout_command', 'exit'),
+        ssh_password_ref=data.get('ssh_password_ref')
     )
     return jsonify({'success': success, 'message': message})
 
@@ -1363,6 +1687,57 @@ def api_dynamic_hosts_test():
     saved entry) — for iterating on detect_command/detect_regex against a
     device's CLI without committing to zones.json each attempt."""
     return jsonify(manager.test_dynamic_host(request.json))
+
+@app.route('/api/device-credentials/vault', methods=['GET'])
+def api_device_credentials_vault_status():
+    """API: Whether the credential vault has an admin password set up yet,
+    and whether it's currently unlocked in this process's memory."""
+    return jsonify({
+        'initialized': manager.vault_initialized(),
+        'unlocked': manager.vault_unlocked()
+    })
+
+@app.route('/api/device-credentials/vault/init', methods=['POST'])
+def api_device_credentials_vault_init():
+    """API: First-time setup of the credential vault's admin password."""
+    data = request.json
+    success, message = manager.init_vault(data.get('admin_password', ''))
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/device-credentials/vault/unlock', methods=['POST'])
+def api_device_credentials_vault_unlock():
+    """API: Unlock the credential vault for this process (cached in memory
+    only — needs repeating after every service restart)."""
+    data = request.json
+    success, message = manager.unlock_vault(data.get('admin_password', ''))
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/device-credentials/vault/lock', methods=['POST'])
+def api_device_credentials_vault_lock():
+    """API: Drop the cached vault key from memory."""
+    manager.lock_vault()
+    return jsonify({'success': True, 'message': 'Vault locked'})
+
+@app.route('/api/device-credentials', methods=['GET'])
+def api_device_credentials_list():
+    """API: List device credential keys (e.g. switch enable passwords) —
+    never returns the actual stored values."""
+    return jsonify({'keys': manager.list_device_credential_keys()})
+
+@app.route('/api/device-credentials/<key>', methods=['PUT'])
+def api_device_credentials_set(key):
+    """API: Store/update a device credential under `key`, referenced from a
+    dynamic_hosts entry's enable_password_ref. Stored in
+    DEVICE_CREDENTIALS_FILE (0600, gitignored) — never in zones.json."""
+    data = request.json
+    success, message = manager.set_device_credential(key, data.get('password', ''))
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/device-credentials/<key>', methods=['DELETE'])
+def api_device_credentials_delete(key):
+    """API: Remove a stored device credential."""
+    success, message = manager.delete_device_credential(key)
+    return jsonify({'success': success, 'message': message})
 
 @app.route('/config')
 def config_page():

@@ -43,6 +43,8 @@ wireguard-keys.json.bak
 wireguard-keys-docker.json
 wireguard-keys-docker.json.bak
 servers.json
+device-credentials.json
+device-credentials.json.bak
 
 # Logs
 *.log
