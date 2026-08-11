@@ -387,6 +387,56 @@
         </div>
 
         <div class="section">
+            <h2>Dynamic DNS Tracking</h2>
+            <div class="alert alert-info">
+                <strong>Poll specific hosts for address changes</strong>: For hosts whose IP is assigned
+                dynamically (e.g. DHCPv6/SLAAC via a router), track them here. A background job checks
+                only the hosts you select below, every few minutes, and automatically updates and
+                redeploys their DNS record if the address changes.
+            </div>
+
+            <h3 style="color: #333; margin-bottom: 15px;">Tracked Hosts</h3>
+            <div id="dynamic-hosts-list" class="server-list" style="margin-bottom: 20px;">
+                <p style="padding: 20px; grid-column: 1/-1;">Loading tracked hosts...</p>
+            </div>
+            <button class="btn btn-secondary btn-sm" onclick="pollDynamicHostsNow()">Poll Now</button>
+            <div id="dynamic-poll-result" style="margin-top: 15px;"></div>
+
+            <h3 style="color: #333; margin: 25px 0 15px;">Track a New Host</h3>
+            <form id="dynamic-host-form" onsubmit="addDynamicHost(event)">
+                <div class="form-group">
+                    <label for="dh-zone">Zone</label>
+                    <select id="dh-zone" required></select>
+                </div>
+                <div class="form-group">
+                    <label for="dh-domain">Domain</label>
+                    <input type="text" id="dh-domain" placeholder="middle-01.ad.alshowto.com" required>
+                </div>
+                <div class="form-group">
+                    <label for="dh-record-type">Record Type</label>
+                    <select id="dh-record-type">
+                        <option value="AAAA" selected>AAAA (IPv6)</option>
+                        <option value="A">A (IPv4)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="dh-target">Target Host (IP to SSH into and read the current address from)</label>
+                    <input type="text" id="dh-target" placeholder="192.168.0.250" required>
+                </div>
+                <div class="form-group">
+                    <label for="dh-interface">Network Interface</label>
+                    <input type="text" id="dh-interface" value="eth0" required>
+                </div>
+                <div class="form-group">
+                    <label for="dh-ssh-user">SSH User (optional, defaults to the server's configured SSH user)</label>
+                    <input type="text" id="dh-ssh-user" placeholder="debian">
+                </div>
+                <button type="submit" class="btn btn-primary">Track Host</button>
+            </form>
+            <div id="dynamic-add-result" style="margin-top: 15px;"></div>
+        </div>
+
+        <div class="section">
             <h2>Backup & Restore</h2>
 
             <div class="tab-group" style="margin-bottom: 20px;">
@@ -799,10 +849,156 @@
                 });
         }
 
+        function loadDynamicHosts() {
+            fetch('/api/dynamic-hosts')
+                .then(response => response.json())
+                .then(data => {
+                    let html = '';
+                    const hosts = data.dynamic_hosts || [];
+                    if (hosts.length === 0) {
+                        html = '<p style="padding: 20px; grid-column: 1/-1;">No hosts tracked yet</p>';
+                    } else {
+                        for (const h of hosts) {
+                            const statusIcon = h.enabled ? '🟢' : '⚫';
+                            const lastChecked = h.last_checked ? new Date(h.last_checked).toLocaleString() : 'never';
+                            const lastUpdated = h.last_updated ? new Date(h.last_updated).toLocaleString() : 'never';
+                            html += `<div class="server-item">
+                                <h4>${statusIcon} ${h.domain}</h4>
+                                <p><strong>Zone:</strong> ${h.zone}</p>
+                                <p><strong>Type:</strong> ${h.record_type}</p>
+                                <p><strong>Target:</strong> ${h.target_host} (${h.interface})</p>
+                                <p><strong>Current value:</strong> ${h.last_value || 'unknown'}</p>
+                                <p><strong>Last checked:</strong> ${lastChecked}</p>
+                                <p><strong>Last updated:</strong> ${lastUpdated}</p>
+                                <div style="margin-top: 10px; display: flex; gap: 8px;">
+                                    <button class="btn btn-secondary btn-sm" onclick="toggleDynamicHost('${h.domain}', ${!h.enabled})">${h.enabled ? 'Disable' : 'Enable'}</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="deleteDynamicHost('${h.domain}')">Remove</button>
+                                </div>
+                            </div>`;
+                        }
+                    }
+                    document.getElementById('dynamic-hosts-list').innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error loading dynamic hosts:', error);
+                    document.getElementById('dynamic-hosts-list').innerHTML = '<div class="alert alert-error">Error loading tracked hosts</div>';
+                });
+        }
+
+        function loadZonesForDynamicForm() {
+            fetch('/api/zones')
+                .then(response => response.json())
+                .then(data => {
+                    const select = document.getElementById('dh-zone');
+                    select.innerHTML = (data.zones || [])
+                        .map(z => `<option value="${z.name}">${z.name}</option>`)
+                        .join('');
+                })
+                .catch(error => console.error('Error loading zones:', error));
+        }
+
+        function addDynamicHost(event) {
+            event.preventDefault();
+
+            const payload = {
+                zone: document.getElementById('dh-zone').value,
+                domain: document.getElementById('dh-domain').value.trim(),
+                record_type: document.getElementById('dh-record-type').value,
+                target_host: document.getElementById('dh-target').value.trim(),
+                interface: document.getElementById('dh-interface').value.trim() || 'eth0',
+                ssh_user: document.getElementById('dh-ssh-user').value.trim() || null
+            };
+
+            const btn = event.target.querySelector('button[type="submit"]');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> Adding...';
+
+            fetch('/api/dynamic-hosts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(response => response.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Track Host';
+
+                    if (data.success) {
+                        document.getElementById('dynamic-add-result').innerHTML = '<div class="alert alert-success">Host added — it will be checked on the next poll.</div>';
+                        document.getElementById('dynamic-host-form').reset();
+                        loadDynamicHosts();
+                    } else {
+                        document.getElementById('dynamic-add-result').innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Track Host';
+                    console.error('Error:', error);
+                    document.getElementById('dynamic-add-result').innerHTML = '<div class="alert alert-error">Error adding tracked host</div>';
+                });
+        }
+
+        function toggleDynamicHost(domain, enabled) {
+            fetch(`/api/dynamic-hosts/${encodeURIComponent(domain)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: enabled })
+            })
+                .then(response => response.json())
+                .then(() => loadDynamicHosts())
+                .catch(error => console.error('Error toggling dynamic host:', error));
+        }
+
+        function deleteDynamicHost(domain) {
+            if (!confirm(`Stop tracking ${domain}?`)) return;
+            fetch(`/api/dynamic-hosts/${encodeURIComponent(domain)}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(() => loadDynamicHosts())
+                .catch(error => console.error('Error removing dynamic host:', error));
+        }
+
+        function pollDynamicHostsNow() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> Polling...';
+
+            fetch('/api/dynamic-hosts/poll', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Poll Now';
+
+                    let html = data.deployed
+                        ? '<div class="alert alert-success"><strong>Changes found and deployed:</strong><br>'
+                        : '<div class="alert alert-info"><strong>No changes:</strong><br>';
+                    for (const [domain, result] of Object.entries(data.changes || {})) {
+                        if (result.error) {
+                            html += `${domain}: error — ${result.error}<br>`;
+                        } else if (result.changed) {
+                            html += `${domain}: ${result.old || '(none)'} → ${result.new}<br>`;
+                        } else {
+                            html += `${domain}: unchanged (${result.value})<br>`;
+                        }
+                    }
+                    html += '</div>';
+                    document.getElementById('dynamic-poll-result').innerHTML = html;
+                    loadDynamicHosts();
+                })
+                .catch(error => {
+                    btn.disabled = false;
+                    btn.innerHTML = 'Poll Now';
+                    console.error('Error polling dynamic hosts:', error);
+                    document.getElementById('dynamic-poll-result').innerHTML = '<div class="alert alert-error">Error polling tracked hosts</div>';
+                });
+        }
+
         // Load data on page load
         loadSSHKeyInfo();
         loadServerStatus();
         loadSyncServers();
+        loadDynamicHosts();
+        loadZonesForDynamicForm();
         setInterval(loadServerStatus, 30000);
     </script>
 </body>
