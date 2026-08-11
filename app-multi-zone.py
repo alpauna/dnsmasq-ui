@@ -6,6 +6,7 @@ Manages dnsmasq DNS records across multiple servers and zones.
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for, send_file, session
 from flask_cors import CORS
+from flask_wtf import CSRFProtect
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 import json
@@ -22,15 +23,20 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet, InvalidToken
+import pyotp
+import smtplib
+from email.mime.text import MIMEText
 import hashlib
 import base64
 import ipaddress
 import re
+import secrets
 import threading
 import time
 
 app = Flask(__name__)
 CORS(app)
+csrf = CSRFProtect(app)
 
 # Reverse proxy support: trust X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host
 # Handles proper IP tracking and URL construction behind reverse proxies
@@ -76,6 +82,14 @@ AUTH_FILE = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(ZONES_FILE)), 'auth.json')
 )
 LEGACY_SSH_DOCKERFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docker', 'legacy-ssh')
+# SMTP relay for email-based 2FA codes. The recipient address is set
+# per-account when enabling email 2FA (Configuration page), not here —
+# only the relay itself is fixed at deploy time via env vars.
+SMTP_SERVER = os.getenv('SMTP_SERVER', '')
+SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
+SMTP_USER = os.getenv('SMTP_USER', '')
+SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+SMTP_FROM = os.getenv('SMTP_FROM', SMTP_USER)
 
 # Reverse proxy configuration
 PROXY_PATH_PREFIX = os.getenv('PROXY_PATH_PREFIX', '')  # e.g., '/dnsmasq-ui' for http://proxy/dnsmasq-ui/
@@ -118,7 +132,51 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'false').lower() == 'true'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
-_PUBLIC_PATHS = {'/setup', '/login', '/favicon.ico'}
+_PUBLIC_PATHS = {
+    '/setup', '/login', '/favicon.ico',
+    '/login/verify', '/login/verify/totp', '/login/verify/email/send', '/login/verify/email'
+}
+
+# In-memory only (never persisted): short-lived state for a password-verified
+# login awaiting a second factor. Keyed by a random token stored in the
+# (unauthenticated-at-this-point) session cookie. Lost on restart, which is
+# fine — a half-completed login just has to start over.
+_pending_2fa_challenges = {}
+_PENDING_2FA_TTL = timedelta(minutes=10)
+
+def _prune_pending_2fa():
+    expired = [t for t, c in _pending_2fa_challenges.items()
+               if datetime.now() - c['created'] > _PENDING_2FA_TTL]
+    for t in expired:
+        del _pending_2fa_challenges[t]
+
+def _get_pending_2fa():
+    _prune_pending_2fa()
+    token = session.get('pending_2fa_token')
+    return _pending_2fa_challenges.get(token) if token else None
+
+def _enabled_2fa_methods(auth_config):
+    tf = auth_config.get('two_factor', {})
+    return [m for m in ('totp', 'email') if tf.get(m, {}).get('enabled')]
+
+def _send_email_code(to_addr, code):
+    if not SMTP_SERVER or not to_addr:
+        logger.error("Email 2FA send failed: SMTP_SERVER or recipient address not configured")
+        return False, "Email delivery isn't configured (SMTP_SERVER not set)"
+    try:
+        msg = MIMEText(f"Your dnsmasq-ui login code is: {code}\n\nThis code expires in 10 minutes.")
+        msg['Subject'] = 'dnsmasq-ui login code'
+        msg['From'] = SMTP_FROM
+        msg['To'] = to_addr
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            if SMTP_USER:
+                server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        return True, "Code sent"
+    except Exception as e:
+        logger.error(f"Failed to send 2FA email to {to_addr}: {e}")
+        return False, f"Failed to send email: {e}"
 
 @app.before_request
 def _require_login():
@@ -167,13 +225,81 @@ def login_page():
     if request.method == 'POST':
         password = request.form.get('password', '')
         if check_password_hash(auth_config['password_hash'], password):
-            session.permanent = True
-            session['logged_in'] = True
-            next_path = request.args.get('next') or url_for('index')
-            return redirect(next_path)
+            methods = _enabled_2fa_methods(auth_config)
+            if not methods:
+                session.permanent = True
+                session['logged_in'] = True
+                return redirect(request.args.get('next') or url_for('index'))
+
+            token = secrets.token_urlsafe(24)
+            _pending_2fa_challenges[token] = {
+                'methods': methods,
+                'created': datetime.now(),
+                'next': request.args.get('next') or url_for('index')
+            }
+            session['pending_2fa_token'] = token
+            return redirect(url_for('login_verify_page'))
         return render_template('login.html', mode='login', error='Incorrect password')
 
     return render_template('login.html', mode='login')
+
+@app.route('/login/verify', methods=['GET'])
+def login_verify_page():
+    challenge = _get_pending_2fa()
+    if not challenge:
+        return redirect(url_for('login_page'))
+    return render_template('login_verify.html', methods=challenge['methods'])
+
+@app.route('/login/verify/totp', methods=['POST'])
+def login_verify_totp():
+    challenge = _get_pending_2fa()
+    if not challenge or 'totp' not in challenge['methods']:
+        return redirect(url_for('login_page'))
+
+    auth_config = _load_auth()
+    auth_secret = auth_config.get('two_factor', {}).get('totp', {}).get('secret')
+    code = request.form.get('code', '').strip()
+    if auth_secret and pyotp.TOTP(auth_secret).verify(code, valid_window=1):
+        del _pending_2fa_challenges[session.pop('pending_2fa_token')]
+        session.permanent = True
+        session['logged_in'] = True
+        return redirect(challenge['next'])
+    return render_template('login_verify.html', methods=challenge['methods'], error='Invalid code')
+
+@app.route('/login/verify/email/send', methods=['POST'])
+def login_verify_email_send():
+    challenge = _get_pending_2fa()
+    if not challenge or 'email' not in challenge['methods']:
+        return redirect(url_for('login_page'))
+
+    auth_config = _load_auth()
+    to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+    code = f"{secrets.randbelow(1000000):06d}"
+    challenge['email_code'] = code
+    challenge['email_code_expires'] = datetime.now() + timedelta(minutes=10)
+    success, message = _send_email_code(to_addr, code)
+    return render_template(
+        'login_verify.html', methods=challenge['methods'],
+        email_sent=success, error=None if success else message
+    )
+
+@app.route('/login/verify/email', methods=['POST'])
+def login_verify_email_submit():
+    challenge = _get_pending_2fa()
+    if not challenge or 'email' not in challenge['methods']:
+        return redirect(url_for('login_page'))
+
+    code = request.form.get('code', '').strip()
+    expires = challenge.get('email_code_expires')
+    if challenge.get('email_code') and code == challenge['email_code'] and expires and datetime.now() < expires:
+        del _pending_2fa_challenges[session.pop('pending_2fa_token')]
+        session.permanent = True
+        session['logged_in'] = True
+        return redirect(challenge['next'])
+    return render_template(
+        'login_verify.html', methods=challenge['methods'],
+        email_sent=bool(challenge.get('email_code')), error='Invalid or expired code'
+    )
 
 @app.route('/logout', methods=['POST'])
 def logout():
@@ -1834,6 +1960,105 @@ def api_device_credentials_delete(key):
     """API: Remove a stored device credential."""
     success, message = manager.delete_device_credential(key)
     return jsonify({'success': success, 'message': message})
+
+@app.route('/api/2fa/status', methods=['GET'])
+def api_2fa_status():
+    """API: Which 2FA methods are enabled, and the email address in use
+    (if any) — never returns the TOTP secret or any code."""
+    auth_config = _load_auth() or {}
+    tf = auth_config.get('two_factor', {})
+    return jsonify({
+        'totp_enabled': bool(tf.get('totp', {}).get('enabled')),
+        'email_enabled': bool(tf.get('email', {}).get('enabled')),
+        'email_to': tf.get('email', {}).get('to') if tf.get('email', {}).get('enabled') else None
+    })
+
+@app.route('/api/2fa/totp/setup', methods=['POST'])
+def api_2fa_totp_setup():
+    """API: Generate a new (not yet enabled) TOTP secret for the admin to
+    add to their authenticator app. Stashed in the session until confirmed."""
+    auth_secret = pyotp.random_base32()
+    session['pending_totp_secret'] = auth_secret
+    uri = pyotp.TOTP(auth_secret).provisioning_uri(name='admin', issuer_name='dnsmasq-ui')
+    return jsonify({'secret': auth_secret, 'provisioning_uri': uri})
+
+@app.route('/api/2fa/totp/confirm', methods=['POST'])
+def api_2fa_totp_confirm():
+    """API: Enable TOTP once the admin proves they can generate a valid
+    code from the secret issued by /setup."""
+    pending_secret = session.get('pending_totp_secret')
+    if not pending_secret:
+        return jsonify({'success': False, 'message': 'No pending TOTP setup — call setup first'}), 400
+
+    code = (request.json or {}).get('code', '').strip()
+    if not pyotp.TOTP(pending_secret).verify(code, valid_window=1):
+        return jsonify({'success': False, 'message': 'Invalid code'}), 400
+
+    auth_config = _load_auth() or {}
+    auth_config.setdefault('two_factor', {})['totp'] = {'enabled': True, 'secret': pending_secret}
+    _save_auth(auth_config)
+    session.pop('pending_totp_secret', None)
+    return jsonify({'success': True, 'message': 'TOTP enabled'})
+
+@app.route('/api/2fa/totp/disable', methods=['POST'])
+def api_2fa_totp_disable():
+    """API: Disable TOTP. Requires the current password again, since this
+    removes a layer of protection from the account."""
+    auth_config = _load_auth() or {}
+    password = (request.json or {}).get('current_password', '')
+    if not check_password_hash(auth_config.get('password_hash', ''), password):
+        return jsonify({'success': False, 'message': 'Incorrect password'}), 403
+    auth_config.setdefault('two_factor', {})['totp'] = {'enabled': False}
+    _save_auth(auth_config)
+    return jsonify({'success': True, 'message': 'TOTP disabled'})
+
+@app.route('/api/2fa/email/setup', methods=['POST'])
+def api_2fa_email_setup():
+    """API: Send a test code to the given address; enabling happens on
+    /confirm once the admin proves they received it."""
+    to_addr = (request.json or {}).get('to', '').strip()
+    if not to_addr:
+        return jsonify({'success': False, 'message': 'Email address required'}), 400
+
+    code = f"{secrets.randbelow(1000000):06d}"
+    session['pending_email_to'] = to_addr
+    session['pending_email_code'] = code
+    session['pending_email_code_expires'] = (datetime.now() + timedelta(minutes=10)).isoformat()
+    success, message = _send_email_code(to_addr, code)
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/2fa/email/confirm', methods=['POST'])
+def api_2fa_email_confirm():
+    """API: Enable email 2FA once the admin proves they received the test code."""
+    pending_to = session.get('pending_email_to')
+    pending_code = session.get('pending_email_code')
+    pending_expires = session.get('pending_email_code_expires')
+    if not pending_to or not pending_code:
+        return jsonify({'success': False, 'message': 'No pending email setup — call setup first'}), 400
+    if not pending_expires or datetime.now() > datetime.fromisoformat(pending_expires):
+        return jsonify({'success': False, 'message': 'Code expired — request a new one'}), 400
+
+    code = (request.json or {}).get('code', '').strip()
+    if code != pending_code:
+        return jsonify({'success': False, 'message': 'Invalid code'}), 400
+
+    auth_config = _load_auth() or {}
+    auth_config.setdefault('two_factor', {})['email'] = {'enabled': True, 'to': pending_to}
+    _save_auth(auth_config)
+    for k in ('pending_email_to', 'pending_email_code', 'pending_email_code_expires'):
+        session.pop(k, None)
+    return jsonify({'success': True, 'message': 'Email 2FA enabled'})
+
+@app.route('/api/2fa/email/disable', methods=['POST'])
+def api_2fa_email_disable():
+    """API: Disable email 2FA. Requires the current password again."""
+    auth_config = _load_auth() or {}
+    password = (request.json or {}).get('current_password', '')
+    if not check_password_hash(auth_config.get('password_hash', ''), password):
+        return jsonify({'success': False, 'message': 'Incorrect password'}), 403
+    auth_config.setdefault('two_factor', {})['email'] = {'enabled': False}
+    _save_auth(auth_config)
+    return jsonify({'success': True, 'message': 'Email 2FA disabled'})
 
 @app.route('/config')
 def config_page():

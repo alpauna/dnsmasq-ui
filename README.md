@@ -927,21 +927,59 @@ a valid session get a `401` instead of leaking data.
   ```bash
   ssh debian@<server> "rm /opt/dnsmasq-ui/auth.json && sudo systemctl restart dnsmasq-ui"
   ```
-- **Known limitation**: no CSRF token protection on state-changing
-  POST/PUT/DELETE endpoints yet. Acceptable for a private LAN tool; worth
-  hardening before exposing this beyond that.
+- **CSRF protection**: `Flask-WTF`'s `CSRFProtect` guards every state-changing
+  request app-wide. Forms carry a hidden `csrf_token` field; the dashboard's
+  JS pages patch `window.fetch` once (per page, via a small snippet right
+  after the `<script>` tag) to auto-attach an `X-CSRFToken` header to every
+  non-GET request, so none of the individual `fetch()` calls needed
+  touching. A request missing/mismatching the token gets a `400`.
 - **Testing the login programmatically**: use `curl --data-urlencode`, not
   `-d`, if the password contains `&` or other reserved URL characters — `-d`
   sends the value unencoded, so the receiving form parser treats `&` as a
-  field separator and silently truncates the password at that point.
+  field separator and silently truncates the password at that point. `/login`
+  itself is CSRF-protected too, so fetch a token from the page first.
   ```bash
   # Wrong — truncates at the & if the password contains one:
   curl -c cookies.txt -d "password=$PASSWORD" http://<server>:5000/login
 
-  # Correct — percent-encodes reserved characters first:
-  curl -c cookies.txt --data-urlencode "password=$PASSWORD" http://<server>:5000/login
+  # Correct: get a session + CSRF token, then log in with both
+  curl -c cookies.txt http://<server>:5000/login -o login.html
+  CSRF=$(grep -o 'name="csrf_token" value="[^"]*"' login.html | sed 's/.*value="//;s/"$//')
+  curl -b cookies.txt -c cookies.txt \
+    --data-urlencode "csrf_token=$CSRF" --data-urlencode "password=$PASSWORD" \
+    http://<server>:5000/login
+
+  # Authenticated requests: send the cookie; state-changing ones also need
+  # the X-CSRFToken header (fetch a fresh token from any page's meta tag)
   curl -b cookies.txt http://<server>:5000/api/zones
   ```
+
+### Two-Factor Authentication
+
+Opt-in, per-method — enable either or both from the Configuration page's
+Two-Factor Authentication section. Whichever are enabled are all offered at
+login (`/login/verify`), so you pick whichever's convenient that time
+instead of being locked into one.
+
+- **TOTP (authenticator app)**: `POST /api/2fa/totp/setup` issues a new
+  secret (shown as text + an `otpauth://` URI — no QR image, to avoid
+  pulling in a `qrcode`/`Pillow` dependency chain for something an
+  authenticator app's manual-entry option already covers). Enabling requires
+  proving you can generate a valid code from it via
+  `POST /api/2fa/totp/confirm` first — it's not live until confirmed.
+- **Email**: `POST /api/2fa/email/setup` sends a 6-digit code to the given
+  address via the SMTP relay configured in `smtp.env` (see below).
+  `POST /api/2fa/email/confirm` with that code enables it. Codes expire
+  after 10 minutes and are tracked in an in-memory dict, not the session
+  cookie or disk — lost on service restart, which just means a half-finished
+  setup/login has to restart, nothing more.
+- **Disabling** either method requires the current dashboard password again
+  (`POST /api/2fa/totp/disable` / `/api/2fa/email/disable`) — a hijacked
+  session alone can't strip 2FA off the account.
+- TOTP secrets are stored in `auth.json` alongside the password hash,
+  protected the same way (`0600`, gitignored) — not further encrypted, since
+  unlike the device-credentials vault, verifying a TOTP code has to happen
+  *during* login itself, before any "vault unlock" step could exist.
 
 ### Where Files Live on the Server
 
@@ -952,14 +990,27 @@ unless overridden via their respective environment variables:
 | File | Path | Purpose |
 |---|---|---|
 | Zone/server config | `/opt/dnsmasq-ui/zones.json` | tracked in git |
-| Dashboard login | `/opt/dnsmasq-ui/auth.json` | `0600`, gitignored |
+| Dashboard login + TOTP secret | `/opt/dnsmasq-ui/auth.json` | `0600`, gitignored |
 | Device-credential vault | `/opt/dnsmasq-ui/device-credentials.json` | `0600`, gitignored, encrypted at rest |
 | WireGuard keys | `/opt/dnsmasq-ui/wireguard-keys.json` | `0600`, gitignored |
+| SMTP relay credentials (email 2FA) | `/opt/dnsmasq-ui/smtp.env` | `0600`, gitignored, loaded via systemd `EnvironmentFile=` — **not** read from the unit file itself, which is world-readable (`644`) by default |
 | SSH private key | `~/.ssh/id_rsa` (e.g. `/home/debian/.ssh/id_rsa`) | outside the app directory entirely |
 | Deployed dnsmasq config | `/etc/dnsmasq.d/local-records.conf` | on each DNS server, not the dashboard host |
 
 None of the `0600` files above are readable by `git pull`/`push` — they're
 gitignored and stay local to whichever server the dashboard runs on.
+
+`smtp.env` format (plain `KEY=value`, no quoting needed for simple values):
+```
+SMTP_SERVER=mail.example.com
+SMTP_PORT=587
+SMTP_USER=admin
+SMTP_PASSWORD=your-smtp-password
+SMTP_FROM=admin@example.com
+```
+The systemd unit references it via `EnvironmentFile=-/opt/dnsmasq-ui/smtp.env`
+(the leading `-` makes it optional — the app starts fine without email 2FA
+configured, that feature just won't work until the file exists).
 
 ## Initial Setup Workflow
 

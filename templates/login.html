@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{{ 'Set Admin Password' if mode == 'setup' else 'Sign In' }} - dnsmasq-ui</title>
     <style>
         * {
@@ -103,6 +104,7 @@
             <p class="subtitle">First-time setup — this password protects the dnsmasq-ui dashboard.</p>
             {% if error %}<div class="alert-error">{{ error }}</div>{% endif %}
             <form method="POST" action="{{ url_for('setup_page') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="password">Password (min 8 characters)</label>
                     <input type="password" id="password" name="password" required autofocus>
@@ -118,6 +120,7 @@
             <p class="subtitle">Sign in to continue.</p>
             {% if error %}<div class="alert-error">{{ error }}</div>{% endif %}
             <form method="POST" action="{{ url_for('login_page', next=request.args.get('next')) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="form-group">
                     <label for="password">Password</label>
                     <input type="password" id="password" name="password" required autofocus>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>Verify - dnsmasq-ui</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 40px;
+            width: 100%;
+            max-width: 380px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        h1 {
+            color: #333;
+            font-size: 22px;
+            margin-bottom: 8px;
+        }
+
+        p.subtitle {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 20px;
+        }
+
+        .tab-group {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .tab-btn {
+            padding: 8px 14px;
+            background: none;
+            border: none;
+            color: #666;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 13px;
+            border-bottom: 3px solid transparent;
+        }
+
+        .tab-btn.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .method {
+            display: none;
+        }
+
+        .method.active {
+            display: block;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        .form-group label {
+            display: block;
+            color: #333;
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            letter-spacing: 2px;
+            text-align: center;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            background: #667eea;
+            color: white;
+            margin-bottom: 10px;
+        }
+
+        .btn:hover {
+            background: #5568d3;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .alert-error {
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+            border-radius: 4px;
+            padding: 12px;
+            font-size: 13px;
+            margin-bottom: 18px;
+        }
+
+        .alert-info {
+            background: #e3f2fd;
+            color: #1565c0;
+            border: 1px solid #bbdefb;
+            border-radius: 4px;
+            padding: 12px;
+            font-size: 13px;
+            margin-bottom: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Verify It's You</h1>
+        <p class="subtitle">Password correct — one more step.</p>
+        {% if error %}<div class="alert-error">{{ error }}</div>{% endif %}
+
+        {% if methods|length > 1 %}
+        <div class="tab-group">
+            {% if 'totp' in methods %}<button type="button" class="tab-btn active" onclick="showMethod('totp')">Authenticator App</button>{% endif %}
+            {% if 'email' in methods %}<button type="button" class="tab-btn{{ ' active' if 'totp' not in methods else '' }}" onclick="showMethod('email')">Email Code</button>{% endif %}
+        </div>
+        {% endif %}
+
+        {% if 'totp' in methods %}
+        <div id="method-totp" class="method active">
+            <form method="POST" action="{{ url_for('login_verify_totp') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="totp-code">6-digit code from your authenticator app</label>
+                    <input type="text" id="totp-code" name="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" required autofocus>
+                </div>
+                <button type="submit" class="btn">Verify</button>
+            </form>
+        </div>
+        {% endif %}
+
+        {% if 'email' in methods %}
+        <div id="method-email" class="method{{ ' active' if 'totp' not in methods else '' }}">
+            {% if email_sent %}
+            <div class="alert-info">Code sent — check your email.</div>
+            <form method="POST" action="{{ url_for('login_verify_email_submit') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="email-code">6-digit code from your email</label>
+                    <input type="text" id="email-code" name="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" required autofocus>
+                </div>
+                <button type="submit" class="btn">Verify</button>
+            </form>
+            <form method="POST" action="{{ url_for('login_verify_email_send') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-secondary">Resend Code</button>
+            </form>
+            {% else %}
+            <form method="POST" action="{{ url_for('login_verify_email_send') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn">Email Me a Code</button>
+            </form>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        function showMethod(name) {
+            document.querySelectorAll('.method').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById('method-' + name).classList.add('active');
+            event.target.classList.add('active');
+        }
+    </script>
+</body>
+</html>

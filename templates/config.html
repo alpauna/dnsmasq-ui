@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Configuration - dnsmasq-ui</title>
     <style>
         * {
@@ -302,6 +303,7 @@
         <div class="breadcrumb">
             <a href="/">← Dashboard</a> / <strong>Configuration</strong>
             <form method="POST" action="/logout" style="display: inline; float: right;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" style="background: none; border: none; color: #667eea; font-size: 13px; font-weight: 500; cursor: pointer; padding: 0; font-family: inherit;">🚪 Logout</button>
             </form>
         </div>
@@ -309,6 +311,33 @@
         <div class="header">
             <h1>⚙️ Configuration</h1>
             <p>SSH key management and server configuration</p>
+        </div>
+
+        <div class="section">
+            <h2>Two-Factor Authentication</h2>
+            <div class="alert alert-info">
+                Add a second login factor. Enable either or both — whichever are enabled will
+                all be offered at login time, so you can pick whichever's convenient.
+            </div>
+
+            <div class="tab-group">
+                <button class="tab-btn active" onclick="switchTabBackup('totp-2fa')">Authenticator App</button>
+                <button class="tab-btn" onclick="switchTabBackup('email-2fa')">Email</button>
+            </div>
+
+            <!-- TOTP -->
+            <div id="totp-2fa" class="tab-content active">
+                <div id="totp-2fa-status">
+                    <div class="loading" style="margin: 20px;"></div>
+                </div>
+            </div>
+
+            <!-- Email -->
+            <div id="email-2fa" class="tab-content">
+                <div id="email-2fa-status">
+                    <div class="loading" style="margin: 20px;"></div>
+                </div>
+            </div>
         </div>
 
         <div class="section">
@@ -606,6 +635,22 @@
     </div>
 
     <script>
+        // Auto-attach the CSRF token to every non-GET fetch() on this page,
+        // so none of the existing/future fetch calls below need to be
+        // touched individually.
+        (function() {
+            const token = document.querySelector('meta[name="csrf-token"]').content;
+            const originalFetch = window.fetch;
+            window.fetch = function(url, options) {
+                options = options || {};
+                const method = (options.method || 'GET').toUpperCase();
+                if (method !== 'GET' && method !== 'HEAD') {
+                    options.headers = Object.assign({}, options.headers, {'X-CSRFToken': token});
+                }
+                return originalFetch(url, options);
+            };
+        })();
+
         function switchTab(tabName) {
             // Hide all tabs
             document.querySelectorAll('.tab-content').forEach(tab => {
@@ -635,6 +680,164 @@
             // Show selected tab
             parent.querySelector('#' + tabName).classList.add('active');
             event.target.classList.add('active');
+        }
+
+        function load2FAStatus() {
+            fetch('/api/2fa/status')
+                .then(response => response.json())
+                .then(data => {
+                    renderTOTPPanel(data.totp_enabled);
+                    renderEmailPanel(data.email_enabled, data.email_to);
+                })
+                .catch(error => console.error('Error loading 2FA status:', error));
+        }
+
+        function renderTOTPPanel(enabled) {
+            const el = document.getElementById('totp-2fa-status');
+            if (enabled) {
+                el.innerHTML = `
+                    <div class="alert alert-success">✓ Authenticator app enabled</div>
+                    <div class="form-group">
+                        <label for="totp-disable-password">Current Password (required to disable)</label>
+                        <input type="password" id="totp-disable-password">
+                    </div>
+                    <button class="btn btn-secondary" onclick="disableTOTP()">Disable</button>
+                `;
+            } else {
+                el.innerHTML = `<button class="btn btn-primary" onclick="startTOTPSetup()">Set Up Authenticator App</button>
+                    <div id="totp-setup-result" style="margin-top: 15px;"></div>`;
+            }
+        }
+
+        function startTOTPSetup() {
+            fetch('/api/2fa/totp/setup', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    let html = '<div class="alert alert-info">Scan this into your authenticator app (or enter the secret manually), then confirm with a code below.</div>';
+                    html += `<div class="form-group"><label>Secret</label><div class="code-block">${data.secret}</div></div>`;
+                    html += `<div class="form-group"><label>Provisioning URI</label><div class="code-block" style="word-break: break-all;">${data.provisioning_uri}</div></div>`;
+                    html += `<div class="form-group"><label for="totp-confirm-code">6-digit code</label><input type="text" id="totp-confirm-code" maxlength="6" placeholder="123456"></div>`;
+                    html += '<button class="btn btn-primary" onclick="confirmTOTPSetup()">Confirm &amp; Enable</button>';
+                    document.getElementById('totp-setup-result').innerHTML = html;
+                })
+                .catch(error => console.error('Error starting TOTP setup:', error));
+        }
+
+        function confirmTOTPSetup() {
+            const code = document.getElementById('totp-confirm-code').value.trim();
+            fetch('/api/2fa/totp/confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: code })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        load2FAStatus();
+                    } else {
+                        document.getElementById('totp-setup-result').insertAdjacentHTML('beforeend', `<div class="alert alert-error">${data.message}</div>`);
+                    }
+                })
+                .catch(error => console.error('Error confirming TOTP setup:', error));
+        }
+
+        function disableTOTP() {
+            const password = document.getElementById('totp-disable-password').value;
+            fetch('/api/2fa/totp/disable', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ current_password: password })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        load2FAStatus();
+                    } else {
+                        alert(data.message);
+                    }
+                })
+                .catch(error => console.error('Error disabling TOTP:', error));
+        }
+
+        function renderEmailPanel(enabled, emailTo) {
+            const el = document.getElementById('email-2fa-status');
+            if (enabled) {
+                el.innerHTML = `
+                    <div class="alert alert-success">✓ Email 2FA enabled for ${emailTo}</div>
+                    <div class="form-group">
+                        <label for="email-disable-password">Current Password (required to disable)</label>
+                        <input type="password" id="email-disable-password">
+                    </div>
+                    <button class="btn btn-secondary" onclick="disableEmail2FA()">Disable</button>
+                `;
+            } else {
+                el.innerHTML = `
+                    <div class="form-group">
+                        <label for="email-2fa-address">Email Address</label>
+                        <input type="text" id="email-2fa-address" placeholder="you@example.com">
+                    </div>
+                    <button class="btn btn-primary" onclick="startEmailSetup()">Send Test Code</button>
+                    <div id="email-setup-result" style="margin-top: 15px;"></div>
+                `;
+            }
+        }
+
+        function startEmailSetup() {
+            const to = document.getElementById('email-2fa-address').value.trim();
+            if (!to) return;
+            fetch('/api/2fa/email/setup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ to: to })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        let html = '<div class="alert alert-success">Code sent — check your email.</div>';
+                        html += `<div class="form-group"><label for="email-confirm-code">6-digit code</label><input type="text" id="email-confirm-code" maxlength="6" placeholder="123456"></div>`;
+                        html += '<button class="btn btn-primary" onclick="confirmEmailSetup()">Confirm &amp; Enable</button>';
+                        document.getElementById('email-setup-result').innerHTML = html;
+                    } else {
+                        document.getElementById('email-setup-result').innerHTML = `<div class="alert alert-error">${data.message}</div>`;
+                    }
+                })
+                .catch(error => console.error('Error starting email setup:', error));
+        }
+
+        function confirmEmailSetup() {
+            const code = document.getElementById('email-confirm-code').value.trim();
+            fetch('/api/2fa/email/confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: code })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        load2FAStatus();
+                    } else {
+                        document.getElementById('email-setup-result').insertAdjacentHTML('beforeend', `<div class="alert alert-error">${data.message}</div>`);
+                    }
+                })
+                .catch(error => console.error('Error confirming email setup:', error));
+        }
+
+        function disableEmail2FA() {
+            const password = document.getElementById('email-disable-password').value;
+            fetch('/api/2fa/email/disable', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ current_password: password })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        load2FAStatus();
+                    } else {
+                        alert(data.message);
+                    }
+                })
+                .catch(error => console.error('Error disabling email 2FA:', error));
         }
 
         function loadSSHKeyInfo() {
@@ -1301,6 +1504,7 @@
         loadDynamicHosts();
         loadZonesForDynamicForm();
         loadDeviceCredentials();
+        load2FAStatus();
         setInterval(loadServerStatus, 30000);
     </script>
 </body>

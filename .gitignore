@@ -47,6 +47,7 @@ device-credentials.json
 device-credentials.json.bak
 auth.json
 auth.json.bak
+smtp.env
 
 # Logs
 *.log
