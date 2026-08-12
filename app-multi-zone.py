@@ -61,6 +61,7 @@ SSH_USER = os.getenv('SSH_USER', 'debian')
 SSH_BIN = next((p for p in ('/usr/bin/ssh', '/bin/ssh', '/usr/local/bin/ssh') if os.path.exists(p)), 'ssh')
 DOCKER_BIN = next((p for p in ('/usr/bin/docker', '/usr/local/bin/docker') if os.path.exists(p)), 'docker')
 SUDO_BIN = next((p for p in ('/usr/bin/sudo', '/bin/sudo') if os.path.exists(p)), 'sudo')
+IP_BIN = next((p for p in ('/usr/sbin/ip', '/sbin/ip', '/usr/bin/ip') if os.path.exists(p)), 'ip')
 # The service account isn't in the docker group (avoids that standing,
 # effectively-root-equivalent grant); reuses the passwordless sudo access
 # already relied on elsewhere in this app for remote commands. -n fails
@@ -111,7 +112,7 @@ def _get_local_ips():
     no SSH) — used to tell whether this node currently holds the
     keepalived VIP, and to identify "myself" when syncing state to peers."""
     try:
-        result = subprocess.run(['ip', '-4', '-o', 'addr', 'show'], capture_output=True, text=True, timeout=5)
+        result = subprocess.run([IP_BIN, '-4', '-o', 'addr', 'show'], capture_output=True, text=True, timeout=5)
         ips = set()
         for line in result.stdout.splitlines():
             parts = line.split()
@@ -408,6 +409,15 @@ class ZoneManager:
         keyed vault. Best-effort and synchronous — a briefly-unreachable
         peer logs an error but doesn't block the save that triggered this."""
         local_ips = _get_local_ips()
+        if not local_ips:
+            # Can't reliably tell "myself" apart from a peer right now —
+            # syncing anyway would mean pushing to every server in the
+            # list, including this one, which self-truncates the file
+            # being read (its SFTP write-open races the local read-open on
+            # the same path). Skip this round; the next successful save
+            # will catch peers up.
+            logger.error("_sync_peer_state: could not determine local IPs, skipping sync to avoid self-corruption")
+            return
         zones_dir = os.path.dirname(os.path.abspath(self.zones_file))
         files_to_sync = [
             (self.zones_file, 'zones.json', 0o644),
