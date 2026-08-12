@@ -1,122 +1,44 @@
 ---
-- name: Setup HA dnsmasq-ui with GlusterFS and Docker
+# Deploy dnsmasq-ui to all DNS servers so the dashboard is reachable on the
+# existing keepalived VIP regardless of which node is currently DNS master,
+# not just whichever one happened to have it installed manually.
+#
+# Deliberately does NOT touch keepalived.conf or tie the dashboard's health
+# into DNS failover — a dnsmasq-ui crash recovers via systemd's
+# Restart=on-failure in place, without moving the VIP (and therefore DNS
+# traffic) for a UI-only problem. See app-multi-zone.py's
+# _is_local_vrrp_master()/poller gating for how only the currently-active
+# node avoids redundant polling of tracked devices, independent of this.
+#
+# Supersedes the old dnsmasq-ui-ha.yml, which deployed Docker + GlusterFS —
+# never actually run in production; what's real (192.168.0.233) is a bare
+# systemd service + venv, which is what this playbook now matches.
+
+- name: Deploy dnsmasq-ui dashboard to all DNS servers
   hosts: dns_servers
   become: yes
   gather_facts: yes
 
   vars:
-    glusterfs_volume: dnsmasq-ui
-    glusterfs_brick_path: /data/glusterfs
-    glusterfs_mount_path: /opt/dnsmasq-ui-data
-    ui_docker_path: /opt/dnsmasq-ui
-    keepalive_vip: "{{ keepalive_vip | default('192.168.0.252') }}"
+    ui_path: /opt/dnsmasq-ui
+    ssh_user: "{{ lookup('env', 'SSH_USER') | default('debian', true) }}"
+    ssh_key_src: "{{ lookup('env', 'SSH_KEY') | default('~/.ssh/id_rsa', true) }}"
+    keepalive_vip: "192.168.0.230"
+    dynamic_poll_interval: 3600
+    # Already-provisioned node other hosts fetch existing state from (admin
+    # password, vault, SMTP creds) so a fresh node doesn't start unconfigured
+    # and a failover into it doesn't lose data. Change if dns03 is ever
+    # rebuilt from scratch and another node becomes the source of truth.
+    primary_host: dns03
 
   tasks:
-    # =====================================================================
-    # Phase 1: GlusterFS Setup
-    # =====================================================================
-
-    - name: Install GlusterFS packages
+    - name: Install system packages
       apt:
         name:
-          - glusterfs-server
-          - glusterfs-client
-        state: present
-        update_cache: yes
-
-    - name: Create GlusterFS brick directory
-      file:
-        path: "{{ glusterfs_brick_path }}"
-        state: directory
-        mode: '0755'
-
-    - name: Start and enable glusterd service
-      systemd:
-        name: glusterd
-        state: started
-        enabled: yes
-
-    - name: Wait for glusterd to be ready
-      wait_for:
-        port: 24007
-        host: localhost
-        timeout: 30
-
-    # Peer probe on dns01 only
-    - name: Peer probe dns02 into cluster
-      command: gluster peer probe dns02
-      register: peer_probe_result
-      changed_when: "'already in peer' not in peer_probe_result.stdout and 'rejected' not in peer_probe_result.stderr"
-      when: inventory_hostname == groups['dns_servers'][0]
-      failed_when: false
-
-    - name: Peer probe dns03 into cluster
-      command: gluster peer probe dns03
-      register: peer_probe_result
-      changed_when: "'already in peer' not in peer_probe_result.stdout and 'rejected' not in peer_probe_result.stderr"
-      when: inventory_hostname == groups['dns_servers'][0]
-      failed_when: false
-
-    # Create and start volume on dns01 only
-    - name: Create GlusterFS volume
-      command: >
-        gluster volume create {{ glusterfs_volume }} replica 3
-        dns01:{{ glusterfs_brick_path }}
-        dns02:{{ glusterfs_brick_path }}
-        dns03:{{ glusterfs_brick_path }}
-        force
-      register: volume_create
-      when: inventory_hostname == groups['dns_servers'][0]
-      failed_when:
-        - volume_create.rc != 0
-        - "'already exists' not in volume_create.stderr"
-
-    - name: Start GlusterFS volume
-      command: gluster volume start {{ glusterfs_volume }}
-      when: inventory_hostname == groups['dns_servers'][0]
-      register: volume_start
-      changed_when: "'already started' not in volume_start.stderr"
-      failed_when:
-        - volume_start.rc != 0
-        - "'already started' not in volume_start.stderr"
-
-    - name: Wait for volume to be available
-      wait_for:
-        timeout: 30
-      when: inventory_hostname == groups['dns_servers'][0]
-
-    # Mount on all servers
-    - name: Create GlusterFS mount directory
-      file:
-        path: "{{ glusterfs_mount_path }}"
-        state: directory
-        mode: '0755'
-
-    - name: Mount GlusterFS volume
-      mount:
-        name: "{{ glusterfs_mount_path }}"
-        src: "localhost:{{ glusterfs_volume }}"
-        fstype: glusterfs
-        opts: "defaults,_netdev"
-        state: mounted
-
-    - name: Verify mount
-      command: df {{ glusterfs_mount_path }}
-      register: mount_check
-      changed_when: false
-
-    # =====================================================================
-    # Phase 2: Docker Setup
-    # =====================================================================
-
-    - name: Install Docker and dependencies
-      apt:
-        name:
-          - docker.io
-          - python3-docker
-          - python3-dotenv
           - git
-          - curl
+          - python3-venv
+          - python3-pip
+          - docker.io
         state: present
         update_cache: yes
 
@@ -126,133 +48,145 @@
         state: started
         enabled: yes
 
-    - name: Create UI application directory
-      file:
-        path: "{{ ui_docker_path }}"
-        state: directory
-        mode: '0755'
-
-    - name: Create SSH directory for container
-      file:
-        path: "{{ ui_docker_path }}/.ssh"
-        state: directory
-        mode: '0700'
-
-    - name: Copy SSH private key to Docker mount point
-      copy:
-        src: "{{ ssh_key | expanduser }}"
-        dest: "{{ ui_docker_path }}/.ssh/id_rsa"
-        mode: '0600'
-      vars:
-        ssh_key: "{{ lookup('env', 'SSH_KEY') | default('~/.ssh/id_rsa', true) }}"
-      ignore_errors: true
+    # The app runs docker via passwordless sudo rather than adding the
+    # service account to the docker group (that'd be a standing
+    # effectively-root-equivalent grant) — see DOCKER_CMD in
+    # app-multi-zone.py. Confirm that's actually available rather than
+    # assume every host was provisioned identically.
+    - name: Verify passwordless sudo works for docker
+      command: sudo -n docker ps
+      changed_when: false
 
     - name: Check if repo already cloned
       stat:
-        path: "{{ ui_docker_path }}/app-multi-zone.py"
+        path: "{{ ui_path }}/app-multi-zone.py"
       register: app_exists
+
+    - name: Create app directory with correct ownership (/opt is root-owned,
+        so this has to happen as root before a non-root git clone into it can work)
+      file:
+        path: "{{ ui_path }}"
+        state: directory
+        owner: "{{ ssh_user }}"
+        group: "{{ ssh_user }}"
+        mode: '0755'
+      when: not app_exists.stat.exists
 
     - name: Clone dnsmasq-ui repository
       git:
         repo: https://github.com/alpauna/dnsmasq-ui.git
-        dest: "{{ ui_docker_path }}"
+        dest: "{{ ui_path }}"
         version: master
+      become_user: "{{ ssh_user }}"
       when: not app_exists.stat.exists
-      ignore_errors: true
 
-    - name: Update repository if already exists
+    - name: Pull latest if already cloned
       command:
-        cmd: git pull
-        chdir: "{{ ui_docker_path }}"
+        cmd: git pull origin master
+        chdir: "{{ ui_path }}"
+      become_user: "{{ ssh_user }}"
       when: app_exists.stat.exists
       register: git_pull
       changed_when: "'Already up to date' not in git_pull.stdout"
-      ignore_errors: true
+      failed_when: false
 
-    - name: Create docker-compose.yml for dnsmasq-ui
+    - name: Create Python virtual environment
+      command:
+        cmd: python3 -m venv {{ ui_path }}/venv
+        creates: "{{ ui_path }}/venv/bin/python"
+
+    - name: Install Python dependencies
+      pip:
+        requirements: "{{ ui_path }}/requirements.txt"
+        virtualenv: "{{ ui_path }}/venv"
+
+    # The app builds this automatically on first use anyway
+    # (_ensure_legacy_ssh_image()) — doing it here too so it's ready before
+    # a failover, rather than adding ~15s of build time to whatever poll
+    # first needs it after this node becomes active.
+    - name: Check if legacy-ssh image already exists
+      command: /usr/bin/sudo /usr/bin/docker image inspect dnsmasq-ui-legacy-ssh
+      register: legacy_ssh_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build legacy-ssh image (for devices needing an older OpenSSH client, e.g. old switches)
+      command: /usr/bin/sudo /usr/bin/docker build -t dnsmasq-ui-legacy-ssh {{ ui_path }}/docker/legacy-ssh
+      when: legacy_ssh_image_check.rc != 0
+
+    - name: Ensure .ssh directory exists
+      file:
+        path: "/home/{{ ssh_user }}/.ssh"
+        state: directory
+        owner: "{{ ssh_user }}"
+        group: "{{ ssh_user }}"
+        mode: '0700'
+
+    - name: Copy SSH private key (already trusted on every host this app manages)
       copy:
-        content: |
-          version: '3.8'
+        src: "{{ ssh_key_src }}"
+        dest: "/home/{{ ssh_user }}/.ssh/id_rsa"
+        owner: "{{ ssh_user }}"
+        group: "{{ ssh_user }}"
+        mode: '0600'
 
-          services:
-            dnsmasq-ui:
-              image: python:3.11-slim
-              container_name: dnsmasq-ui
-              restart: unless-stopped
-              ports:
-                - "5000:5000"
-              volumes:
-                - {{ glusterfs_mount_path }}/zones.json:/etc/dnsmasq-ui/zones.json
-                - {{ ui_docker_path }}/.ssh/id_rsa:/root/.ssh/id_rsa:ro
-                - {{ ui_docker_path }}:/app
-              working_dir: /app
-              environment:
-                - ZONES_CONFIG=/etc/dnsmasq-ui/zones.json
-                - SSH_USER={{ ssh_user }}
-                - FLASK_ENV=production
-              command: bash -c "pip install -q -r requirements.txt && python app-multi-zone.py"
-        dest: "{{ ui_docker_path }}/docker-compose.yml"
-      vars:
-        ssh_user: "{{ lookup('env', 'SSH_USER') | default('debian', true) }}"
+    # -------------------------------------------------------------------
+    # Seed state from the primary node on first install only. Ongoing sync
+    # after this is handled by the app itself (_sync_peer_state(), pushed
+    # on every save) — this is just so a brand-new node doesn't start with
+    # no admin password / uninitialized vault if a failover happens before
+    # its first save event.
+    # -------------------------------------------------------------------
 
-    - name: Pull base image
-      command: docker pull python:3.11-slim
+    - name: Read state files from primary
+      slurp:
+        src: "{{ ui_path }}/{{ state_file }}"
+      loop:
+        - auth.json
+        - device-credentials.json
+        - smtp.env
+      loop_control:
+        loop_var: state_file
+        label: "{{ state_file }}"
+      delegate_to: "{{ primary_host }}"
+      register: primary_state_files
+      when: inventory_hostname != primary_host
+      failed_when: false
 
-    - name: Start dnsmasq-ui container
-      command: docker compose up -d
-      args:
-        chdir: "{{ ui_docker_path }}"
+    - name: Seed state files from primary
+      copy:
+        content: "{{ item.content | b64decode }}"
+        dest: "{{ ui_path }}/{{ item.state_file }}"
+        owner: "{{ ssh_user }}"
+        group: "{{ ssh_user }}"
+        mode: '0600'
+      loop: "{{ primary_state_files.results | default([]) }}"
+      loop_control:
+        label: "{{ item.state_file | default('unknown') }}"
+      when:
+        - inventory_hostname != primary_host
+        - item.content is defined
 
-    - name: Wait for UI to be ready
-      uri:
-        url: "http://localhost:5000/api/status"
-        status_code: 200
-      register: ui_ready
-      until: ui_ready.status == 200
-      retries: 10
-      delay: 5
-      changed_when: false
+    - name: Deploy systemd unit
+      template:
+        src: templates/dnsmasq-ui.service.j2
+        dest: /etc/systemd/system/dnsmasq-ui.service
+      notify: reload and restart dnsmasq-ui
 
-    # =====================================================================
-    # Phase 3: Keepalived Update for UI Health Check
-    # =====================================================================
+    - name: Enable dnsmasq-ui service
+      systemd:
+        name: dnsmasq-ui
+        enabled: yes
+        daemon_reload: yes
 
-    - name: Update keepalived config with UI health check
-      lineinfile:
-        path: /etc/keepalived/keepalived.conf
-        insertbefore: "vrrp_instance DNS_VIP"
-        line: |
-          vrrp_script check_ui {
-            script "curl -sf http://localhost:5000/api/status > /dev/null"
-            interval 10
-            weight -20
-            fall 2
-            rise 2
-          }
-        state: present
-      notify: restart keepalived
-
-    - name: Add UI script tracking to vrrp_instance
-      blockinfile:
-        path: /etc/keepalived/keepalived.conf
-        marker: "    # {mark} ANSIBLE MANAGED UI TRACKING BLOCK"
-        insertafter: "track_processes"
-        block: |
-              track_script {
-                check_ui
-              }
-        state: present
-      notify: restart keepalived
-
-    - name: Verify UI API is accessible from localhost
-      command: curl -sf http://localhost:5000/api/status
-      register: ui_check
-      changed_when: false
-      retries: 3
-      delay: 2
+    - name: Ensure dnsmasq-ui is started
+      systemd:
+        name: dnsmasq-ui
+        state: started
 
   handlers:
-    - name: restart keepalived
+    - name: reload and restart dnsmasq-ui
       systemd:
-        name: keepalived
+        name: dnsmasq-ui
+        daemon_reload: yes
         state: restarted

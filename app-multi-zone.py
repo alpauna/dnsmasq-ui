@@ -106,6 +106,29 @@ def get_client_ip():
     """Get client IP, respecting X-Forwarded-For from reverse proxy."""
     return request.remote_addr
 
+def _get_local_ips():
+    """IPv4 addresses assigned to this host's own interfaces (local only,
+    no SSH) — used to tell whether this node currently holds the
+    keepalived VIP, and to identify "myself" when syncing state to peers."""
+    try:
+        result = subprocess.run(['ip', '-4', '-o', 'addr', 'show'], capture_output=True, text=True, timeout=5)
+        ips = set()
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 4:
+                ips.add(parts[3].split('/')[0])
+        return ips
+    except Exception as e:
+        logger.error(f"Failed to read local IPs: {e}")
+        return set()
+
+def _is_local_vrrp_master(vip):
+    """Whether this host currently holds the keepalived VIP — i.e. whether
+    it's the active node right now, for gating work that shouldn't run
+    redundantly on every dnsmasq-ui instance in an HA deployment (e.g. the
+    dynamic_hosts poller)."""
+    return vip in _get_local_ips()
+
 def log_request():
     """Log incoming request with client IP and path."""
     client_ip = get_client_ip()
@@ -128,6 +151,10 @@ def _save_auth(data):
     fd = os.open(AUTH_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as f:
         json.dump(data, f, indent=2)
+    # 'manager' is a module-level global set up at the bottom of this file;
+    # by the time any route handler actually calls _save_auth() at runtime,
+    # app startup has already completed and it exists.
+    manager._sync_peer_state()
 
 # Session-signing secret: persisted once /setup completes so sessions survive
 # restarts. Until then, a per-process random value — any sessions started
@@ -371,6 +398,41 @@ class ZoneManager:
         """Save zones configuration to file."""
         with open(self.zones_file, 'w') as f:
             json.dump(self.config, f, indent=2)
+        self._sync_peer_state()
+
+    def _sync_peer_state(self):
+        """Push zones.json/auth.json/device-credentials.json/smtp.env to the
+        other dnsmasq-ui instances (the other DNS servers, in an HA
+        deployment) so a keepalived failover doesn't hand off to a peer with
+        stale config, a different session-signing secret, or a differently
+        keyed vault. Best-effort and synchronous — a briefly-unreachable
+        peer logs an error but doesn't block the save that triggered this."""
+        local_ips = _get_local_ips()
+        zones_dir = os.path.dirname(os.path.abspath(self.zones_file))
+        files_to_sync = [
+            (self.zones_file, 'zones.json', 0o644),
+            (AUTH_FILE, 'auth.json', 0o600),
+            (DEVICE_CREDENTIALS_FILE, 'device-credentials.json', 0o600),
+            (os.path.join(zones_dir, 'smtp.env'), 'smtp.env', 0o600),
+        ]
+
+        for server_name, server_info in self.get_servers().items():
+            ip = server_info.get('ip')
+            if not ip or ip in local_ips:
+                continue
+            try:
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
+                sftp = ssh.open_sftp()
+                for local_path, remote_name, mode in files_to_sync:
+                    if os.path.exists(local_path):
+                        sftp.put(local_path, f'/opt/dnsmasq-ui/{remote_name}')
+                        sftp.chmod(f'/opt/dnsmasq-ui/{remote_name}', mode)
+                sftp.close()
+                ssh.close()
+            except Exception as e:
+                logger.error(f"Failed to sync state to peer {server_name} ({ip}): {e}")
 
     def get_zones(self):
         """Get all zones."""
@@ -707,6 +769,7 @@ class ZoneManager:
         fd = os.open(DEVICE_CREDENTIALS_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'w') as f:
             json.dump(data, f, indent=2)
+        self._sync_peer_state()
 
     def _derive_vault_key(self, password, salt):
         kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt,
@@ -2493,10 +2556,24 @@ DYNAMIC_POLL_INTERVAL = int(os.getenv('DYNAMIC_POLL_INTERVAL', '300'))
 
 def _dynamic_host_poller():
     """Background loop: periodically sync tracked hosts' DNS records to their
-    current address (e.g. after a DHCPv6 lease renewal)."""
+    current address (e.g. after a DHCPv6 lease renewal).
+
+    In an HA deployment (dnsmasq-ui running on multiple DNS servers), only
+    the node currently holding the keepalived VIP actually polls — every
+    instance running this independently would mean redundant, simultaneous
+    login attempts against the same switches/routers from multiple sources,
+    which is exactly the kind of thing that made devices flaky earlier in
+    this project's dynamic_hosts work. Single-instance deployments still
+    work fine: if this host isn't part of a keepalived setup at all, the VIP
+    just never matches and this silently no-ops rather than erroring.
+    """
     while True:
         time.sleep(DYNAMIC_POLL_INTERVAL)
         try:
+            vip = manager.config.get('global', {}).get('keepalive_vip', '192.168.0.230')
+            if not _is_local_vrrp_master(vip):
+                logger.info("Not the current keepalived master — skipping dynamic host poll")
+                continue
             result = manager.poll_dynamic_hosts()
             if result['deployed']:
                 logger.info(f"Dynamic host poll applied changes: {result['changes']}")

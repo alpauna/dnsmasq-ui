@@ -1,0 +1,22 @@
+[Unit]
+Description=dnsmasq-ui Multi-Zone DNS Management Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User={{ ssh_user }}
+WorkingDirectory={{ ui_path }}
+Environment="PATH={{ ui_path }}/venv/bin"
+Environment="ZONES_CONFIG={{ ui_path }}/zones.json"
+Environment="DNSMASQ_RECORDS_FILE=/etc/dnsmasq.d/local-records.conf"
+Environment="SSH_KEY=/home/{{ ssh_user }}/.ssh/id_rsa"
+Environment="SSH_USER={{ ssh_user }}"
+Environment="DYNAMIC_POLL_INTERVAL={{ dynamic_poll_interval }}"
+Environment="DASHBOARD_URL=http://{{ keepalive_vip }}:5000"
+EnvironmentFile=-{{ ui_path }}/smtp.env
+ExecStart={{ ui_path }}/venv/bin/python app-multi-zone.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
