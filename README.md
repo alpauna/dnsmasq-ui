@@ -529,33 +529,88 @@ that behavior to every record:
 - Manage tracked hosts from the **Configuration** page in the dashboard, or
   via the [API](#dynamic-dns-tracking-1) directly.
 
-#### Self-tracking: the DNS servers' own AAAA records
+#### Subnet-based tracking (poll the prefix once, not every device)
 
-The same mechanism also keeps `dns01`/`dns02`/`dns03`.ad.alshowto.com's own
-AAAA records current, rather than needing a manual edit (like the ones
-made directly) whenever RA/SLAAC renews with a different address:
+Polling every device directly, every cycle, doesn't scale well and is
+exactly what made some of this project's early dynamic_hosts work flaky —
+switches with awkward CLI sessions failing intermittently, extra load for
+no reason. Most tracked devices turn out to share a shortcut: standard
+SLAAC (RFC 4862) derives a device's 64-bit host suffix from its MAC
+address via EUI-64 — insert `ff:fe` at the midpoint, flip the
+universal/local bit — so if a device's suffix is MAC-derived (true for
+every device tracked in this project's `ad.alshowto.com` zone: `middle-01`,
+both switches, and `dns01`/`dns02`/`dns03` themselves), only the *prefix*
+half of its address can actually drift (e.g. an ISP renumbering the
+delegated block) — the suffix never changes on its own.
+
+That splits tracking into two cheaper pieces. A named `subnets` registry
+in `zones.json`'s global config holds each L3 segment's CIDR and a
+`primary_dns` server to poll for the segment's current live IPv6 prefix:
+
+```json
+"subnets": {
+  "lan": {
+    "cidr_v4": "192.168.0.0/23",
+    "prefix_v6": "2605:4a80:b004:b120::/64",
+    "primary_dns": "dns01"
+  },
+  "mgmt": {
+    "cidr_v4": "192.168.7.0/24",
+    "prefix_v6": null,
+    "primary_dns": null
+  }
+}
+```
+
+`cidr_v4` is explicit rather than inferred from a bare last octet — this
+LAN is actually a `/23` (see the keepalived VIP's mask), not the `/24` a
+naive per-octet assumption would guess. `primary_dns` names a server from
+`servers` (resolved to its IP at poll time, so it stays correct if that
+server's IP is ever edited in one place) rather than a hand-typed
+address.
+
+Individual `dynamic_hosts` entries for devices in a subnet with a
+`primary_dns` become just a MAC address instead of connection details:
 
 ```json
 {
   "domain": "dns01.ad.alshowto.com",
   "zone": "ad.alshowto.com",
   "record_type": "AAAA",
-  "target_host": "192.168.0.231",
-  "interface": "eth0",
-  "detect_command": "ip -6 -o addr show eth0 scope global dynamic",
-  "detect_regex": "inet6 ([0-9a-fA-F:]+)/"
+  "subnet": "lan",
+  "mac_address": "bc:24:11:0b:78:55"
 }
 ```
 
-This overrides the connection type's default detect command
-(`ip -6 addr show | head -1`) rather than using it as-is — on whichever
-node currently holds the IPv6 VIP, that default would pick up the *VIP's*
-address first (both it and the node's real address show up as
-`scope global` on the same interface) instead of the node's own. Filtering
-for the `dynamic` flag — present only on the real RA/SLAAC-assigned
-address, not the keepalived-assigned VIP — picks the right one regardless
-of which node is currently active. Same signal the [IPv6 VIP drift
-check](#monitoring) already relies on for the same reason.
+Each poll cycle, `poll_subnets()` runs first: one SSH call per subnet (to
+`primary_dns`, not the tracked device) reading
+`ip -6 -o addr show eth0 scope global dynamic` — filtered for the
+`dynamic` flag for the same reason the [IPv6 VIP drift check](#monitoring)
+filters for it, since the keepalived VIP itself shows up as `scope global`
+on the same interface and would otherwise get picked up as "the prefix."
+Every subnet-tracked entry then computes its address as
+`prefix | EUI64(mac_address)` — pure arithmetic, no connection to the
+device at all. IPv4 has no equivalent derivation (there's nothing in an
+IPv4 address that's calculable the way EUI-64 is), so an IPv4-tracked
+entry instead stores an explicit `ipv4_host` number, combined with the
+subnet's `cidr_v4`.
+
+Verified against production: recomputing all six LAN devices' addresses
+this way matched their existing DNS records exactly, using a single SSH
+call to `dns01` — no connections to either switch or to `dns02`/`dns03` at
+all. A device's MAC doesn't need to be looked up by hand either — it can
+be recovered by reversing EUI-64 on an already-known-good address (used to
+migrate all six above), which also doubles as confirmation the device is
+actually MAC-derived to begin with (a privacy/stable-random address won't
+carry the `ff:fe` midpoint EUI-64 requires and this will error rather than
+silently compute nonsense).
+
+A subnet only helps once something in it can be reliably polled for the
+live prefix. `wifi.mgmt.alshowto.com` is the only thing on
+`192.168.7.0/24` reachable at all, so the `mgmt` subnet above has no
+`primary_dns` — `poll_subnets()` logs and skips prefix detection for it,
+and that entry keeps using the older direct-polling approach (`target_host`
++ `connection: http`) instead.
 
 #### Advanced: Non-Linux Devices (Switches, Routers)
 
