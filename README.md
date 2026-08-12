@@ -219,96 +219,101 @@ See [SETUP_GUIDE.md](SETUP_GUIDE.md) for comprehensive setup documentation inclu
 
 ## High Availability UI Deployment
 
-The dnsmasq-ui dashboard itself can run on all DNS servers with automatic failover using GlusterFS for shared storage.
+**As of `ansible/dnsmasq-ui-ha.yml`, this is real and running** — earlier
+versions of this doc (and of `HA_UI_DEPLOYMENT.md`) described a Docker +
+GlusterFS design that was never actually deployed; only `.233` ran the
+dashboard at all. What's here now is simpler and matches what's actually
+running in production: a bare systemd service + venv on all three DNS
+servers (same as the original single-instance setup), fronted by the
+*existing* keepalived VIP rather than any new infrastructure.
 
-### What is HA UI Deployment?
+### What This Actually Does
 
-Instead of running the UI on a single management server, you can:
-- **Run dnsmasq-ui in Docker on all three DNS servers**
-- **Share zones.json via GlusterFS** (replica-3 volume = 3 copies)
-- **Use the same keepalived VIP** for both DNS (port 53) and UI (port 5000)
-- **Automatic failover**: If the MASTER server fails, the VIP moves to a BACKUP, taking both DNS and UI with it
+- **dnsmasq-ui runs on all three DNS servers**, not just one — if whichever
+  node was serving the dashboard goes down, the others are already running
+  it, no manual redeploy needed
+- **Reachable on the existing DNS VIP** (`192.168.0.230:5000`) — no new VIP,
+  no GlusterFS, no Docker for the app itself (the `docker` *connection type*
+  for legacy switches is unrelated and still per-node, see Dynamic DNS
+  Tracking above)
+- **State stays in sync**: `zones.json`/`auth.json`/`device-credentials.json`/
+  `smtp.env` are pushed to the other two nodes automatically after every
+  save (`ZoneManager._sync_peer_state()`), so a failover doesn't hand off to
+  a node with a different session-signing secret, a differently-keyed vault,
+  or stale zone data
+- **Only the current VRRP master polls tracked devices** — `dynamic_hosts`
+  polling checks `_is_local_vrrp_master()` (a local `ip addr show` check, no
+  SSH) before running, so three instances don't independently hammer the
+  same switches/routers with redundant login attempts every cycle
+- **Deliberately does not tie the dashboard's health into DNS failover** — a
+  dnsmasq-ui crash recovers via systemd's `Restart=on-failure` in place,
+  without moving the VIP (and therefore DNS traffic) for a UI-only problem.
+  `keepalived.conf` itself is untouched by this playbook.
 
-### Quick HA Deployment
-
-After running `setup.sh` and initial DNS deployment:
+### Deploying It
 
 ```bash
-# Deploy HA UI with GlusterFS
 cd ansible
-ansible-playbook -i inventory.ini dnsmasq-ui-ha.yml
-
-# Verify UI is running on all servers
-curl http://192.168.0.231:5000/api/status
-curl http://192.168.0.232:5000/api/status
-curl http://192.168.0.233:5000/api/status
-
-# Access UI via VIP (same IP as DNS)
-curl http://192.168.0.250:5000/api/status
+SSH_KEY=~/.ssh/id_rsa ansible-playbook -i inventory.ini dnsmasq-ui-ha.yml
 ```
 
-### HA UI Features
+Installs git/python3-venv/docker.io, clones/pulls the repo, sets up the
+venv, copies the SSH private key (already trusted on every host this app
+manages — same key, no per-node generation needed), builds the
+`docker/legacy-ssh` image ahead of time, and — on a node that doesn't
+already have them — seeds `auth.json`/`device-credentials.json`/`smtp.env`
+from a designated primary (`dns03` by default; change `primary_host` in the
+playbook if that node is ever rebuilt from scratch) so a fresh node doesn't
+start with no admin password or an uninitialized vault. Re-running the
+playbook is safe (idempotent) and is how you push code updates to all three
+— pulling new commits or dependency changes triggers an automatic restart.
 
-✅ **GlusterFS Replica-3**: All three servers hold a copy of zones.json
-✅ **Real-time Sync**: Changes on any server are visible to all
-✅ **Single VIP**: Same IP for DNS and UI (different ports)
-✅ **Automatic Failover**: If MASTER fails, VIP moves within 1-2 seconds
-✅ **UI Health Monitoring**: Keepalived tracks the UI container health
-✅ **No Data Loss**: GlusterFS survives 1 server failure
-
-### GlusterFS Details
-
-The playbook sets up:
-- **Volume Name**: `dnsmasq-ui`
-- **Replication**: 3 copies (replica-3) across all servers
-- **Brick Path**: `/data/glusterfs/` on each server
-- **Mount Point**: `/opt/dnsmasq-ui-data/` on each server
-- **Container Mount**: zones.json bound into Docker container
-
-### Monitoring HA UI
+### Verifying It
 
 ```bash
-# Check GlusterFS volume status (on any DNS server)
-ssh debian@192.168.0.231 gluster volume status dnsmasq-ui
+# Dashboard reachable via the VIP regardless of which node is active
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.0.230:5000/
 
-# Check if UI container is running
-ssh debian@192.168.0.231 docker ps | grep dnsmasq-ui
-
-# Check zones.json sync (same across all servers)
-ssh debian@192.168.0.231 ls -la /opt/dnsmasq-ui-data/zones.json
-ssh debian@192.168.0.232 ls -la /opt/dnsmasq-ui-data/zones.json
-ssh debian@192.168.0.233 ls -la /opt/dnsmasq-ui-data/zones.json
-
-# View keepalived health checks
-ssh debian@192.168.0.231 sudo systemctl status keepalived
+# Which node currently holds the VIP
+for ip in 192.168.0.231 192.168.0.232 192.168.0.233; do
+  ssh debian@$ip "ip -4 -o addr show | grep -q 192.168.0.230 && echo \"$ip: MASTER\" || echo \"$ip: standby\""
+done
 ```
 
-### Failover Test
+### Testing Failover
 
-To test automatic UI failover:
+The DNS-level failover (VIP moving on `dnsmasq` health) is a separate,
+pre-existing mechanism — see the note below before relying on it. To test
+that the *dashboard* correctly follows the VIP regardless:
 
 ```bash
-# 1. Verify current MASTER (should be dns01)
-curl http://192.168.0.250:5000/api/status
+# Stop keepalived (not dnsmasq) on whichever node currently holds the VIP —
+# this simulates the node being gone, which peers detect via missed VRRP
+# heartbeats independent of any process-health tracking
+ssh debian@<current-master> sudo systemctl stop keepalived
 
-# 2. Stop the UI container on dns01
-ssh debian@192.168.0.231 docker compose down
-cd /opt/dnsmasq-ui && docker compose down
+# Within a few seconds, the VIP should move to the next-priority node,
+# and the dashboard should still respond there
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.0.230:5000/
 
-# 3. Verify VIP moved to dns02 (should happen within 10 seconds)
-curl http://192.168.0.250:5000/api/status
-# Should now be responding from dns02
-
-# 4. Restart UI on dns01
-ssh debian@192.168.0.231 docker compose up -d
-cd /opt/dnsmasq-ui && docker compose up -d
-
-# 5. Verify dns01 resumes as MASTER
-curl http://192.168.0.250:5000/api/status
-# Should respond from dns01 (higher priority)
+# Restore
+ssh debian@<current-master> sudo systemctl start keepalived
 ```
 
-See [HA_UI_DEPLOYMENT.md](HA_UI_DEPLOYMENT.md) for detailed HA setup guide.
+Verified end-to-end against real infrastructure: a node was taken down this
+way, the VIP and dashboard both moved to the next-priority node, DNS kept
+resolving throughout, and priority-based failback correctly returned the
+VIP to the original node once it rejoined.
+
+**⚠️ Known issue found while testing, unrelated to the dashboard**: this
+keepalived build doesn't actually support the `track_processes` directive
+(`Unknown keyword 'track_processes'` in `journalctl -u keepalived`) — so
+`dnsmasq`'s own health has never actually been tracked for VIP failover,
+only keepalived-process-level VRRP heartbeats between peers. If `dnsmasq`
+crashes but the box and `keepalived` itself stay up, the VIP will **not**
+move today. Not fixed as part of this work; worth addressing separately
+(likely swapping to a `vrrp_script`-based health check, which is more
+broadly supported across keepalived versions than `track_processes`).
 
 ## Configuration
 
