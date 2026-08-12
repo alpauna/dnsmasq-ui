@@ -89,6 +89,7 @@
       register: git_pull
       changed_when: "'Already up to date' not in git_pull.stdout"
       failed_when: false
+      notify: reload and restart dnsmasq-ui
 
     - name: Create Python virtual environment
       command:
@@ -99,6 +100,7 @@
       pip:
         requirements: "{{ ui_path }}/requirements.txt"
         virtualenv: "{{ ui_path }}/venv"
+      notify: reload and restart dnsmasq-ui
 
     # The app builds this automatically on first use anyway
     # (_ensure_legacy_ssh_image()) — doing it here too so it's ready before
