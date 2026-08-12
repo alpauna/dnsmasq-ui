@@ -8,7 +8,7 @@
     dnsmasq_config_dir: /etc/dnsmasq.d
     dnsmasq_records_file: "{{ dnsmasq_config_dir }}/local-records.conf"
     monitoring_script: /usr/local/bin/dnsmasq-monitor.sh
-    keepalive_vip: 192.168.0.252
+    keepalive_vip: 192.168.0.230
 
   tasks:
     - name: Install dnsmasq, keepalived, and dependencies
@@ -41,13 +41,19 @@
             script_user root
           }
 
-          # Health check for dnsmasq-ui (port 5000)
-          vrrp_script check_ui {
-            script "curl -sf http://localhost:5000/api/status > /dev/null"
-            interval 10
-            weight -20
-            fall 2
-            rise 2
+          # 'track_processes' (plural) is not a real keepalived keyword — it
+          # silently fails to parse (v2.3.3 logs "Unknown keyword" and just
+          # ignores the whole block), meaning dnsmasq's health was never
+          # actually tracked for VIP failover, only keepalived-process-level
+          # VRRP heartbeats between peers. The real directive requires a
+          # named vrrp_track_process block, referenced from the instance via
+          # track_process (singular). weight 0 (the default) means the VRRP
+          # instance enters FAULT state — releasing the VIP — if dnsmasq
+          # isn't running, rather than just adjusting priority.
+          vrrp_track_process CHECK_DNSMASQ {
+            process dnsmasq
+            weight 0
+            quorum 1
           }
 
           vrrp_instance DNS_VIP {
@@ -62,14 +68,13 @@
               {{ keepalive_vip }}/24
             }
 
-            # Track dnsmasq service
-            track_processes {
-              dnsmasq
-            }
-
-            # Track dnsmasq-ui health (if running)
-            track_script {
-              check_ui
+            # Track dnsmasq service. Deliberately NOT also tracking
+            # dnsmasq-ui's health here — the dashboard is a separate
+            # concern from DNS resolution and shouldn't move DNS traffic
+            # for a UI-only problem. See ansible/dnsmasq-ui-ha.yml and the
+            # README's High Availability UI Deployment section.
+            track_process {
+              CHECK_DNSMASQ
             }
           }
         dest: /etc/keepalived/keepalived.conf
