@@ -716,6 +716,51 @@ class ZoneManager:
                     return r['value']
         return None
 
+    def get_server_addresses(self, server_ip):
+        """Every real, currently-assigned global-scope address across all
+        of a server's interfaces -- not just its "main" IP/hostname AAAA,
+        since a server can now have presence on more than one subnet (see
+        poll_subnets()). Ground truth from the server itself rather than
+        derived from config, so it naturally reflects new interfaces
+        (VLAN presence, etc.) without needing code changes each time one
+        is added. Docker's own bridge network is excluded -- internal
+        plumbing, not a real network presence worth showing. Returns a
+        list of {interface, address, version, is_vip} dicts, or []."""
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
+            stdin, stdout, stderr = ssh.exec_command('ip -o addr show scope global')
+            output = stdout.read().decode()
+            ssh.close()
+
+            addresses = []
+            for line in output.splitlines():
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                iface = parts[1]
+                if iface == 'docker0' or iface.startswith(('veth', 'br-')):
+                    continue
+                family = parts[2]
+                if family not in ('inet', 'inet6'):
+                    continue
+                # v4 VIPs show an explicit 'secondary' flag; v6 VIPs don't
+                # carry SLAAC's 'dynamic' flag (same signal used elsewhere
+                # in this file to tell a keepalived-assigned address apart
+                # from the interface's real one).
+                is_vip = 'secondary' in line if family == 'inet' else 'dynamic' not in line
+                addresses.append({
+                    'interface': iface,
+                    'address': parts[3].split('/')[0],
+                    'version': 6 if family == 'inet6' else 4,
+                    'is_vip': is_vip
+                })
+            return addresses
+        except Exception as e:
+            logger.error(f"Failed to read addresses for {server_ip}: {e}")
+            return []
+
     def check_server_status(self, server_ip):
         """Check if dnsmasq is running on server."""
         try:
@@ -2450,6 +2495,7 @@ def api_status():
         status[server_name] = {
             'ip': server_info['ip'],
             'ipv6': manager.get_server_ipv6(hostname),
+            'addresses': manager.get_server_addresses(server_info['ip']),
             'hostname': hostname,
             'primary_for': primary_for,
             'online': dnsmasq_running,

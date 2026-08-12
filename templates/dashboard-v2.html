@@ -734,6 +734,10 @@
                             <label>📡 Primary DNS For:</label>
                             <value id="primary-for-value-{{ server_name }}"></value>
                         </div>
+                        <div id="addresses-{{ server_name }}" style="display: none; margin-top: 4px;">
+                            <label style="font-size: 13px; color: #666;">All Addresses:</label>
+                            <div id="addresses-value-{{ server_name }}" style="font-size: 12px; font-family: monospace; margin-top: 4px; display: flex; flex-direction: column; gap: 2px;"></div>
+                        </div>
                         {% if wg_enabled %}
                         <div class="server-info-item">
                             <label>Tunnel IP:</label>
@@ -1005,6 +1009,21 @@
                         if (primaryForRow && primaryForValue) {
                             primaryForRow.style.display = 'flex';
                             primaryForValue.textContent = status.primary_for.join(', ');
+                        }
+                    }
+
+                    // Every real address across every interface -- not just
+                    // the "main" IP/IPv6 above, since a server can have
+                    // presence on more than one subnet (see poll_subnets()).
+                    if (status.addresses && status.addresses.length > 0) {
+                        const addrRow = document.getElementById(`addresses-${server}`);
+                        const addrValue = document.getElementById(`addresses-value-${server}`);
+                        if (addrRow && addrValue) {
+                            addrRow.style.display = 'block';
+                            addrValue.innerHTML = status.addresses.map(a => {
+                                const vipTag = a.is_vip ? ' <span style="color: #4caf50;">(VIP)</span>' : '';
+                                return `<span>${a.address} <span style="color: #999;">[${a.interface}]</span>${vipTag}</span>`;
+                            }).join('');
                         }
                     }
                 }
