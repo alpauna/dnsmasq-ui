@@ -175,6 +175,11 @@
           "value": "192.168.7.21"
         },
         {
+          "domain": "rtr.mgmt.alshowto.com",
+          "type": "CNAME",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
           "domain": "pve01.mgmt.alshowto.com",
           "type": "AAAA",
           "value": "2605:4a80:b009:c100::11"
@@ -198,8 +203,8 @@
         {
           "vlan_id": 7,
           "name": "mgmt",
-          "ipv4_mode": "none",
-          "ipv4_address": null,
+          "ipv4_mode": "static",
+          "ipv4_address": "192.168.7.231/24",
           "ipv6_mode": "slaac",
           "ipv6_address": null
         }
@@ -274,7 +279,7 @@
       "mgmt": {
         "cidr_v4": "192.168.7.0/24",
         "prefix_v6": "2605:4a80:b009:c100::/64",
-        "primary_dns": "dns01",
+        "primary_dns": "dns03",
         "interface": "eth0.7"
       }
     }
@@ -287,7 +292,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:d7:4c:ec",
       "enabled": true,
-      "last_checked": "2026-08-12T02:18:55.286135",
+      "last_checked": "2026-08-12T20:48:55.735787",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fed7:4cec",
       "last_updated": null
     },
@@ -298,7 +303,7 @@
       "subnet": "lan",
       "mac_address": "5c:a6:e6:27:41:7c",
       "enabled": true,
-      "last_checked": "2026-08-12T02:19:13.346389",
+      "last_checked": "2026-08-12T20:48:55.735865",
       "last_value": "2605:4a80:b004:b120:5ea6:e6ff:fe27:417c",
       "last_updated": "2026-08-11T18:35:38.201059"
     },
@@ -309,7 +314,7 @@
       "subnet": "mgmt",
       "mac_address": "80:69:1a:02:49:36",
       "enabled": true,
-      "last_checked": "2026-08-12T02:19:14.504403",
+      "last_checked": "2026-08-12T20:48:55.735904",
       "last_value": "2605:4a80:b009:c100:8269:1aff:fe02:4936",
       "last_updated": null
     },
@@ -320,7 +325,7 @@
       "subnet": "lan",
       "mac_address": "54:af:97:8f:c7:a7",
       "enabled": true,
-      "last_checked": "2026-08-12T02:19:31.260083",
+      "last_checked": "2026-08-12T20:48:55.735936",
       "last_value": "2605:4a80:b004:b120:56af:97ff:fe8f:c7a7",
       "last_updated": "2026-08-11T22:59:39.700407"
     },
@@ -331,8 +336,8 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:0b:78:55",
       "enabled": true,
-      "last_checked": null,
-      "last_value": null,
+      "last_checked": "2026-08-12T20:48:55.735964",
+      "last_value": "2605:4a80:b004:b120:be24:11ff:fe0b:7855",
       "last_updated": null
     },
     {
@@ -342,8 +347,8 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:46:49:4d",
       "enabled": true,
-      "last_checked": null,
-      "last_value": null,
+      "last_checked": "2026-08-12T20:48:55.735999",
+      "last_value": "2605:4a80:b004:b120:be24:11ff:fe46:494d",
       "last_updated": null
     },
     {
@@ -353,8 +358,8 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:5c:e8:3c",
       "enabled": true,
-      "last_checked": null,
-      "last_value": null,
+      "last_checked": "2026-08-12T20:48:55.736027",
+      "last_value": "2605:4a80:b004:b120:be24:11ff:fe5c:e83c",
       "last_updated": null
     },
     {
