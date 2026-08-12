@@ -1879,6 +1879,7 @@
                                 <div class="host-summary" onclick="toggleHostExpanded('${h.domain}')">
                                     <h4 style="margin-bottom: 0;">${statusIcon} ${h.domain}</h4>
                                     <span style="font-size: 11px; color: #666; white-space: nowrap;">${h.last_value || 'unknown'}</span>
+                                    ${h.last_value ? `<button class="copy-btn" onclick="event.stopPropagation(); copyToClipboard(this.previousElementSibling)">Copy</button>` : ''}
                                     <span class="host-summary-chevron">▶</span>
                                 </div>
                                 <div class="host-details">
