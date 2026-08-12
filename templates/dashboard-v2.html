@@ -1093,7 +1093,8 @@
                         let label, detail;
                         if (h.subnet && subnets[h.subnet] && subnets[h.subnet].primary_dns) {
                             label = subnets[h.subnet].primary_dns;
-                            detail = `subnet: ${h.subnet}`;
+                            const iface = subnets[h.subnet].interface || 'eth0';
+                            detail = `subnet: ${h.subnet} via ${iface}`;
                         } else if (h.subnet) {
                             label = '⚠️ No primary DNS set';
                             detail = `subnet: ${h.subnet}`;
