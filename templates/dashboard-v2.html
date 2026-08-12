@@ -398,6 +398,54 @@
             color: white;
         }
 
+        .tracked-hosts-tree {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .tracker-group {
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .tracker-group-header {
+            background: #f5f5f5;
+            padding: 10px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tracked-host-row {
+            padding: 10px 16px 10px 36px;
+            border-top: 1px solid #f0f0f0;
+            font-size: 13px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .tracked-host-row .domain {
+            color: #333;
+            font-weight: 500;
+        }
+
+        .tracked-host-row .value {
+            color: #666;
+            font-family: monospace;
+            font-size: 12px;
+        }
+
+        .tracked-host-disabled {
+            opacity: 0.5;
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -702,6 +750,13 @@
                     </div>
                 </div>
                 {% endfor %}
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Tracked Hosts</h2>
+            <div id="tracked-hosts-tree" class="tracked-hosts-tree">
+                <p style="padding: 20px;">Loading tracked hosts...</p>
             </div>
         </div>
 
@@ -1013,12 +1068,82 @@
             .catch(error => console.error('Error updating status:', error));
         }
 
+        function loadTrackedHostsTree() {
+            Promise.all([
+                fetch('/api/subnets').then(r => r.json()),
+                fetch('/api/dynamic-hosts').then(r => r.json())
+            ])
+                .then(([subnetsData, hostsData]) => {
+                    const subnets = subnetsData.subnets || {};
+                    const hosts = hostsData.dynamic_hosts || [];
+                    const tree = document.getElementById('tracked-hosts-tree');
+
+                    if (hosts.length === 0) {
+                        tree.innerHTML = '<p style="padding: 20px;">No hosts tracked yet — manage these from the Configuration page.</p>';
+                        return;
+                    }
+
+                    // Group each tracked host under whichever server is
+                    // actually responsible for keeping its record current:
+                    // the subnet's primary_dns for subnet-based entries, or
+                    // a "direct polling" bucket for the older per-device
+                    // connection-based entries (see Config page docs).
+                    const groups = {};
+                    for (const h of hosts) {
+                        let label, detail;
+                        if (h.subnet && subnets[h.subnet] && subnets[h.subnet].primary_dns) {
+                            label = subnets[h.subnet].primary_dns;
+                            detail = `subnet: ${h.subnet}`;
+                        } else if (h.subnet) {
+                            label = '⚠️ No primary DNS set';
+                            detail = `subnet: ${h.subnet}`;
+                        } else {
+                            label = '🔌 Direct polling';
+                            detail = h.target_host ? `polls ${h.target_host} directly` : 'polls the device directly';
+                        }
+                        (groups[label] = groups[label] || []).push({ host: h, detail: detail });
+                    }
+
+                    const specialOrder = ['⚠️ No primary DNS set', '🔌 Direct polling'];
+                    const labels = Object.keys(groups).sort((a, b) => {
+                        const aI = specialOrder.indexOf(a), bI = specialOrder.indexOf(b);
+                        if (aI === -1 && bI === -1) return a.localeCompare(b);
+                        if (aI === -1) return -1;
+                        if (bI === -1) return 1;
+                        return aI - bI;
+                    });
+
+                    let html = '';
+                    for (const label of labels) {
+                        const isServer = !specialOrder.includes(label);
+                        html += `<div class="tracker-group">
+                            <div class="tracker-group-header">${isServer ? '📡 ' : ''}${label}</div>`;
+                        for (const { host: h, detail } of groups[label]) {
+                            const rowClass = h.enabled ? '' : ' tracked-host-disabled';
+                            html += `<div class="tracked-host-row${rowClass}">
+                                <span class="domain">${h.domain} <span style="color:#999; font-weight:normal;">(${h.record_type}, ${detail})</span></span>
+                                <span class="value">${h.last_value || 'unknown'}</span>
+                            </div>`;
+                        }
+                        html += '</div>';
+                    }
+                    tree.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error loading tracked hosts tree:', error);
+                    document.getElementById('tracked-hosts-tree').innerHTML = '<div class="alert alert-error">Error loading tracked hosts</div>';
+                });
+        }
+
         // Initialize zone view
         initZoneView();
 
         // Update server status on page load and every 30 seconds
         updateServerStatus();
         setInterval(updateServerStatus, 30000);
+
+        loadTrackedHostsTree();
+        setInterval(loadTrackedHostsTree, 30000);
     </script>
 </body>
 </html>
