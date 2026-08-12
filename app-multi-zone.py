@@ -780,12 +780,17 @@ class ZoneManager:
         """Get all named subnets (CIDR + primary_dns + live prefix_v6)."""
         return self.config.get('global', {}).setdefault('subnets', {})
 
-    def add_subnet(self, name, cidr_v4, primary_dns=None):
+    def add_subnet(self, name, cidr_v4, primary_dns=None, interface='eth0'):
         """Register a new named subnet for subnet-based address tracking.
         primary_dns is a server name from `servers` (not a raw IP) --
         picking a DNS server this app already manages means one less
         thing for the user to keep in sync by hand if that server's IP
-        ever changes."""
+        ever changes. interface: which NIC on primary_dns is actually on
+        this subnet -- defaults to eth0, but a server with more than one
+        interface (e.g. a second NIC or VLAN sub-interface added
+        specifically to reach a subnet it isn't otherwise on) needs the
+        right one named here, or poll_subnets() would read some other
+        subnet's prefix instead."""
         subnets = self.get_subnets()
         if name in subnets:
             return False, "Subnet already exists"
@@ -795,15 +800,15 @@ class ZoneManager:
             ipaddress.IPv4Network(cidr_v4, strict=False)
         except ValueError as e:
             return False, f"Invalid CIDR: {e}"
-        subnets[name] = {'cidr_v4': cidr_v4, 'prefix_v6': None, 'primary_dns': primary_dns}
+        subnets[name] = {'cidr_v4': cidr_v4, 'prefix_v6': None, 'primary_dns': primary_dns, 'interface': interface or 'eth0'}
         self.save_config()
         return True, "Subnet added"
 
     def update_subnet(self, name, **fields):
-        """Update a subnet's cidr_v4/primary_dns. prefix_v6 is
+        """Update a subnet's cidr_v4/primary_dns/interface. prefix_v6 is
         intentionally not settable here -- it's only ever written by
         poll_subnets() detecting the live prefix from primary_dns."""
-        allowed = ('cidr_v4', 'primary_dns')
+        allowed = ('cidr_v4', 'primary_dns', 'interface')
         subnets = self.get_subnets()
         if name not in subnets:
             return False, "Subnet not found"
@@ -814,6 +819,8 @@ class ZoneManager:
                 ipaddress.IPv4Network(fields['cidr_v4'], strict=False)
             except ValueError as e:
                 return False, f"Invalid CIDR: {e}"
+        if 'interface' in fields and not fields['interface']:
+            fields['interface'] = 'eth0'
         subnets[name].update({k: v for k, v in fields.items() if k in allowed})
         self.save_config()
         return True, "Subnet updated"
@@ -1565,9 +1572,10 @@ expect eof
             if not ip:
                 logger.error(f"Subnet '{name}' has no primary_dns or reference_host configured — skipping prefix detection")
                 continue
-            output = self._run_ssh_paramiko(ip, 'ip -6 -o addr show eth0 scope global dynamic', None)
+            interface = subnet.get('interface', 'eth0')
+            output = self._run_ssh_paramiko(ip, f'ip -6 -o addr show {interface} scope global dynamic', None)
             if not output:
-                logger.error(f"Subnet '{name}': failed to detect IPv6 prefix via {ip}")
+                logger.error(f"Subnet '{name}': failed to detect IPv6 prefix via {ip} ({interface})")
                 continue
             match = re.search(r'inet6 ([0-9a-fA-F:]+)/', output)
             if not match:
@@ -2521,7 +2529,8 @@ def api_subnets_add():
     success, message = manager.add_subnet(
         name=data['name'],
         cidr_v4=data['cidr_v4'],
-        primary_dns=data.get('primary_dns')
+        primary_dns=data.get('primary_dns'),
+        interface=data.get('interface', 'eth0')
     )
     return jsonify({'success': success, 'message': message})
 

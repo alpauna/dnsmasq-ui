@@ -233,12 +233,14 @@
       "lan": {
         "cidr_v4": "192.168.0.0/23",
         "prefix_v6": "2605:4a80:b004:b120::/64",
-        "primary_dns": "dns01"
+        "primary_dns": "dns01",
+        "interface": "eth0"
       },
       "mgmt": {
         "cidr_v4": "192.168.7.0/24",
         "prefix_v6": null,
-        "primary_dns": null
+        "primary_dns": null,
+        "interface": "eth0"
       }
     }
   },

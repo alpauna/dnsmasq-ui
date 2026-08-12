@@ -467,6 +467,16 @@
                         for the segment's live IPv6 prefix.
                     </p>
                 </div>
+                <div class="form-group">
+                    <label for="sn-interface">Interface (on the Primary DNS Server)</label>
+                    <input type="text" id="sn-interface" value="eth0" placeholder="eth0">
+                    <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                        Which NIC on the primary DNS server is actually on this subnet. Only matters if
+                        that server has more than one interface (e.g. a second NIC or VLAN
+                        sub-interface added specifically to reach a subnet it isn't otherwise on) —
+                        leave as eth0 otherwise.
+                    </p>
+                </div>
                 <button type="submit" class="btn btn-primary">Add Subnet</button>
             </form>
             <div id="subnet-add-result" style="margin-top: 15px;"></div>
@@ -1357,6 +1367,7 @@
                                 <p><strong>CIDR:</strong> ${s.cidr_v4}</p>
                                 <p><strong>Live IPv6 prefix:</strong> ${s.prefix_v6 || 'not yet detected'}</p>
                                 <p><strong>Primary DNS:</strong> ${s.primary_dns || '(none — devices here use direct polling)'}</p>
+                                ${s.primary_dns ? `<p><strong>Interface:</strong> ${s.interface || 'eth0'}</p>` : ''}
                                 <div style="margin-top: 10px; display: flex; gap: 8px;">
                                     <button class="btn btn-secondary btn-sm" onclick="editSubnet('${name}')">Edit</button>
                                     <button class="btn btn-secondary btn-sm" onclick="deleteSubnet('${name}')">Remove</button>
@@ -1404,12 +1415,14 @@
             const payload = isEdit
                 ? {
                     cidr_v4: document.getElementById('sn-cidr').value.trim(),
-                    primary_dns: document.getElementById('sn-primary-dns').value || null
+                    primary_dns: document.getElementById('sn-primary-dns').value || null,
+                    interface: document.getElementById('sn-interface').value.trim() || 'eth0'
                 }
                 : {
                     name: document.getElementById('sn-name').value.trim(),
                     cidr_v4: document.getElementById('sn-cidr').value.trim(),
-                    primary_dns: document.getElementById('sn-primary-dns').value || null
+                    primary_dns: document.getElementById('sn-primary-dns').value || null,
+                    interface: document.getElementById('sn-interface').value.trim() || 'eth0'
                 };
 
             fetch(url, {
@@ -1446,6 +1459,7 @@
             document.getElementById('sn-name').disabled = true;
             document.getElementById('sn-cidr').value = s.cidr_v4 || '';
             document.getElementById('sn-primary-dns').value = s.primary_dns || '';
+            document.getElementById('sn-interface').value = s.interface || 'eth0';
 
             document.getElementById('subnet-form-heading').textContent = `Edit Subnet: ${name}`;
             const submitBtn = document.querySelector('#subnet-form button[type="submit"]');
