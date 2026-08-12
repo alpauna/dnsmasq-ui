@@ -238,7 +238,8 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 _PUBLIC_PATHS = {
     '/setup', '/login', '/favicon.ico',
-    '/login/verify', '/login/verify/totp', '/login/verify/email/send', '/login/verify/email'
+    '/login/verify', '/login/verify/totp', '/login/verify/email/send', '/login/verify/email',
+    '/api/proxy-check'
 }
 
 # In-memory only (never persisted): short-lived state for a password-verified
@@ -2904,6 +2905,49 @@ def api_wireguard_status():
     except Exception as e:
         logger.error(f"Error checking WireGuard status: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/proxy-check', methods=['GET'])
+def api_proxy_check():
+    """Public diagnostic (no login required — reveals only request
+    metadata the client already knows about itself): shows how this
+    request was actually received, to verify a reverse proxy in front of
+    this app (e.g. Pangolin) is passing X-Forwarded-* headers correctly
+    and that ProxyFix (configured with x_for=1, x_proto=1, x_host=1,
+    x_port=1 — see near the top of this file) is trusting them.
+
+    'direct_connection' is the connection Werkzeug actually saw before
+    ProxyFix rewrote it — i.e. the reverse proxy's own IP/scheme/host.
+    'resolved' is what ProxyFix derived after trusting one hop of
+    X-Forwarded-*. If both match, either there's no proxy in front of
+    this request, or one's there but isn't setting the headers.
+    """
+    orig_addr = request.environ.get('werkzeug.proxy_fix.orig_remote_addr')
+    orig_scheme = request.environ.get('werkzeug.proxy_fix.orig_wsgi_url_scheme')
+    orig_host = request.environ.get('werkzeug.proxy_fix.orig_http_host')
+
+    behind_proxy = orig_addr is not None and orig_addr != request.remote_addr
+
+    return jsonify({
+        'resolved': {
+            'client_ip': request.remote_addr,
+            'scheme': request.scheme,
+            'host': request.host,
+            'is_secure': request.is_secure
+        },
+        'direct_connection': {
+            'ip': orig_addr,
+            'scheme': orig_scheme,
+            'host': orig_host
+        } if orig_addr is not None else None,
+        'behind_proxy': behind_proxy,
+        'verdict': (
+            "Reachable through a reverse proxy, and X-Forwarded-* headers are being trusted correctly."
+            if behind_proxy else
+            "No difference between the direct connection and the resolved client info — either this "
+            "request came in directly (not through a proxy), or a proxy in front of it isn't setting "
+            "X-Forwarded-For/Proto/Host."
+        )
+    })
 
 @app.errorhandler(404)
 def not_found(error):
