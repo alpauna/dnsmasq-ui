@@ -1449,8 +1449,12 @@
                 .then(response => response.json())
                 .then(data => {
                     const names = Object.keys(data.servers || {});
-                    document.getElementById('vl-server').innerHTML =
-                        names.map(n => `<option value="${n}">${n}</option>`).join('');
+                    const select = document.getElementById('vl-server');
+                    const previousValue = select.value;
+                    select.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
+                    if (names.includes(previousValue)) {
+                        select.value = previousValue;
+                    }
                     return names;
                 })
                 .catch(error => console.error('Error loading servers for VLAN form:', error));
@@ -1655,10 +1659,21 @@
 
                     // Keep the "Track a New Host" subnet dropdown and the
                     // primary-DNS picker on the Add Subnet form in sync too.
+                    // This rebuild also runs on a 30s poll (setInterval
+                    // below), so it must preserve whatever the user
+                    // already had selected -- replacing innerHTML on a
+                    // <select> otherwise silently resets it to the first
+                    // option, which is exactly the bug this was causing:
+                    // pick a non-first subnet, wait ~30s, and it reverts
+                    // out from under you.
                     const dhSelect = document.getElementById('dh-subnet');
                     if (dhSelect) {
+                        const previousValue = dhSelect.value;
                         dhSelect.innerHTML = names.map(n => `<option value="${n}">${subnetLabel(n)}</option>`).join('')
                             || '<option value="">(no subnets registered yet)</option>';
+                        if (names.includes(previousValue)) {
+                            dhSelect.value = previousValue;
+                        }
                     }
                 })
                 .catch(error => {
@@ -2279,6 +2294,16 @@
                         el.innerHTML = '<p style="padding: 20px;">No update groups declared.</p>';
                         return;
                     }
+                    // Rebuilt every 30s (setInterval below) — capture each
+                    // group's in-progress "add member" selection first so
+                    // it doesn't silently revert to the first candidate
+                    // out from under the admin (same bug class as the
+                    // Track a New Host subnet dropdown).
+                    const previousSelections = {};
+                    for (const name of names) {
+                        const select = document.getElementById(`group-add-select-${name}`);
+                        if (select) previousSelections[name] = select.value;
+                    }
                     el.innerHTML = names.map(name => {
                         const g = groups[name];
                         const lock = g.lock || { locked: false };
@@ -2318,6 +2343,13 @@
                                 ${statusBlock}
                             </div>`;
                     }).join('');
+                    for (const name of names) {
+                        const select = document.getElementById(`group-add-select-${name}`);
+                        const previous = previousSelections[name];
+                        if (select && previous && [...select.options].some(o => o.value === previous)) {
+                            select.value = previous;
+                        }
+                    }
                 })
                 .catch(error => {
                     console.error('Error loading update groups:', error);
