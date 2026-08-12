@@ -202,7 +202,8 @@
       "mesh_subnet": "10.99.0.0/24",
       "listen_port": 51820,
       "persistent_keepalive": 25
-    }
+    },
+    "keepalive_vip6": "2605:4a80:b004:b120::230"
   },
   "dynamic_hosts": [
     {

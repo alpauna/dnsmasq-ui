@@ -130,6 +130,34 @@ def _is_local_vrrp_master(vip):
     dynamic_hosts poller)."""
     return vip in _get_local_ips()
 
+def _get_local_global_ipv6_prefix():
+    """This host's own real, routable IPv6 /64 (as assigned by RA/SLAAC on
+    eth0) — not the keepalived VIP, the underlying address the VIP's prefix
+    is supposed to track. Used to detect drift between the configured IPv6
+    VIP and whatever subnet the active node is actually reachable on (e.g.
+    after an ISP renumbers the delegated prefix). Returns None if it can't
+    be determined.
+
+    On the current VRRP master, `ip -6 addr show` lists the keepalived VIP
+    itself alongside this host's real address, both global-scope on the
+    same interface — the VIP shows up with `nodad proto keepalived` (no
+    `dynamic` flag), the real RA/SLAAC address always carries `dynamic`.
+    Only that one is a meaningful signal here; picking whichever global
+    line happens to come first would sometimes just compare the configured
+    VIP against itself and silently never detect drift."""
+    try:
+        result = subprocess.run([IP_BIN, '-6', '-o', 'addr', 'show', 'scope', 'global', 'dynamic'],
+                                 capture_output=True, text=True, timeout=5)
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and 'temporary' not in line and 'deprecated' not in line:
+                addr = parts[3]
+                return ipaddress.ip_interface(addr).network
+        return None
+    except Exception as e:
+        logger.error(f"Failed to read local IPv6 prefix: {e}")
+        return None
+
 def log_request():
     """Log incoming request with client IP and path."""
     client_ip = get_client_ip()
@@ -376,6 +404,7 @@ class ZoneManager:
         self.config = self._load_config()
         self._vault_key = None  # in-memory only; never persisted to disk
         self._vault_lock_notified = False  # avoid re-emailing every poll cycle for the same lock
+        self._v6_vip_drift_notified = False  # avoid re-emailing every poll cycle for the same drift
 
     def _load_config(self):
         """Load zones and servers configuration."""
@@ -611,7 +640,11 @@ class ZoneManager:
         """Check if server is the active keepalived master.
 
         Returns:
-            Tuple of (is_master, keepalived_running)
+            Tuple of (is_master, keepalived_running, ipv6_vip_active). The
+            v4 and v6 VIPs are kept in lockstep by a vrrp_sync_group, so
+            ipv6_vip_active should always agree with is_master — checked
+            independently anyway so drift (e.g. a bad keepalived.conf edit)
+            shows up in monitoring rather than being silently assumed.
         """
         try:
             ssh = paramiko.SSHClient()
@@ -625,18 +658,25 @@ class ZoneManager:
 
             if not keepalived_running:
                 ssh.close()
-                return False, False
+                return False, False, False
 
             # Check if this is the master by checking VIP assignment
             vip = self.config.get('global', {}).get('keepalive_vip', '192.168.0.230')
             stdin, stdout, stderr = ssh.exec_command(f"ip addr show | grep -q {vip} && echo MASTER || echo BACKUP")
             output = stdout.read().decode().strip()
+
+            vip6 = self.config.get('global', {}).get('keepalive_vip6')
+            ipv6_vip_active = False
+            if vip6:
+                stdin, stdout, stderr = ssh.exec_command(f"ip -6 addr show | grep -q {vip6} && echo yes || echo no")
+                ipv6_vip_active = stdout.read().decode().strip() == 'yes'
+
             ssh.close()
 
             is_master = 'MASTER' in output.upper()
-            return is_master, keepalived_running
+            return is_master, keepalived_running, ipv6_vip_active
         except:
-            return False, False
+            return False, False, False
 
     def get_dynamic_hosts(self):
         """Get all dynamic-address tracked hosts."""
@@ -859,6 +899,57 @@ class ZoneManager:
         )
         if sent:
             self._vault_lock_notified = True
+
+    def check_ipv6_vip_drift(self):
+        """Compare the configured IPv6 VIP's /64 against the active node's
+        own real, currently-assigned /64 (RA/SLAAC on eth0). They should
+        always match — the VIP's prefix is meant to track whatever subnet
+        the active node is actually reachable on, kept static/manually
+        managed rather than auto-rewritten (see README's IPv6 VIP section).
+        If they've drifted apart (e.g. the ISP renumbered the delegated
+        prefix), that's a real problem worth a human's attention: dnsmasq
+        would still be answering fine, but the *IPv6 VIP itself* would be
+        unreachable at its configured address. Returns (drifted, configured,
+        actual) — notification and any actual reconfiguration is left to
+        the caller/human, this only detects."""
+        configured = self.config.get('global', {}).get('keepalive_vip6')
+        if not configured:
+            return False, None, None
+        actual = _get_local_global_ipv6_prefix()
+        if actual is None:
+            return False, configured, None
+        try:
+            configured_net = ipaddress.ip_interface(configured).network
+        except ValueError:
+            configured_net = ipaddress.ip_network(configured, strict=False)
+        drifted = configured_net != actual
+        return drifted, configured, str(actual)
+
+    def _notify_ipv6_vip_drift(self, configured, actual):
+        """Email a heads-up that the IPv6 VIP's configured prefix no longer
+        matches the active node's real subnet — notification only, doesn't
+        touch keepalived.conf itself. Sent at most once per drift episode
+        (reset once the values match again) to avoid spamming every poll
+        cycle."""
+        auth_config = _load_auth() or {}
+        to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+        if not to_addr:
+            logger.error(f"IPv6 VIP drift detected (configured {configured}, active node is actually on {actual}) "
+                         "but no notification email address is configured (enable email 2FA to set one)")
+            return
+        sent, _ = _send_email(
+            to_addr, 'dnsmasq-ui: IPv6 VIP prefix has drifted',
+            f"The configured IPv6 VIP prefix ({configured}) no longer matches the subnet "
+            f"the active DNS server is actually on ({actual}).\n\n"
+            "This likely means the ISP renumbered the delegated IPv6 prefix. DNS itself is "
+            "still working, but the IPv6 VIP address is no longer reachable at its "
+            "configured address.\n\n"
+            "This is a notification only — update keepalive_vip6 in zones.json's global "
+            "config and the virtual_ipaddress in keepalived.conf on all DNS servers, then "
+            f"restart keepalived.\n\nDashboard: {DASHBOARD_URL}/config"
+        )
+        if sent:
+            self._v6_vip_drift_notified = True
 
     def _load_device_credentials(self):
         """Decrypt and return all stored device credentials as
@@ -2078,11 +2169,12 @@ def api_status():
     """API: Get status of all servers including keepalived and WireGuard."""
     status = {}
     keepalived_vip = manager.config.get('global', {}).get('keepalive_vip', 'N/A')
+    keepalived_vip6 = manager.config.get('global', {}).get('keepalive_vip6')
     wg_enabled = manager.config.get('global', {}).get('wireguard', {}).get('enabled', False)
 
     for server_name, server_info in manager.get_servers().items():
         dnsmasq_running = manager.check_server_status(server_info['ip'])
-        is_master, keepalived_running = manager.check_keepalived_status(server_info['ip'])
+        is_master, keepalived_running, ipv6_vip_active = manager.check_keepalived_status(server_info['ip'])
 
         status[server_name] = {
             'ip': server_info['ip'],
@@ -2092,7 +2184,9 @@ def api_status():
             'keepalived': {
                 'running': keepalived_running,
                 'status': 'MASTER' if is_master else ('STANDBY' if keepalived_running else 'INACTIVE'),
-                'vip': keepalived_vip
+                'vip': keepalived_vip,
+                'vip6': keepalived_vip6,
+                'vip6_active': ipv6_vip_active
             },
             'tunnel_ip': server_info.get('wireguard', {}).get('tunnel_ip', 'N/A')
         }
@@ -2105,6 +2199,7 @@ def api_status():
     return jsonify({
         'servers': status,
         'vip': keepalived_vip,
+        'vip6': keepalived_vip6,
         'wg_enabled': wg_enabled
     })
 
@@ -2587,6 +2682,14 @@ def _dynamic_host_poller():
             result = manager.poll_dynamic_hosts()
             if result['deployed']:
                 logger.info(f"Dynamic host poll applied changes: {result['changes']}")
+
+            drifted, configured, actual = manager.check_ipv6_vip_drift()
+            if drifted:
+                logger.error(f"IPv6 VIP drift: configured {configured}, active node is actually on {actual}")
+                if not manager._v6_vip_drift_notified:
+                    manager._notify_ipv6_vip_drift(configured, actual)
+            else:
+                manager._v6_vip_drift_notified = False  # a future drift should send a fresh notice
         except Exception as e:
             logger.error(f"Dynamic host poll failed: {e}")
 

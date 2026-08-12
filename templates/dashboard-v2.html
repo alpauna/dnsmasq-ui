@@ -658,6 +658,9 @@
             <div id="keepalived-vip" style="background: #f0f0f0; padding: 12px; border-radius: 6px; margin-bottom: 20px; font-size: 13px;">
                 <strong>Keepalived VIP:</strong> <span id="vip-address">Loading...</span>
                 <span id="vip-status" style="margin-left: 20px; padding: 4px 8px; background: white; border-radius: 3px; display: none;"></span>
+                <span id="vip6-row" style="margin-left: 20px; display: none;">
+                    <strong>IPv6 VIP:</strong> <span id="vip6-address"></span>
+                </span>
             </div>
             <div class="servers-grid" id="servers-container">
                 {% for server_name, server_info in servers.items() %}
@@ -900,10 +903,15 @@
                 let onlineCount = 0;
                 let activeMaster = null;
                 const keepalivedVip = data.vip || 'N/A';
+                const keepalivedVip6 = data.vip6;
                 const servers = data.servers || {};
 
                 // Update VIP address
                 document.getElementById('vip-address').textContent = keepalivedVip;
+                if (keepalivedVip6) {
+                    document.getElementById('vip6-address').textContent = keepalivedVip6;
+                    document.getElementById('vip6-row').style.display = 'inline';
+                }
 
                 for (const [server, status] of Object.entries(servers)) {
                     if (status.online) {
