@@ -2920,10 +2920,20 @@ def api_proxy_check():
     'resolved' is what ProxyFix derived after trusting one hop of
     X-Forwarded-*. If both match, either there's no proxy in front of
     this request, or one's there but isn't setting the headers.
+
+    'expected_origin' is exactly what it sounds like to Flask-WTF's CSRF
+    protection too — CSRFProtect checks an HTTPS request's Origin/Referer
+    against request.host_url, which is derived from the same
+    scheme/host ProxyFix resolves above. If 'resolved' correctly shows
+    https/the public hostname, CSRF checks behind the proxy work
+    correctly for free; if ProxyFix were misconfigured (or x_proto wasn't
+    trusted) this would still show http, and every state-changing request
+    through the proxy would fail CSRF validation.
     """
-    orig_addr = request.environ.get('werkzeug.proxy_fix.orig_remote_addr')
-    orig_scheme = request.environ.get('werkzeug.proxy_fix.orig_wsgi_url_scheme')
-    orig_host = request.environ.get('werkzeug.proxy_fix.orig_http_host')
+    orig = request.environ.get('werkzeug.proxy_fix.orig', {})
+    orig_addr = orig.get('REMOTE_ADDR')
+    orig_scheme = orig.get('wsgi.url_scheme')
+    orig_host = orig.get('HTTP_HOST')
 
     behind_proxy = orig_addr is not None and orig_addr != request.remote_addr
 
@@ -2939,13 +2949,17 @@ def api_proxy_check():
             'scheme': orig_scheme,
             'host': orig_host
         } if orig_addr is not None else None,
+        'expected_origin': request.host_url.rstrip('/'),
         'behind_proxy': behind_proxy,
         'verdict': (
-            "Reachable through a reverse proxy, and X-Forwarded-* headers are being trusted correctly."
+            "Reachable through a reverse proxy, and X-Forwarded-* headers are being trusted correctly "
+            "-- CSRF's expected origin above should match your public URL."
             if behind_proxy else
             "No difference between the direct connection and the resolved client info — either this "
             "request came in directly (not through a proxy), or a proxy in front of it isn't setting "
-            "X-Forwarded-For/Proto/Host."
+            "X-Forwarded-For/Proto/Host. If you expected this to be through a proxy, CSRF-protected "
+            "requests (login, saving config, etc.) will likely fail until that's fixed, since "
+            "expected_origin above won't match what your browser actually sends."
         )
     })
 
