@@ -735,13 +735,70 @@ class ZoneManager:
         """Get all dynamic-address tracked hosts."""
         return self.config.get('dynamic_hosts', [])
 
-    def add_dynamic_host(self, domain, zone_name, target_host, interface='eth0',
+    def get_subnets(self):
+        """Get all named subnets (CIDR + primary_dns + live prefix_v6)."""
+        return self.config.get('global', {}).setdefault('subnets', {})
+
+    def add_subnet(self, name, cidr_v4, primary_dns=None):
+        """Register a new named subnet for subnet-based address tracking.
+        primary_dns is a server name from `servers` (not a raw IP) --
+        picking a DNS server this app already manages means one less
+        thing for the user to keep in sync by hand if that server's IP
+        ever changes."""
+        subnets = self.get_subnets()
+        if name in subnets:
+            return False, "Subnet already exists"
+        if primary_dns and primary_dns not in self.get_servers():
+            return False, f"'{primary_dns}' is not a known server"
+        try:
+            ipaddress.IPv4Network(cidr_v4, strict=False)
+        except ValueError as e:
+            return False, f"Invalid CIDR: {e}"
+        subnets[name] = {'cidr_v4': cidr_v4, 'prefix_v6': None, 'primary_dns': primary_dns}
+        self.save_config()
+        return True, "Subnet added"
+
+    def update_subnet(self, name, **fields):
+        """Update a subnet's cidr_v4/primary_dns. prefix_v6 is
+        intentionally not settable here -- it's only ever written by
+        poll_subnets() detecting the live prefix from primary_dns."""
+        allowed = ('cidr_v4', 'primary_dns')
+        subnets = self.get_subnets()
+        if name not in subnets:
+            return False, "Subnet not found"
+        if 'primary_dns' in fields and fields['primary_dns'] and fields['primary_dns'] not in self.get_servers():
+            return False, f"'{fields['primary_dns']}' is not a known server"
+        if 'cidr_v4' in fields:
+            try:
+                ipaddress.IPv4Network(fields['cidr_v4'], strict=False)
+            except ValueError as e:
+                return False, f"Invalid CIDR: {e}"
+        subnets[name].update({k: v for k, v in fields.items() if k in allowed})
+        self.save_config()
+        return True, "Subnet updated"
+
+    def delete_subnet(self, name):
+        """Remove a named subnet. Refuses if any dynamic_hosts entry still
+        references it, rather than silently breaking that entry's
+        tracking."""
+        subnets = self.get_subnets()
+        if name not in subnets:
+            return False, "Subnet not found"
+        in_use = [e['domain'] for e in self.config.get('dynamic_hosts', []) if e.get('subnet') == name]
+        if in_use:
+            return False, f"Still referenced by: {', '.join(in_use)}"
+        del subnets[name]
+        self.save_config()
+        return True, "Subnet removed"
+
+    def add_dynamic_host(self, domain, zone_name, target_host=None, interface='eth0',
                           record_type='AAAA', ssh_user=None, enabled=True,
                           connection='paramiko', ssh_extra_args=None,
                           detect_command=None, detect_regex=None,
                           cli_prompt_regex=None, enable_command=None,
                           enable_password_ref=None, logout_command='exit',
                           ssh_password_ref=None, detect_url=None, login_url=None,
+                          subnet=None, mac_address=None, ipv4_host=None,
                           login_fields=None, login_password_field=None,
                           login_password_transform='none', login_password_ref=None,
                           session_param_regex=None, session_param_name='session_id',
@@ -789,6 +846,15 @@ class ZoneManager:
         session_param_regex extracts it from the login response,
         session_param_name is the query param name to append to detect_url.
         verify_tls: set False for self-signed-cert devices.
+
+        subnet/mac_address/ipv4_host: the cheaper alternative to all of the
+        above — for a device on a subnet with a primary_dns configured
+        (see add_subnet), its address is computed from that subnet's live
+        prefix instead of polling the device directly. mac_address is used
+        for AAAA (SLAAC/EUI-64 derives the suffix from it — see the
+        subnet-tracking section in README.md), ipv4_host is an explicit
+        host number for A. Mutually exclusive with target_host/connection/
+        detect_command/etc — this bypasses per-device polling entirely.
         """
         if not self.get_zone(zone_name):
             return False, "Zone not found"
@@ -796,6 +862,31 @@ class ZoneManager:
         for entry in self.config['dynamic_hosts']:
             if entry['domain'] == domain and entry['record_type'] == record_type:
                 return False, "Already tracked"
+
+        if subnet:
+            if subnet not in self.get_subnets():
+                return False, f"Unknown subnet '{subnet}'"
+            if record_type == 'AAAA' and not mac_address:
+                return False, "mac_address is required for AAAA subnet tracking"
+            if record_type == 'A' and ipv4_host is None:
+                return False, "ipv4_host is required for A subnet tracking"
+            self.config['dynamic_hosts'].append({
+                'domain': domain,
+                'zone': zone_name,
+                'record_type': record_type,
+                'subnet': subnet,
+                'mac_address': mac_address,
+                'ipv4_host': ipv4_host,
+                'enabled': enabled,
+                'last_checked': None,
+                'last_value': None,
+                'last_updated': None
+            })
+            self.save_config()
+            return True, "Dynamic host added"
+
+        if not target_host:
+            return False, "target_host is required unless using subnet-based tracking"
 
         self.config['dynamic_hosts'].append({
             'domain': domain,
@@ -838,7 +929,7 @@ class ZoneManager:
                    'logout_command', 'ssh_password_ref', 'detect_url', 'login_url',
                    'login_fields', 'login_password_field', 'login_password_transform',
                    'login_password_ref', 'session_param_regex', 'session_param_name',
-                   'verify_tls')
+                   'verify_tls', 'subnet', 'mac_address', 'ipv4_host')
         for entry in self.config['dynamic_hosts']:
             if entry['domain'] == domain:
                 entry.update({k: v for k, v in fields.items() if k in allowed})
@@ -1312,6 +1403,21 @@ expect eof
         detect_command/detect_regex against an unfamiliar device CLI (e.g. a
         switch) before committing to a saved dynamic_hosts entry.
         """
+        if entry.get('subnet'):
+            address = self._detect_subnet_member_address(entry)
+            result = {'command': f"(computed from subnet '{entry['subnet']}')", 'connection': 'subnet'}
+            if address:
+                result['detected_address'] = address
+            else:
+                subnet_cfg = self.get_subnets().get(entry['subnet'])
+                if not subnet_cfg:
+                    result['error'] = f"Unknown subnet '{entry['subnet']}'"
+                elif entry.get('record_type', 'AAAA') == 'AAAA' and not subnet_cfg.get('prefix_v6'):
+                    result['error'] = "Subnet has no live IPv6 prefix yet -- run a poll first (needs primary_dns configured and reachable)"
+                else:
+                    result['error'] = 'Address computation failed -- check mac_address/ipv4_host and server logs'
+            return result
+
         target_host = entry.get('target_host')
         ssh_user = entry.get('ssh_user')
         connection = entry.get('connection', 'paramiko')
@@ -2284,16 +2390,19 @@ def api_status():
     keepalived_vip = manager.config.get('global', {}).get('keepalive_vip', 'N/A')
     keepalived_vip6 = manager.config.get('global', {}).get('keepalive_vip6')
     wg_enabled = manager.config.get('global', {}).get('wireguard', {}).get('enabled', False)
+    subnets = manager.get_subnets()
 
     for server_name, server_info in manager.get_servers().items():
         dnsmasq_running = manager.check_server_status(server_info['ip'])
         is_master, keepalived_running, ipv6_vip_active = manager.check_keepalived_status(server_info['ip'])
         hostname = server_info.get('hostname', server_name)
+        primary_for = [name for name, s in subnets.items() if s.get('primary_dns') == server_name]
 
         status[server_name] = {
             'ip': server_info['ip'],
             'ipv6': manager.get_server_ipv6(hostname),
             'hostname': hostname,
+            'primary_for': primary_for,
             'online': dnsmasq_running,
             'dnsmasq': 'active' if dnsmasq_running else 'inactive',
             'keepalived': {
@@ -2330,7 +2439,7 @@ def api_dynamic_hosts_add():
     success, message = manager.add_dynamic_host(
         domain=data['domain'],
         zone_name=data['zone'],
-        target_host=data['target_host'],
+        target_host=data.get('target_host'),
         interface=data.get('interface', 'eth0'),
         record_type=data.get('record_type', 'AAAA'),
         ssh_user=data.get('ssh_user'),
@@ -2352,8 +2461,40 @@ def api_dynamic_hosts_add():
         login_password_ref=data.get('login_password_ref'),
         session_param_regex=data.get('session_param_regex'),
         session_param_name=data.get('session_param_name', 'session_id'),
-        verify_tls=data.get('verify_tls', True)
+        verify_tls=data.get('verify_tls', True),
+        subnet=data.get('subnet'),
+        mac_address=data.get('mac_address'),
+        ipv4_host=data.get('ipv4_host')
     )
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/subnets', methods=['GET'])
+def api_subnets_list():
+    """API: List named subnets used for subnet-based address tracking."""
+    return jsonify({'subnets': manager.get_subnets()})
+
+@app.route('/api/subnets', methods=['POST'])
+def api_subnets_add():
+    """API: Register a new named subnet."""
+    data = request.json
+    success, message = manager.add_subnet(
+        name=data['name'],
+        cidr_v4=data['cidr_v4'],
+        primary_dns=data.get('primary_dns')
+    )
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/subnets/<name>', methods=['PUT'])
+def api_subnets_update(name):
+    """API: Update a subnet's CIDR or primary_dns."""
+    data = request.json
+    success, message = manager.update_subnet(name, **data)
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/subnets/<name>', methods=['DELETE'])
+def api_subnets_delete(name):
+    """API: Remove a named subnet (refuses if still referenced)."""
+    success, message = manager.delete_subnet(name)
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/dynamic-hosts/<domain>', methods=['PUT'])

@@ -682,6 +682,10 @@
                             <label>Keepalived:</label>
                             <value id="keepalived-status-{{ server_name }}">Loading...</value>
                         </div>
+                        <div class="server-info-item" id="primary-for-{{ server_name }}" style="display: none;">
+                            <label>📡 Primary DNS For:</label>
+                            <value id="primary-for-value-{{ server_name }}"></value>
+                        </div>
                         {% if wg_enabled %}
                         <div class="server-info-item">
                             <label>Tunnel IP:</label>
@@ -936,6 +940,16 @@
                             if (status.keepalived.status === 'MASTER') {
                                 activeMaster = server;
                             }
+                        }
+                    }
+
+                    // Show which subnet(s), if any, this server is the primary DNS for
+                    if (status.primary_for && status.primary_for.length > 0) {
+                        const primaryForRow = document.getElementById(`primary-for-${server}`);
+                        const primaryForValue = document.getElementById(`primary-for-value-${server}`);
+                        if (primaryForRow && primaryForValue) {
+                            primaryForRow.style.display = 'flex';
+                            primaryForValue.textContent = status.primary_for.join(', ');
                         }
                     }
                 }

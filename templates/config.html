@@ -419,6 +419,47 @@
         </div>
 
         <div class="section">
+            <h2>Subnets</h2>
+            <div class="alert alert-info">
+                <strong>Subnet-based tracking</strong>: register an L3 segment here (its CIDR, and which
+                DNS server is the "primary" for it) and devices in it can be tracked by MAC address
+                instead of being polled directly — see Track a New Host below. The primary server is
+                polled once per cycle for the segment's live IPv6 prefix; every device in the subnet
+                computes its own address from that prefix, no per-device connection needed.
+            </div>
+
+            <div id="subnets-list" class="server-list" style="margin-bottom: 20px;">
+                <p style="padding: 20px; grid-column: 1/-1;">Loading subnets...</p>
+            </div>
+
+            <h3 style="color: #333; margin-bottom: 15px;">Add a Subnet</h3>
+            <form id="subnet-form" onsubmit="addSubnet(event)">
+                <div class="form-group">
+                    <label for="sn-name">Name</label>
+                    <input type="text" id="sn-name" placeholder="lan" required>
+                </div>
+                <div class="form-group">
+                    <label for="sn-cidr">CIDR (IPv4)</label>
+                    <input type="text" id="sn-cidr" placeholder="192.168.0.0/23" required>
+                    <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                        Explicit network/host bit split — don't assume /24 if this segment is actually
+                        wider (e.g. this project's own LAN is a /23).
+                    </p>
+                </div>
+                <div class="form-group">
+                    <label for="sn-primary-dns">Primary DNS Server</label>
+                    <select id="sn-primary-dns"><option value="">(none — devices here stay on direct polling)</option></select>
+                    <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                        Must be a server that's actually reachable on this subnet — polled once per cycle
+                        for the segment's live IPv6 prefix.
+                    </p>
+                </div>
+                <button type="submit" class="btn btn-primary">Add Subnet</button>
+            </form>
+            <div id="subnet-add-result" style="margin-top: 15px;"></div>
+        </div>
+
+        <div class="section">
             <h2>Dynamic DNS Tracking</h2>
             <div class="alert alert-info">
                 <strong>Poll specific hosts for address changes</strong>: For hosts whose IP is assigned
@@ -446,19 +487,51 @@
                 </div>
                 <div class="form-group">
                     <label for="dh-record-type">Record Type</label>
-                    <select id="dh-record-type">
+                    <select id="dh-record-type" onchange="updateDynamicHostFormVisibility()">
                         <option value="AAAA" selected>AAAA (IPv6)</option>
                         <option value="A">A (IPv4)</option>
                     </select>
                 </div>
                 <div class="form-group">
-                    <label for="dh-target">Target Host (IP to SSH into and read the current address from)</label>
-                    <input type="text" id="dh-target" placeholder="192.168.0.250" required>
+                    <label for="dh-tracking-method">Tracking Method</label>
+                    <select id="dh-tracking-method" onchange="updateDynamicHostFormVisibility()">
+                        <option value="subnet" selected>Subnet-based (recommended — no per-device connection)</option>
+                        <option value="direct">Direct polling (advanced — SSH/HTTP into the device itself)</option>
+                    </select>
                 </div>
-                <div class="form-group">
-                    <label for="dh-ssh-user">SSH User (optional, defaults to the server's configured SSH user)</label>
-                    <input type="text" id="dh-ssh-user" placeholder="debian">
+
+                <div id="dh-subnet-fields">
+                    <div class="form-group">
+                        <label for="dh-subnet">Subnet</label>
+                        <select id="dh-subnet"></select>
+                    </div>
+                    <div class="form-group" id="dh-mac-group">
+                        <label for="dh-mac-address">MAC Address</label>
+                        <input type="text" id="dh-mac-address" placeholder="bc:24:11:0b:78:55">
+                        <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                            The device's IPv6 suffix is calculated from this via EUI-64 — don't need to
+                            already know its current address. Recover it from an existing SLAAC address
+                            by reversing EUI-64 if you don't have it handy (see README).
+                        </p>
+                    </div>
+                    <div class="form-group" id="dh-ipv4-host-group" style="display: none;">
+                        <label for="dh-ipv4-host">IPv4 Host Number</label>
+                        <input type="number" id="dh-ipv4-host" placeholder="231" min="0">
+                        <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                            Combined with the subnet's CIDR, e.g. 231 in 192.168.0.0/23 → 192.168.0.231.
+                        </p>
+                    </div>
                 </div>
+
+                <div id="dh-direct-fields">
+                    <div class="form-group">
+                        <label for="dh-target">Target Host (IP to SSH into and read the current address from)</label>
+                        <input type="text" id="dh-target" placeholder="192.168.0.250">
+                    </div>
+                    <div class="form-group">
+                        <label for="dh-ssh-user">SSH User (optional, defaults to the server's configured SSH user)</label>
+                        <input type="text" id="dh-ssh-user" placeholder="debian">
+                    </div>
 
                 <details style="margin-bottom: 20px;">
                     <summary style="cursor: pointer; color: #667eea; font-weight: 500; margin-bottom: 15px;">Advanced (for non-Linux devices like switches)</summary>
@@ -557,11 +630,13 @@
                         </div>
                     </div>
 
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="testDynamicHostDetection()">Test Detection (doesn't save)</button>
-                    <div id="dynamic-test-result" style="margin-top: 15px;"></div>
                 </details>
+                </div>
 
-                <button type="submit" class="btn btn-primary">Track Host</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="testDynamicHostDetection()">Test Detection (doesn't save)</button>
+                <div id="dynamic-test-result" style="margin-top: 15px;"></div>
+
+                <button type="submit" class="btn btn-primary" style="margin-top: 15px;">Track Host</button>
             </form>
             <div id="dynamic-add-result" style="margin-top: 15px;"></div>
 
@@ -1219,6 +1294,103 @@
         }
 
         let cachedDynamicHosts = [];
+        let cachedSubnets = {};
+
+        function subnetLabel(name) {
+            const s = cachedSubnets[name];
+            if (!s) return name;
+            return s.primary_dns ? `${name} — primary: ${s.primary_dns}` : `${name} — no primary DNS set`;
+        }
+
+        function loadSubnets() {
+            return fetch('/api/subnets')
+                .then(response => response.json())
+                .then(data => {
+                    cachedSubnets = data.subnets || {};
+
+                    let html = '';
+                    const names = Object.keys(cachedSubnets);
+                    if (names.length === 0) {
+                        html = '<p style="padding: 20px; grid-column: 1/-1;">No subnets registered yet</p>';
+                    } else {
+                        for (const name of names) {
+                            const s = cachedSubnets[name];
+                            html += `<div class="server-item">
+                                <h4>${name}</h4>
+                                <p><strong>CIDR:</strong> ${s.cidr_v4}</p>
+                                <p><strong>Live IPv6 prefix:</strong> ${s.prefix_v6 || 'not yet detected'}</p>
+                                <p><strong>Primary DNS:</strong> ${s.primary_dns || '(none — devices here use direct polling)'}</p>
+                                <button class="btn btn-secondary btn-sm" onclick="deleteSubnet('${name}')">Remove</button>
+                            </div>`;
+                        }
+                    }
+                    document.getElementById('subnets-list').innerHTML = html;
+
+                    // Keep the "Track a New Host" subnet dropdown and the
+                    // primary-DNS picker on the Add Subnet form in sync too.
+                    const dhSelect = document.getElementById('dh-subnet');
+                    if (dhSelect) {
+                        dhSelect.innerHTML = names.map(n => `<option value="${n}">${subnetLabel(n)}</option>`).join('')
+                            || '<option value="">(no subnets registered yet)</option>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading subnets:', error);
+                    document.getElementById('subnets-list').innerHTML = '<div class="alert alert-error">Error loading subnets</div>';
+                });
+        }
+
+        function loadServersForSubnetForm() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    const names = Object.keys(data.servers || {});
+                    document.getElementById('sn-primary-dns').innerHTML =
+                        '<option value="">(none — devices here stay on direct polling)</option>' +
+                        names.map(n => `<option value="${n}">${n}</option>`).join('');
+                })
+                .catch(error => console.error('Error loading servers for subnet form:', error));
+        }
+
+        function addSubnet(event) {
+            event.preventDefault();
+            const payload = {
+                name: document.getElementById('sn-name').value.trim(),
+                cidr_v4: document.getElementById('sn-cidr').value.trim(),
+                primary_dns: document.getElementById('sn-primary-dns').value || null
+            };
+            fetch('/api/subnets', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(response => response.json())
+                .then(data => {
+                    const resultDiv = document.getElementById('subnet-add-result');
+                    if (data.success) {
+                        resultDiv.innerHTML = '<div class="alert alert-success">Subnet added.</div>';
+                        document.getElementById('subnet-form').reset();
+                        loadSubnets();
+                    } else {
+                        resultDiv.innerHTML = `<div class="alert alert-error">${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error adding subnet:', error);
+                    document.getElementById('subnet-add-result').innerHTML = '<div class="alert alert-error">Error adding subnet</div>';
+                });
+        }
+
+        function deleteSubnet(name) {
+            if (!confirm(`Remove subnet '${name}'?`)) return;
+            fetch(`/api/subnets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) alert(data.message);
+                    loadSubnets();
+                })
+                .catch(error => console.error('Error removing subnet:', error));
+        }
 
         function loadDynamicHosts() {
             fetch('/api/dynamic-hosts')
@@ -1234,21 +1406,34 @@
                             const statusIcon = h.enabled ? '🟢' : '⚫';
                             const lastChecked = h.last_checked ? new Date(h.last_checked).toLocaleString() : 'never';
                             const lastUpdated = h.last_updated ? new Date(h.last_updated).toLocaleString() : 'never';
-                            const connectionNote = h.connection && h.connection !== 'paramiko'
-                                ? `<p><strong>Connection:</strong> ${h.connection}</p>` : '';
-                            const detectNote = h.connection === 'http'
-                                ? (h.detect_url ? `<p><strong>Status page:</strong> ${h.detect_url}</p>` : '')
-                                : (h.detect_command ? `<p><strong>Detect command:</strong> ${h.detect_command}</p>` : '');
-                            const targetNote = h.connection === 'http'
-                                ? h.target_host
-                                : `${h.target_host}${h.detect_command ? '' : ' (' + h.interface + ')'}`;
+
+                            let trackingNote;
+                            if (h.subnet) {
+                                const s = cachedSubnets[h.subnet];
+                                const primary = s && s.primary_dns ? s.primary_dns : '(none set)';
+                                trackingNote = `
+                                    <p><strong>📡 Subnet:</strong> ${h.subnet} <span style="color: #666;">(primary: ${primary})</span></p>
+                                    <p><strong>MAC:</strong> ${h.mac_address || h.ipv4_host || 'not set'}</p>`;
+                            } else {
+                                const connectionNote = h.connection && h.connection !== 'paramiko'
+                                    ? `<p><strong>Connection:</strong> ${h.connection}</p>` : '';
+                                const detectNote = h.connection === 'http'
+                                    ? (h.detect_url ? `<p><strong>Status page:</strong> ${h.detect_url}</p>` : '')
+                                    : (h.detect_command ? `<p><strong>Detect command:</strong> ${h.detect_command}</p>` : '');
+                                const targetNote = h.connection === 'http'
+                                    ? h.target_host
+                                    : `${h.target_host}${h.detect_command ? '' : ' (' + h.interface + ')'}`;
+                                trackingNote = `
+                                    <p><strong>Target:</strong> ${targetNote}</p>
+                                    ${connectionNote}
+                                    ${detectNote}`;
+                            }
+
                             html += `<div class="server-item">
                                 <h4>${statusIcon} ${h.domain}</h4>
                                 <p><strong>Zone:</strong> ${h.zone}</p>
                                 <p><strong>Type:</strong> ${h.record_type}</p>
-                                <p><strong>Target:</strong> ${targetNote}</p>
-                                ${connectionNote}
-                                ${detectNote}
+                                ${trackingNote}
                                 <p><strong>Current value:</strong> ${h.last_value || 'unknown'}</p>
                                 <p><strong>Last checked:</strong> ${lastChecked}</p>
                                 <p><strong>Last updated:</strong> ${lastUpdated}</p>
@@ -1281,6 +1466,22 @@
         }
 
         function collectDynamicHostPayload() {
+            const zone = document.getElementById('dh-zone').value;
+            const domain = document.getElementById('dh-domain').value.trim();
+            const recordType = document.getElementById('dh-record-type').value;
+
+            if (document.getElementById('dh-tracking-method').value === 'subnet') {
+                return {
+                    zone: zone,
+                    domain: domain,
+                    record_type: recordType,
+                    subnet: document.getElementById('dh-subnet').value,
+                    mac_address: document.getElementById('dh-mac-address').value.trim() || null,
+                    ipv4_host: document.getElementById('dh-ipv4-host').value
+                        ? parseInt(document.getElementById('dh-ipv4-host').value, 10) : null
+                };
+            }
+
             const extraArgsRaw = document.getElementById('dh-ssh-extra-args').value.trim();
             const loginFieldsRaw = document.getElementById('dh-login-fields').value.trim();
             let loginFields = null;
@@ -1293,9 +1494,9 @@
                 }
             }
             return {
-                zone: document.getElementById('dh-zone').value,
-                domain: document.getElementById('dh-domain').value.trim(),
-                record_type: document.getElementById('dh-record-type').value,
+                zone: zone,
+                domain: domain,
+                record_type: recordType,
                 target_host: document.getElementById('dh-target').value.trim(),
                 interface: document.getElementById('dh-interface').value.trim() || 'eth0',
                 ssh_user: document.getElementById('dh-ssh-user').value.trim() || null,
@@ -1324,6 +1525,16 @@
             const connection = document.getElementById('dh-connection').value;
             document.getElementById('dh-docker-fields').style.display = connection === 'docker' ? 'block' : 'none';
             document.getElementById('dh-http-fields').style.display = connection === 'http' ? 'block' : 'none';
+
+            const method = document.getElementById('dh-tracking-method').value;
+            const isSubnet = method === 'subnet';
+            document.getElementById('dh-subnet-fields').style.display = isSubnet ? 'block' : 'none';
+            document.getElementById('dh-direct-fields').style.display = isSubnet ? 'none' : 'block';
+            document.getElementById('dh-target').required = !isSubnet;
+
+            const isAAAA = document.getElementById('dh-record-type').value === 'AAAA';
+            document.getElementById('dh-mac-group').style.display = isAAAA ? 'block' : 'none';
+            document.getElementById('dh-ipv4-host-group').style.display = isAAAA ? 'none' : 'block';
         }
 
         function loadDeviceCredentials() {
@@ -1546,6 +1757,11 @@
             document.getElementById('dh-zone').disabled = true;
             document.getElementById('dh-record-type').value = entry.record_type || 'AAAA';
             document.getElementById('dh-record-type').disabled = true;
+            document.getElementById('dh-tracking-method').value = entry.subnet ? 'subnet' : 'direct';
+            document.getElementById('dh-tracking-method').disabled = true;
+            document.getElementById('dh-subnet').value = entry.subnet || '';
+            document.getElementById('dh-mac-address').value = entry.mac_address || '';
+            document.getElementById('dh-ipv4-host').value = entry.ipv4_host != null ? entry.ipv4_host : '';
             document.getElementById('dh-target').value = entry.target_host || '';
             document.getElementById('dh-ssh-user').value = entry.ssh_user || '';
             document.getElementById('dh-interface').value = entry.interface || 'eth0';
@@ -1597,6 +1813,7 @@
             document.getElementById('dh-domain').disabled = false;
             document.getElementById('dh-zone').disabled = false;
             document.getElementById('dh-record-type').disabled = false;
+            document.getElementById('dh-tracking-method').disabled = false;
             updateDynamicHostFormVisibility();
             const submitBtn = document.querySelector('#dynamic-host-form button[type="submit"]');
             submitBtn.innerHTML = 'Track Host';
@@ -1662,11 +1879,14 @@
         loadSSHKeyInfo();
         loadServerStatus();
         loadSyncServers();
-        loadDynamicHosts();
+        loadServersForSubnetForm();
+        loadSubnets().then(() => loadDynamicHosts());
         loadZonesForDynamicForm();
+        updateDynamicHostFormVisibility();
         loadDeviceCredentials();
         load2FAStatus();
         setInterval(loadServerStatus, 30000);
+        setInterval(loadSubnets, 30000);
     </script>
 </body>
 </html>
