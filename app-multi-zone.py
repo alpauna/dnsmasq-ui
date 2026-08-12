@@ -158,6 +158,47 @@ def _get_local_global_ipv6_prefix():
         logger.error(f"Failed to read local IPv6 prefix: {e}")
         return None
 
+def _eui64_from_mac(mac):
+    """Compute the 64-bit EUI-64 interface identifier SLAAC derives from a
+    MAC address (insert ff:fe at the midpoint, flip the universal/local
+    bit of the first byte). Returns an int. Raises ValueError for a
+    malformed MAC."""
+    b = bytes.fromhex(mac.replace(':', '').replace('-', ''))
+    if len(b) != 6:
+        raise ValueError(f"'{mac}' is not a 6-byte MAC address")
+    eui64 = bytes([b[0] ^ 0x02]) + b[1:3] + b'\xff\xfe' + b[3:6]
+    return int.from_bytes(eui64, 'big')
+
+def _mac_from_eui64(interface_id):
+    """Reverse _eui64_from_mac — recover the original MAC from a 64-bit
+    EUI-64 interface identifier (e.g. the host part of an existing SLAAC
+    address). Used once per device to bootstrap subnet-tracking from an
+    already-known-good address rather than requiring the MAC be looked up
+    by hand. Raises ValueError if the identifier doesn't carry the ff:fe
+    midpoint EUI-64 requires (e.g. it's a privacy/stable-random address,
+    not MAC-derived)."""
+    b = interface_id.to_bytes(8, 'big')
+    if b[3:5] != b'\xff\xfe':
+        raise ValueError("not an EUI-64 interface identifier (missing ff:fe midpoint)")
+    mac = bytes([b[0] ^ 0x02]) + b[1:3] + b[5:8]
+    return ':'.join(f'{x:02x}' for x in mac)
+
+def _ipv6_from_prefix_and_mac(prefix_net, mac):
+    """Combine a subnet's /64 network (an ipaddress.IPv6Network) with a
+    device's MAC-derived EUI-64 host bits into its full SLAAC address."""
+    return ipaddress.IPv6Address(int(prefix_net.network_address) | _eui64_from_mac(mac))
+
+def _ipv4_from_cidr_and_host(cidr, host_number):
+    """Combine a subnet's CIDR (e.g. '192.168.0.0/23') with an explicit
+    host number into a full IPv4Address, validated to actually fall
+    within that network — host numbering only makes unambiguous sense
+    once the network/host bit split (/23 vs /24 etc.) is explicit."""
+    net = ipaddress.IPv4Network(cidr, strict=False)
+    addr = ipaddress.IPv4Address(int(net.network_address) + host_number)
+    if addr not in net:
+        raise ValueError(f"host {host_number} doesn't fit within {cidr}")
+    return addr
+
 def log_request():
     """Log incoming request with client IP and path."""
     client_ip = get_client_ip()
@@ -1342,7 +1383,65 @@ expect eof
         """Read a tracked host's current address per its entry config.
         Returns the address string, or None if detection failed.
         """
+        if entry.get('subnet'):
+            return self._detect_subnet_member_address(entry)
         return self.test_dynamic_host(entry).get('detected_address')
+
+    def poll_subnets(self):
+        """Refresh each configured subnet's live IPv6 prefix from its
+        primary_dns server — one SSH round-trip per subnet, not per
+        device. Subnet-tracked dynamic_hosts entries (a 'subnet' field
+        instead of target_host/detect_command) then compute their own
+        address from this prefix plus their own MAC (EUI-64), rather than
+        being individually polled every cycle. Devices without a stable,
+        directly-reachable member of their own subnet to reference (e.g.
+        wifi.mgmt.alshowto.com, the only thing on 192.168.7.0/24 we can
+        reach) stay on the old per-device polling instead."""
+        subnets = self.config.get('global', {}).get('subnets', {})
+        servers = self.get_servers()
+        for name, subnet in subnets.items():
+            primary_dns = subnet.get('primary_dns')
+            reference_host = subnet.get('reference_host')
+            ip = servers[primary_dns]['ip'] if primary_dns in servers else reference_host
+            if not ip:
+                logger.error(f"Subnet '{name}' has no primary_dns or reference_host configured — skipping prefix detection")
+                continue
+            output = self._run_ssh_paramiko(ip, 'ip -6 -o addr show eth0 scope global dynamic', None)
+            if not output:
+                logger.error(f"Subnet '{name}': failed to detect IPv6 prefix via {ip}")
+                continue
+            match = re.search(r'inet6 ([0-9a-fA-F:]+)/', output)
+            if not match:
+                logger.error(f"Subnet '{name}': no dynamic global IPv6 address found on {ip}")
+                continue
+            try:
+                subnet['prefix_v6'] = str(ipaddress.ip_interface(f"{match.group(1)}/64").network)
+            except ValueError:
+                logger.error(f"Subnet '{name}': '{match.group(1)}' is not a valid address")
+
+    def _detect_subnet_member_address(self, entry):
+        """Compute a subnet-tracked device's current address from its
+        subnet's live prefix/CIDR plus its own MAC (AAAA) or host number
+        (A) — no per-device polling needed, see poll_subnets()."""
+        subnet = self.config.get('global', {}).get('subnets', {}).get(entry.get('subnet'))
+        if not subnet:
+            logger.error(f"'{entry['domain']}' references unknown subnet '{entry.get('subnet')}'")
+            return None
+        record_type = entry.get('record_type', 'AAAA')
+        try:
+            if record_type == 'AAAA':
+                prefix_v6, mac = subnet.get('prefix_v6'), entry.get('mac_address')
+                if not prefix_v6 or not mac:
+                    return None
+                return str(_ipv6_from_prefix_and_mac(ipaddress.ip_network(prefix_v6), mac))
+            else:
+                cidr_v4, host_number = subnet.get('cidr_v4'), entry.get('ipv4_host')
+                if not cidr_v4 or host_number is None:
+                    return None
+                return str(_ipv4_from_cidr_and_host(cidr_v4, host_number))
+        except ValueError as e:
+            logger.error(f"Subnet address computation failed for {entry['domain']}: {e}")
+            return None
 
     def poll_dynamic_hosts(self):
         """Check every enabled tracked host for an address change and, if
@@ -1351,6 +1450,8 @@ expect eof
         Returns:
             dict: {'changes': {domain: {...}}, 'deployed': bool}
         """
+        self.poll_subnets()
+
         results = {}
         changed_any = False
 
