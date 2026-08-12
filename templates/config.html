@@ -445,8 +445,8 @@
                 <p style="padding: 20px; grid-column: 1/-1;">Loading subnets...</p>
             </div>
 
-            <h3 style="color: #333; margin-bottom: 15px;">Add a Subnet</h3>
-            <form id="subnet-form" onsubmit="addSubnet(event)">
+            <h3 id="subnet-form-heading" style="color: #333; margin-bottom: 15px;">Add a Subnet</h3>
+            <form id="subnet-form" onsubmit="submitSubnet(event)">
                 <div class="form-group">
                     <label for="sn-name">Name</label>
                     <input type="text" id="sn-name" placeholder="lan" required>
@@ -1357,7 +1357,10 @@
                                 <p><strong>CIDR:</strong> ${s.cidr_v4}</p>
                                 <p><strong>Live IPv6 prefix:</strong> ${s.prefix_v6 || 'not yet detected'}</p>
                                 <p><strong>Primary DNS:</strong> ${s.primary_dns || '(none — devices here use direct polling)'}</p>
-                                <button class="btn btn-secondary btn-sm" onclick="deleteSubnet('${name}')">Remove</button>
+                                <div style="margin-top: 10px; display: flex; gap: 8px;">
+                                    <button class="btn btn-secondary btn-sm" onclick="editSubnet('${name}')">Edit</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="deleteSubnet('${name}')">Remove</button>
+                                </div>
                             </div>`;
                         }
                     }
@@ -1389,33 +1392,87 @@
                 .catch(error => console.error('Error loading servers for subnet form:', error));
         }
 
-        function addSubnet(event) {
+        let editingSubnetName = null;
+
+        function submitSubnet(event) {
             event.preventDefault();
-            const payload = {
-                name: document.getElementById('sn-name').value.trim(),
-                cidr_v4: document.getElementById('sn-cidr').value.trim(),
-                primary_dns: document.getElementById('sn-primary-dns').value || null
-            };
-            fetch('/api/subnets', {
-                method: 'POST',
+            const resultDiv = document.getElementById('subnet-add-result');
+            const isEdit = editingSubnetName !== null;
+
+            const url = isEdit ? `/api/subnets/${encodeURIComponent(editingSubnetName)}` : '/api/subnets';
+            const method = isEdit ? 'PUT' : 'POST';
+            const payload = isEdit
+                ? {
+                    cidr_v4: document.getElementById('sn-cidr').value.trim(),
+                    primary_dns: document.getElementById('sn-primary-dns').value || null
+                }
+                : {
+                    name: document.getElementById('sn-name').value.trim(),
+                    cidr_v4: document.getElementById('sn-cidr').value.trim(),
+                    primary_dns: document.getElementById('sn-primary-dns').value || null
+                };
+
+            fetch(url, {
+                method: method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             })
                 .then(response => response.json())
                 .then(data => {
-                    const resultDiv = document.getElementById('subnet-add-result');
                     if (data.success) {
-                        resultDiv.innerHTML = '<div class="alert alert-success">Subnet added.</div>';
-                        document.getElementById('subnet-form').reset();
+                        resultDiv.innerHTML = `<div class="alert alert-success">Subnet ${isEdit ? 'updated' : 'added'}.</div>`;
+                        if (isEdit) {
+                            cancelEditSubnet();
+                        } else {
+                            document.getElementById('subnet-form').reset();
+                        }
                         loadSubnets();
                     } else {
                         resultDiv.innerHTML = `<div class="alert alert-error">${data.message}</div>`;
                     }
                 })
                 .catch(error => {
-                    console.error('Error adding subnet:', error);
-                    document.getElementById('subnet-add-result').innerHTML = '<div class="alert alert-error">Error adding subnet</div>';
+                    console.error(`Error ${isEdit ? 'updating' : 'adding'} subnet:`, error);
+                    resultDiv.innerHTML = `<div class="alert alert-error">Error ${isEdit ? 'updating' : 'adding'} subnet</div>`;
                 });
+        }
+
+        function editSubnet(name) {
+            const s = cachedSubnets[name];
+            if (!s) return;
+
+            editingSubnetName = name;
+            document.getElementById('sn-name').value = name;
+            document.getElementById('sn-name').disabled = true;
+            document.getElementById('sn-cidr').value = s.cidr_v4 || '';
+            document.getElementById('sn-primary-dns').value = s.primary_dns || '';
+
+            document.getElementById('subnet-form-heading').textContent = `Edit Subnet: ${name}`;
+            const submitBtn = document.querySelector('#subnet-form button[type="submit"]');
+            submitBtn.textContent = 'Save Changes';
+            if (!document.getElementById('sn-cancel-edit')) {
+                const cancelBtn = document.createElement('button');
+                cancelBtn.type = 'button';
+                cancelBtn.id = 'sn-cancel-edit';
+                cancelBtn.className = 'btn btn-secondary';
+                cancelBtn.style.marginLeft = '8px';
+                cancelBtn.textContent = 'Cancel';
+                cancelBtn.onclick = cancelEditSubnet;
+                submitBtn.insertAdjacentElement('afterend', cancelBtn);
+            }
+
+            document.getElementById('subnet-form').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function cancelEditSubnet() {
+            editingSubnetName = null;
+            document.getElementById('subnet-form').reset();
+            document.getElementById('sn-name').disabled = false;
+            document.getElementById('subnet-form-heading').textContent = 'Add a Subnet';
+            const submitBtn = document.querySelector('#subnet-form button[type="submit"]');
+            submitBtn.textContent = 'Add Subnet';
+            const cancelBtn = document.getElementById('sn-cancel-edit');
+            if (cancelBtn) cancelBtn.remove();
         }
 
         function deleteSubnet(name) {
