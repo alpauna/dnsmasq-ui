@@ -341,6 +341,56 @@ is not a real keepalived keyword — it silently failed to parse
 node/keepalived-process loss did. Fixed in both the live config on all
 three servers and the `dnsmasq-setup.yml` template that generates it.
 
+### IPv6 VIP
+
+DNS and the dashboard are also reachable over IPv6, on
+`2605:4a80:b004:b120::230` — a static address inside the LAN's currently
+delegated `/64`, not a ULA. That's a deliberate tradeoff: it's simpler and
+matches the v4 VIP's addressing style, but if the ISP ever rotates the
+delegated prefix, this address goes stale until updated (the same class of
+drift as the project's still-open DHCPv6/RA tracking work). Worth
+revisiting as a ULA (`fd00::/8`) if that ever becomes a real problem — a
+ULA would be immune to WAN prefix changes since it's never routed off the
+LAN anyway.
+
+A single keepalived `vrrp_instance` can't carry both an IPv4 and IPv6
+`virtual_ipaddress` — VRRPv2 (IPv4 adverts) and VRRPv3 (IPv6 adverts) are
+different wire protocols. IPv6 gets its own instance with its own
+`virtual_router_id`, kept in lockstep with `DNS_VIP` via a
+`vrrp_sync_group` so both VIPs always move together, including on a
+`dnsmasq` crash detected through `DNS_VIP`'s `track_process` (sync groups
+force every member instance into the same state regardless of which one's
+tracking triggered it):
+
+```
+vrrp_instance DNS_VIP6 {
+  ...
+  virtual_router_id 52
+  virtual_ipaddress {
+    fe80::230/64
+    2605:4a80:b004:b120::230/64
+  }
+}
+
+vrrp_sync_group DNS_HA {
+  group {
+    DNS_VIP
+    DNS_VIP6
+  }
+}
+```
+
+The `fe80::230` entry is a synthetic link-local listed first — VRRPv3 IPv6
+adverts should be sourced from a link-local address, and without one
+explicitly configured, keepalived falls back to the interface's real
+link-local and just logs a warning on every start.
+
+The dashboard itself binds `::` rather than `0.0.0.0` (relying on
+`net.ipv6.bindv6only=0`, the Linux default — confirmed on all three
+servers), so a single socket serves both address families rather than
+needing separate v4/v6 listeners. `dnsmasq` needed no changes — it already
+listens on all local addresses.
+
 ## Configuration
 
 ### zones.json

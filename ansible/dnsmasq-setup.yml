@@ -9,6 +9,12 @@
     dnsmasq_records_file: "{{ dnsmasq_config_dir }}/local-records.conf"
     monitoring_script: /usr/local/bin/dnsmasq-monitor.sh
     keepalive_vip: 192.168.0.230
+    # Static address within the LAN's current delegated IPv6 /64 — not a
+    # ULA, so if the ISP ever rotates the delegated prefix this needs
+    # updating (same class of drift as the DHCPv6/RA tracking work — see
+    # the project's dynamic_hosts docs). Chosen deliberately anyway since
+    # this VIP only needs to be reachable on the LAN, same as the v4 one.
+    keepalive_vip6: 2605:4a80:b004:b120::230
 
   tasks:
     - name: Install dnsmasq, keepalived, and dependencies
@@ -75,6 +81,38 @@
             # README's High Availability UI Deployment section.
             track_process {
               CHECK_DNSMASQ
+            }
+          }
+
+          # A single vrrp_instance can't carry both an IPv4 and IPv6
+          # virtual_ipaddress — VRRPv2 (IPv4 adverts) and VRRPv3 (IPv6
+          # adverts) are different protocols, so IPv6 needs its own
+          # instance with its own virtual_router_id, kept in lockstep with
+          # DNS_VIP via the vrrp_sync_group below (so both VIPs move
+          # together on any failover, including a dnsmasq crash detected
+          # via DNS_VIP's track_process).
+          vrrp_instance DNS_VIP6 {
+            state {% if inventory_hostname == 'dns01' %}MASTER{% else %}BACKUP{% endif %}
+
+            interface eth0
+            virtual_router_id 52
+            priority {{ keepalived_priority }}
+            advert_int 1
+
+            virtual_ipaddress {
+              # VRRPv3 IPv6 adverts should be sourced from a link-local
+              # address; without one listed first, keepalived falls back
+              # to the interface's own link-local and just logs a
+              # warning. Listing one explicitly avoids the warning.
+              fe80::230/64
+              {{ keepalive_vip6 }}/64
+            }
+          }
+
+          vrrp_sync_group DNS_HA {
+            group {
+              DNS_VIP
+              DNS_VIP6
             }
           }
         dest: /etc/keepalived/keepalived.conf
