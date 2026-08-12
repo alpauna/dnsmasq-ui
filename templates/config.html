@@ -1833,7 +1833,7 @@
                                 <p><strong>Zone:</strong> ${h.zone}</p>
                                 <p><strong>Type:</strong> ${h.record_type}</p>
                                 ${trackingNote}
-                                <p><strong>Current value:</strong> ${h.last_value || 'unknown'}</p>
+                                <p><strong>Current value:</strong> <span>${h.last_value || 'unknown'}</span>${h.last_value ? `<button class="copy-btn" onclick="copyToClipboard(this.previousElementSibling)">Copy</button>` : ''}</p>
                                 <p><strong>Last checked:</strong> ${lastChecked}</p>
                                 <p><strong>Last updated:</strong> ${lastUpdated}</p>
                                 <div style="margin-top: 10px; display: flex; gap: 8px;">
