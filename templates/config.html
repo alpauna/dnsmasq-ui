@@ -1891,6 +1891,7 @@
                                     <p><strong>Last updated:</strong> ${lastUpdated}</p>
                                     <div style="margin-top: 10px; display: flex; gap: 8px;">
                                         <button class="btn btn-secondary btn-sm" onclick="editDynamicHost('${h.domain}')">Edit</button>
+                                        <button class="btn btn-secondary btn-sm" onclick="duplicateDynamicHost('${h.domain}')">Duplicate</button>
                                         <button class="btn btn-secondary btn-sm" onclick="toggleDynamicHost('${h.domain}', ${!h.enabled})">${h.enabled ? 'Disable' : 'Enable'}</button>
                                         <button class="btn btn-secondary btn-sm" onclick="deleteDynamicHost('${h.domain}')">Remove</button>
                                     </div>
@@ -2204,20 +2205,11 @@
                 });
         }
 
-        function editDynamicHost(domain) {
-            const entry = cachedDynamicHosts.find(h => h.domain === domain);
-            if (!entry) return;
-
-            editingDynamicHostDomain = domain;
-
+        function fillDynamicHostForm(entry) {
             document.getElementById('dh-zone').value = entry.zone || '';
             document.getElementById('dh-domain').value = entry.domain || '';
-            document.getElementById('dh-domain').disabled = true;
-            document.getElementById('dh-zone').disabled = true;
             document.getElementById('dh-record-type').value = entry.record_type || 'AAAA';
-            document.getElementById('dh-record-type').disabled = true;
             document.getElementById('dh-tracking-method').value = entry.subnet ? 'subnet' : 'direct';
-            document.getElementById('dh-tracking-method').disabled = true;
             document.getElementById('dh-subnet').value = entry.subnet || '';
             document.getElementById('dh-mac-address').value = entry.mac_address || '';
             document.getElementById('dh-ipv6-host').value = entry.ipv6_host || '';
@@ -2253,6 +2245,20 @@
                 details.open = true;
             }
 
+            document.getElementById('dynamic-host-form').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function editDynamicHost(domain) {
+            const entry = cachedDynamicHosts.find(h => h.domain === domain);
+            if (!entry) return;
+
+            editingDynamicHostDomain = domain;
+            fillDynamicHostForm(entry);
+            document.getElementById('dh-domain').disabled = true;
+            document.getElementById('dh-zone').disabled = true;
+            document.getElementById('dh-record-type').disabled = true;
+            document.getElementById('dh-tracking-method').disabled = true;
+
             const submitBtn = document.querySelector('#dynamic-host-form button[type="submit"]');
             submitBtn.innerHTML = 'Save Changes';
             if (!document.getElementById('dh-cancel-edit')) {
@@ -2265,8 +2271,33 @@
                 cancelBtn.onclick = cancelEditDynamicHost;
                 submitBtn.insertAdjacentElement('afterend', cancelBtn);
             }
+        }
 
-            document.getElementById('dynamic-host-form').scrollIntoView({ behavior: 'smooth' });
+        function duplicateDynamicHost(domain) {
+            const entry = cachedDynamicHosts.find(h => h.domain === domain);
+            if (!entry) return;
+
+            // Not an edit -- editingDynamicHostDomain stays null so
+            // submitting this POSTs a new entry rather than PUTing the
+            // source one. Every field (including domain) starts copied
+            // from the source and stays editable, since the only thing
+            // that *must* change is the domain (it has to be unique) --
+            // "only make needed changes" instead of retyping everything.
+            editingDynamicHostDomain = null;
+            fillDynamicHostForm(entry);
+            document.getElementById('dh-domain').disabled = false;
+            document.getElementById('dh-zone').disabled = false;
+            document.getElementById('dh-record-type').disabled = false;
+            document.getElementById('dh-tracking-method').disabled = false;
+
+            const submitBtn = document.querySelector('#dynamic-host-form button[type="submit"]');
+            submitBtn.innerHTML = 'Track Host';
+            const cancelBtn = document.getElementById('dh-cancel-edit');
+            if (cancelBtn) cancelBtn.remove();
+
+            const domainField = document.getElementById('dh-domain');
+            domainField.focus();
+            domainField.select();
         }
 
         function cancelEditDynamicHost() {
