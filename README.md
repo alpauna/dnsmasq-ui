@@ -529,6 +529,34 @@ that behavior to every record:
 - Manage tracked hosts from the **Configuration** page in the dashboard, or
   via the [API](#dynamic-dns-tracking-1) directly.
 
+#### Self-tracking: the DNS servers' own AAAA records
+
+The same mechanism also keeps `dns01`/`dns02`/`dns03`.ad.alshowto.com's own
+AAAA records current, rather than needing a manual edit (like the ones
+made directly) whenever RA/SLAAC renews with a different address:
+
+```json
+{
+  "domain": "dns01.ad.alshowto.com",
+  "zone": "ad.alshowto.com",
+  "record_type": "AAAA",
+  "target_host": "192.168.0.231",
+  "interface": "eth0",
+  "detect_command": "ip -6 -o addr show eth0 scope global dynamic",
+  "detect_regex": "inet6 ([0-9a-fA-F:]+)/"
+}
+```
+
+This overrides the connection type's default detect command
+(`ip -6 addr show | head -1`) rather than using it as-is — on whichever
+node currently holds the IPv6 VIP, that default would pick up the *VIP's*
+address first (both it and the node's real address show up as
+`scope global` on the same interface) instead of the node's own. Filtering
+for the `dynamic` flag — present only on the real RA/SLAAC-assigned
+address, not the keepalived-assigned VIP — picks the right one regardless
+of which node is currently active. Same signal the [IPv6 VIP drift
+check](#monitoring) already relies on for the same reason.
+
 #### Advanced: Non-Linux Devices (Switches, Routers)
 
 The basic example above assumes a Linux host with `ip addr` — fine for
