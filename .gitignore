@@ -48,6 +48,7 @@ device-credentials.json.bak
 auth.json
 auth.json.bak
 smtp.env
+proxmox.env
 
 # Logs
 *.log

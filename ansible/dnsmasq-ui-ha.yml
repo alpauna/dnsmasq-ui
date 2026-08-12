@@ -176,6 +176,7 @@
         - auth.json
         - device-credentials.json
         - smtp.env
+        - proxmox.env
       loop_control:
         loop_var: state_file
         label: "{{ state_file }}"

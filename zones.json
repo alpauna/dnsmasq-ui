@@ -371,7 +371,11 @@
       "enabled": true,
       "last_checked": null,
       "last_value": null,
-      "last_updated": null
+      "last_updated": null,
+      "proxmox_update": {
+        "node": "pve01",
+        "iface": "vlan7"
+      }
     }
   ]
 }

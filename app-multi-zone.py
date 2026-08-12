@@ -33,6 +33,7 @@ import re
 import secrets
 import threading
 import time
+import shlex
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -94,6 +95,21 @@ SMTP_FROM = os.getenv('SMTP_FROM', SMTP_USER)
 # Used to build links in emails sent from background contexts (e.g. the
 # poller) that have no active Flask request to infer a URL from.
 DASHBOARD_URL = os.getenv('DASHBOARD_URL', 'http://192.168.0.233:5000')
+
+# Proxmox VE nodes — used to push a static IPv6 address onto a
+# hypervisor's own interface when the subnet it's on drifts (see
+# ipv6_host / update_proxmox_interface_v6). Auth is plain root SSH
+# (reuses SSH_KEY) rather than the API token in .env, which only has
+# Sys.Audit (read), not Sys.Modify — confirmed the hard way. Node names
+# map to IPs via two parallel ';'-separated lists (matches .env's
+# existing PROXMOX_NODES/PROXMOX_IPS convention for the builder-VM
+# scripts) rather than one raw IP, so a node stays correct if it's ever
+# readdressed.
+PROXMOX_SSH_USER = os.getenv('PROXMOX_SSH_USER', 'root')
+PROXMOX_NODE_IPS = dict(zip(
+    (n.strip() for n in os.getenv('PROXMOX_NODES', '').split(';') if n.strip()),
+    (i.strip() for i in os.getenv('PROXMOX_IPS', '').split(';') if i.strip())
+))
 
 # Reverse proxy configuration
 PROXY_PATH_PREFIX = os.getenv('PROXY_PATH_PREFIX', '')  # e.g., '/dnsmasq-ui' for http://proxy/dnsmasq-ui/
@@ -524,12 +540,14 @@ class ZoneManager:
         self._sync_peer_state()
 
     def _sync_peer_state(self):
-        """Push zones.json/auth.json/device-credentials.json/smtp.env to the
-        other dnsmasq-ui instances (the other DNS servers, in an HA
-        deployment) so a keepalived failover doesn't hand off to a peer with
-        stale config, a different session-signing secret, or a differently
-        keyed vault. Best-effort and synchronous — a briefly-unreachable
-        peer logs an error but doesn't block the save that triggered this."""
+        """Push zones.json/auth.json/device-credentials.json/smtp.env/
+        proxmox.env to the other dnsmasq-ui instances (the other DNS
+        servers, in an HA deployment) so a keepalived failover doesn't
+        hand off to a peer with stale config, a different session-signing
+        secret, a differently keyed vault, or (for proxmox.env) no
+        PROXMOX_NODES/IPS to auto-push a drifted address with. Best-effort
+        and synchronous — a briefly-unreachable peer logs an error but
+        doesn't block the save that triggered this."""
         local_ips = _get_local_ips()
         if not local_ips:
             # Can't reliably tell "myself" apart from a peer right now —
@@ -546,6 +564,7 @@ class ZoneManager:
             (AUTH_FILE, 'auth.json', 0o600),
             (DEVICE_CREDENTIALS_FILE, 'device-credentials.json', 0o600),
             (os.path.join(zones_dir, 'smtp.env'), 'smtp.env', 0o600),
+            (os.path.join(zones_dir, 'proxmox.env'), 'proxmox.env', 0o600),
         ]
 
         for server_name, server_info in self.get_servers().items():
@@ -947,6 +966,195 @@ class ZoneManager:
         except Exception as e:
             return False, str(e)
 
+    def _run_proxmox_ssh_command(self, node, command, timeout=30):
+        """Run a command over SSH on a Proxmox VE node as PROXMOX_SSH_USER
+        (default root — pvesh needs it, and there's no sudo layer to go
+        through the way _run_remote_root_command uses on the dnsmasq
+        servers). node is a name from PROXMOX_NODE_IPS, not a raw IP."""
+        host = PROXMOX_NODE_IPS.get(node)
+        if not host:
+            return False, f"Unknown Proxmox node '{node}' — not in PROXMOX_NODES/PROXMOX_IPS"
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(host, username=PROXMOX_SSH_USER, key_filename=SSH_KEY, timeout=10)
+            stdin, stdout, stderr = ssh.exec_command(command, timeout=timeout)
+            exit_status = stdout.channel.recv_exit_status()
+            out = stdout.read().decode()
+            err = stderr.read().decode()
+            ssh.close()
+            if exit_status != 0:
+                return False, err or out or f"exited {exit_status}"
+            return True, out
+        except Exception as e:
+            return False, str(e)
+
+    def get_proxmox_interface(self, node, iface):
+        """Fetch a Proxmox VE node's network interface config via pvesh
+        (over SSH, see _run_proxmox_ssh_command). Raises RuntimeError on
+        failure rather than returning a (success, ...) tuple, since every
+        caller needs the parsed dict or nothing useful to do."""
+        ok, output = self._run_proxmox_ssh_command(
+            node, f"pvesh get /nodes/{node}/network/{iface} --output-format json")
+        if not ok:
+            raise RuntimeError(f"pvesh get failed for {node}/{iface}: {output}")
+        return json.loads(output)
+
+    # Fields safe to round-trip through `pvesh set` for a type=vlan
+    # interface, i.e. everything a plain tagged VLAN sub-interface can
+    # actually have. Deliberately excludes bond/bridge/OVS-specific
+    # fields (bridge_ports, ovs_*, slaves, etc.) this hasn't been
+    # validated against — update_proxmox_interface_v6 refuses any
+    # interface whose type isn't 'vlan' rather than guessing.
+    # cidr/cidr6 (combined address+mask) rather than separate
+    # address+netmask pairs — GET returns netmask as a bare prefix
+    # length ("24"), but `pvesh set --netmask` wants dotted-quad
+    # notation instead, confirmed the hard way. cidr/cidr6 avoid the
+    # mismatch entirely and Proxmox derives address/netmask (and
+    # address6/netmask6) from them automatically.
+    _PVESH_VLAN_FIELDS = ('cidr', 'gateway', 'cidr6', 'gateway6', 'mtu', 'autostart',
+                           'comments', 'comments6', 'vlan-id', 'vlan-raw-device')
+
+    def update_proxmox_interface_v6(self, node, iface, address6, apply=True):
+        """Push a new static IPv6 address onto a Proxmox VE node's own
+        VLAN interface (e.g. pve01's vlan7 mgmt-subnet presence) — the
+        device-side counterpart to a dynamic_hosts entry's ipv6_host,
+        for when poll_subnets() detects the underlying subnet's prefix
+        has actually drifted (see _propagate_subnet_prefix_change).
+
+        Proxmox's network API is a full replace, not a merge — confirmed
+        directly against pve01: sending only address6/netmask6/gateway6
+        silently dropped the interface's entire IPv4 side from the
+        pending config (families went from ["inet","inet6"] down to
+        ["inet6"]). So this always re-fetches the interface's current
+        full config and resends every field unchanged except cidr6 (which
+        Proxmox derives address6/netmask6 from), rather than a scoped
+        update. Scoped to type=vlan interfaces only (see
+        _PVESH_VLAN_FIELDS).
+
+        After staging the change, re-fetches and diffs against what was
+        expected — if anything besides cidr6/address6 differs, reverts
+        (`pvesh delete .../network`, which discards all pending changes)
+        and returns failure instead of applying. apply=False stops after
+        that verification, leaving the change staged-but-not-applied
+        (visible in the Proxmox UI's pending-changes banner) rather than
+        running `ifreload -a` — useful to test without ever touching
+        live networking.
+
+        Returns (success, message).
+        """
+        try:
+            current = self.get_proxmox_interface(node, iface)
+        except Exception as e:
+            return False, f"Failed to read current config for {node}/{iface}: {e}"
+
+        if current.get('type') != 'vlan':
+            return False, (f"{node}/{iface} is type={current.get('type')!r}, not 'vlan' — "
+                            "refusing (field mapping only validated for vlan interfaces)")
+
+        try:
+            new_addr = ipaddress.IPv6Address(address6)
+        except ValueError:
+            return False, f"'{address6}' is not a valid IPv6 address"
+
+        if 'netmask6' not in current:
+            return False, f"{node}/{iface} has no existing netmask6 — refusing to guess one"
+        new_cidr6 = f"{new_addr}/{current['netmask6']}"
+
+        fields = {k: current[k] for k in self._PVESH_VLAN_FIELDS
+                  if current.get(k) is not None}
+        fields['cidr6'] = new_cidr6
+
+        cmd = ["pvesh", "set", f"/nodes/{node}/network/{iface}", "--type", "vlan"]
+        for k, v in fields.items():
+            if isinstance(v, bool):
+                v = 1 if v else 0
+            cmd += [f"--{k}", shlex.quote(str(v))]
+        ok, output = self._run_proxmox_ssh_command(node, " ".join(cmd))
+        if not ok:
+            return False, f"pvesh set failed for {node}/{iface}: {output}"
+
+        try:
+            pending = self.get_proxmox_interface(node, iface)
+        except Exception as e:
+            self._run_proxmox_ssh_command(node, f"pvesh delete /nodes/{node}/network")
+            return False, f"Failed to verify pending change for {node}/{iface}, reverted: {e}"
+
+        expected = dict(current)
+        expected['cidr6'] = new_cidr6
+        expected['address6'] = str(new_addr)
+        ignore = ('active', 'exists', 'priority', 'families', 'method', 'method6')
+        unexpected_diff = {k: (expected.get(k), pending.get(k))
+                            for k in set(expected) | set(pending)
+                            if k not in ignore and expected.get(k) != pending.get(k)}
+        if unexpected_diff:
+            self._run_proxmox_ssh_command(node, f"pvesh delete /nodes/{node}/network")
+            return False, f"Pending change for {node}/{iface} didn't match expectations, reverted: {unexpected_diff}"
+
+        if not apply:
+            return True, f"{node}/{iface} staged to {new_addr} (pending, not applied)"
+
+        ok, output = self._run_proxmox_ssh_command(node, f"pvesh set /nodes/{node}/network")
+        if not ok:
+            return False, f"pvesh apply failed for {node}/{iface} (still pending, not reverted): {output}"
+        return True, f"{node}/{iface} updated to {new_addr} and applied"
+
+    def _notify_proxmox_auto_update(self, entry, node, iface, address6, success, message):
+        """Email a heads-up whenever a subnet prefix change triggers an
+        auto-push to a Proxmox node's interface — success or failure,
+        since even a successful unattended change to hypervisor
+        networking is worth knowing about, same reasoning as the IPv6
+        VIP drift notice."""
+        auth_config = _load_auth() or {}
+        to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+        if not to_addr:
+            logger.error(f"Proxmox auto-update for {entry['domain']} ({node}/{iface}) "
+                         f"{'succeeded' if success else 'FAILED'}: {message} — no notification "
+                         "email configured (enable email 2FA to set one)")
+            return
+        status = 'succeeded' if success else 'FAILED'
+        _send_email(
+            to_addr, f"dnsmasq-ui: Proxmox auto-update {status} ({node}/{iface})",
+            f"The '{entry.get('subnet')}' subnet's live IPv6 prefix changed, so dnsmasq-ui "
+            f"tried to push a matching static address to {node}'s {iface} interface for "
+            f"{entry['domain']}.\n\n"
+            f"Target address: {address6}\n"
+            f"Result: {status}\n"
+            f"Detail: {message}\n\n"
+            + ("" if success else
+               f"No changes were left applied — either nothing was staged, or a staged "
+               f"change didn't match expectations and was reverted. {node}'s networking "
+               f"was not touched.\n\n") +
+            f"Dashboard: {DASHBOARD_URL}/config"
+        )
+
+    def _propagate_subnet_prefix_change(self, subnet_name, old_prefix, new_prefix):
+        """When poll_subnets() finds a subnet's live prefix has actually
+        changed (not just been detected for the first time), push
+        updated addresses to any dynamic_hosts entries on it that use a
+        manually-assigned ipv6_host (not SLAAC) and have proxmox_update
+        configured — see update_proxmox_interface_v6. Logs/emails and
+        continues past failures so one bad push doesn't block others."""
+        logger.warning(f"Subnet '{subnet_name}' prefix changed: {old_prefix} -> {new_prefix}")
+        for entry in self.config.get('dynamic_hosts', []):
+            if entry.get('subnet') != subnet_name or entry.get('ipv6_host') is None:
+                continue
+            proxmox = entry.get('proxmox_update')
+            if not proxmox:
+                continue
+            try:
+                new_addr = _ipv6_from_prefix_and_host(ipaddress.ip_network(new_prefix), entry['ipv6_host'])
+            except ValueError as e:
+                logger.error(f"Failed computing new Proxmox address for {entry['domain']}: {e}")
+                continue
+            success, message = self.update_proxmox_interface_v6(
+                proxmox['node'], proxmox['iface'], str(new_addr))
+            logger.warning(f"Proxmox auto-update for {entry['domain']} "
+                          f"({proxmox['node']}/{proxmox['iface']}): "
+                          f"{'OK' if success else 'FAILED'} — {message}")
+            self._notify_proxmox_auto_update(entry, proxmox['node'], proxmox['iface'],
+                                              str(new_addr), success, message)
+
     def _build_vlan_netplan(self, vlan_id, ipv4_mode, ipv4_address, ipv6_mode, ipv6_address):
         """Netplan v2 YAML for a single VLAN sub-interface. ipv4_mode:
         'none'|'dhcp'|'static'. ipv6_mode: 'none'|'slaac'|'static'.
@@ -1117,6 +1325,7 @@ class ZoneManager:
                           enable_password_ref=None, logout_command='exit',
                           ssh_password_ref=None, detect_url=None, login_url=None,
                           subnet=None, mac_address=None, ipv4_host=None, ipv6_host=None,
+                          proxmox_update=None,
                           login_fields=None, login_password_field=None,
                           login_password_transform='none', login_password_ref=None,
                           session_param_regex=None, session_param_name='session_id',
@@ -1178,10 +1387,16 @@ class ZoneManager:
         prefix; unlike a MAC-derived address, the device's own static
         interface config doesn't auto-follow the prefix and needs updating
         by hand (or via Ansible) if it ever rotates — same class of
-        follow-up as the IPv6 VIP drift monitoring. ipv4_host is an
-        explicit host number for A. Mutually exclusive with target_host/
-        connection/detect_command/etc — this bypasses per-device polling
-        entirely.
+        follow-up as the IPv6 VIP drift monitoring, UNLESS proxmox_update
+        is also set: {"node": "pve01", "iface": "vlan7"}, a Proxmox VE
+        node name (from PROXMOX_NODE_IPS) and one of its own type=vlan
+        interfaces. When set, a detected prefix change on this entry's
+        subnet also pushes the recomputed address to that interface via
+        the Proxmox API (see update_proxmox_interface_v6) instead of only
+        fixing DNS — only meaningful alongside ipv6_host, ignored
+        otherwise. ipv4_host is an explicit host number for A. Mutually
+        exclusive with target_host/connection/detect_command/etc — this
+        bypasses per-device polling entirely.
         """
         if not self.get_zone(zone_name):
             return False, "Zone not found"
@@ -1205,6 +1420,13 @@ class ZoneManager:
                         return False, f"ipv6_host '{ipv6_host}' is not a valid IPv6 address/suffix"
             if record_type == 'A' and ipv4_host is None:
                 return False, "ipv4_host is required for A subnet tracking"
+            if proxmox_update is not None:
+                if ipv6_host is None:
+                    return False, "proxmox_update only applies alongside ipv6_host"
+                if not isinstance(proxmox_update, dict) or not proxmox_update.get('node') or not proxmox_update.get('iface'):
+                    return False, "proxmox_update must be an object with 'node' and 'iface'"
+                if proxmox_update['node'] not in PROXMOX_NODE_IPS:
+                    return False, f"Unknown Proxmox node '{proxmox_update['node']}' — not in PROXMOX_NODES/PROXMOX_IPS"
             self.config['dynamic_hosts'].append({
                 'domain': domain,
                 'zone': zone_name,
@@ -1213,6 +1435,7 @@ class ZoneManager:
                 'mac_address': mac_address,
                 'ipv4_host': ipv4_host,
                 'ipv6_host': ipv6_host,
+                'proxmox_update': proxmox_update,
                 'enabled': enabled,
                 'last_checked': None,
                 'last_value': None,
@@ -1265,7 +1488,7 @@ class ZoneManager:
                    'logout_command', 'ssh_password_ref', 'detect_url', 'login_url',
                    'login_fields', 'login_password_field', 'login_password_transform',
                    'login_password_ref', 'session_param_regex', 'session_param_name',
-                   'verify_tls', 'subnet', 'mac_address', 'ipv4_host', 'ipv6_host')
+                   'verify_tls', 'subnet', 'mac_address', 'ipv4_host', 'ipv6_host', 'proxmox_update')
         for entry in self.config['dynamic_hosts']:
             if entry['domain'] == domain:
                 entry.update({k: v for k, v in fields.items() if k in allowed})
@@ -1869,10 +2092,15 @@ expect eof
             if not match:
                 logger.error(f"Subnet '{name}': no dynamic global IPv6 address found on {ip}")
                 continue
+            old_prefix = subnet.get('prefix_v6')
             try:
-                subnet['prefix_v6'] = str(ipaddress.ip_interface(f"{match.group(1)}/64").network)
+                new_prefix = str(ipaddress.ip_interface(f"{match.group(1)}/64").network)
             except ValueError:
                 logger.error(f"Subnet '{name}': '{match.group(1)}' is not a valid address")
+                continue
+            subnet['prefix_v6'] = new_prefix
+            if old_prefix and new_prefix != old_prefix:
+                self._propagate_subnet_prefix_change(name, old_prefix, new_prefix)
 
     def _detect_subnet_member_address(self, entry):
         """Compute a subnet-tracked device's current address from its
@@ -2810,7 +3038,8 @@ def api_dynamic_hosts_add():
         subnet=data.get('subnet'),
         mac_address=data.get('mac_address'),
         ipv4_host=data.get('ipv4_host'),
-        ipv6_host=data.get('ipv6_host')
+        ipv6_host=data.get('ipv6_host'),
+        proxmox_update=data.get('proxmox_update')
     )
     return jsonify({'success': success, 'message': message})
 

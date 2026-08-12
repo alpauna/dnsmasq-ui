@@ -615,8 +615,8 @@ VIP](#ipv6-vip) itself (`2605:4a80:b004:b120::230` — prefix plus a chosen
 
 ```json
 {
-  "domain": "pve01.ad.alshowto.com",
-  "zone": "ad.alshowto.com",
+  "domain": "pve01.mgmt.alshowto.com",
+  "zone": "mgmt.alshowto.com",
   "record_type": "AAAA",
   "subnet": "mgmt",
   "ipv6_host": "::11"
@@ -626,15 +626,66 @@ VIP](#ipv6-vip) itself (`2605:4a80:b004:b120::230` — prefix plus a chosen
 `prefix | ipv6_host` → `2605:4a80:b009:c100::11`. A subnet-tracked AAAA
 entry needs exactly one of `mac_address` or `ipv6_host` — not both.
 
-The catch: this only keeps the *DNS record* in sync when
+The catch: on its own, this only keeps the *DNS record* in sync when
 `poll_subnets()` detects the delegated prefix has changed. Unlike a
 MAC-derived address, the device's own static interface configuration
 doesn't auto-follow the prefix — if the ISP/router ever rotates it,
-`pve01`'s actual interface still needs to be updated by hand (or via
-Ansible) to `<new-prefix>::11` separately, or DNS and the device's real
-address go out of sync. This is the same class of manual follow-up as the
-[IPv6 VIP drift monitoring](#monitoring) already requires — no
-auto-remediation, just automatic detection of one side of it.
+`pve01`'s actual interface still needs to be updated separately, or DNS
+and the device's real address go out of sync. This is the same class of
+manual follow-up as the [IPv6 VIP drift monitoring](#monitoring) already
+requires — unless `proxmox_update` closes that gap too (below).
+
+#### Closing the loop: auto-pushing to a Proxmox VE node (proxmox_update)
+
+For a Proxmox VE hypervisor specifically, the manual step above can be
+automated. Add `proxmox_update` alongside `ipv6_host`:
+
+```json
+{
+  "domain": "pve01.mgmt.alshowto.com",
+  "zone": "mgmt.alshowto.com",
+  "record_type": "AAAA",
+  "subnet": "mgmt",
+  "ipv6_host": "::11",
+  "proxmox_update": { "node": "pve01", "iface": "vlan7" }
+}
+```
+
+When `poll_subnets()` detects the subnet's prefix has actually *changed*
+(not just been read for the first time), every entry on that subnet with
+both `ipv6_host` and `proxmox_update` set gets its recomputed address
+pushed straight to the named Proxmox node's own interface via
+[`pvesh`](https://pve.proxmox.com/pve-docs/pvesh.1.html) over SSH (as
+`PROXMOX_SSH_USER`, default `root` — the API token in `.env` only has
+read access, `Sys.Audit`, not `Sys.Modify`, confirmed directly against a
+real node). `node` must be a name from `PROXMOX_NODES`/`PROXMOX_IPS`
+(semicolon-separated, matching the existing `.env` convention), and
+`iface` must be a `type=vlan` interface on it — bond/bridge/OVS
+interfaces aren't supported, since their field sets haven't been
+validated.
+
+**This turned out to have a real footgun worth knowing about if you're
+extending it**: Proxmox's network API is a full replace, not a merge — a
+request containing only the IPv6 fields silently drops the interface's
+entire IPv4 configuration from the pending change (confirmed directly:
+`families` went from `["inet","inet6"]` down to `["inet6"]`, IPv4
+address/gateway/method just gone). So every push re-fetches the
+interface's complete current config first and resends every field
+unchanged except the new `cidr6`, rather than a scoped update
+(`cidr`/`cidr6` combined-form fields are used throughout rather than
+separate address+netmask pairs — `pvesh`'s `--netmask` wants dotted-quad
+notation while `GET` returns a bare prefix length, another mismatch
+worth avoiding). After staging, the pending interface config is
+re-fetched and diffed against what was expected; if anything besides
+`cidr6`/`address6` differs, the whole pending change is reverted
+(`pvesh delete /nodes/<node>/network`, which discards it) instead of
+being applied — a bad automated push should fail loud and leave the
+hypervisor's networking exactly as it was, not half-changed.
+
+An email notification is sent either way (success or failure) to the
+address configured for email 2FA, same as the IPv6 VIP drift notice —
+even a successful unattended change to hypervisor networking is worth
+knowing about.
 
 Verified against production: recomputing all six LAN devices' addresses
 this way matched their existing DNS records exactly, using a single SSH
@@ -840,6 +891,11 @@ export WG_KEYS_FILE=wireguard-keys.json                # Private keys file (giti
 # Dynamic DNS Tracking
 export DYNAMIC_POLL_INTERVAL=300                        # Seconds between dynamic_hosts checks
 export DASHBOARD_URL=http://192.168.0.233:5000          # Used in links for emails sent from background contexts
+
+# Proxmox VE auto-update (see proxmox_update, VLAN Sub-Interfaces)
+export PROXMOX_SSH_USER=root                            # SSH user for pvesh commands, not the DNS-server SSH_USER
+export PROXMOX_NODES='pve01;pve04;pve06;pve3'           # ';'-separated node names, paired positionally with PROXMOX_IPS
+export PROXMOX_IPS='192.168.7.11;192.168.7.14;192.168.7.16;192.168.7.13'
 
 # Reverse Proxy Support
 export PROXY_PATH_PREFIX=/dnsmasq-ui                    # URL path prefix (optional)
@@ -1467,6 +1523,7 @@ unless overridden via their respective environment variables:
 | Device-credential vault | `/opt/dnsmasq-ui/device-credentials.json` | `0600`, gitignored, encrypted at rest |
 | WireGuard keys | `/opt/dnsmasq-ui/wireguard-keys.json` | `0600`, gitignored |
 | SMTP relay credentials (email 2FA) | `/opt/dnsmasq-ui/smtp.env` | `0600`, gitignored, loaded via systemd `EnvironmentFile=` — **not** read from the unit file itself, which is world-readable (`644`) by default |
+| Proxmox VE node list ([`proxmox_update`](#closing-the-loop-auto-pushing-to-a-proxmox-ve-node-proxmox_update)) | `/opt/dnsmasq-ui/proxmox.env` | Same pattern as `smtp.env` — `0600`, gitignored, `EnvironmentFile=`, peer-synced |
 | SSH private key | `~/.ssh/id_rsa` (e.g. `/home/debian/.ssh/id_rsa`) | outside the app directory entirely |
 | Deployed dnsmasq config | `/etc/dnsmasq.d/local-records.conf` | on each DNS server, not the dashboard host |
 
