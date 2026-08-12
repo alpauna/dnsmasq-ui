@@ -239,8 +239,8 @@
       "mgmt": {
         "cidr_v4": "192.168.7.0/24",
         "prefix_v6": null,
-        "primary_dns": null,
-        "interface": "eth0"
+        "primary_dns": "dns01",
+        "interface": "eth0.7"
       }
     }
   },
@@ -271,31 +271,12 @@
       "domain": "wifi.mgmt.alshowto.com",
       "zone": "mgmt.alshowto.com",
       "record_type": "AAAA",
-      "target_host": "192.168.7.21",
-      "interface": "eth0",
-      "ssh_user": null,
+      "subnet": "mgmt",
+      "mac_address": "80:69:1a:02:49:36",
       "enabled": true,
       "last_checked": "2026-08-12T02:19:14.504403",
       "last_value": "2605:4a80:b009:c100:8269:1aff:fe02:4936",
-      "last_updated": null,
-      "connection": "http",
-      "detect_url": "http://192.168.7.21/index.asp",
-      "login_url": "http://192.168.7.21/login.cgi",
-      "login_fields": {
-        "submit_button": "login",
-        "change_action": "",
-        "action": "Apply",
-        "wait_time": "19",
-        "submit_type": "",
-        "http_username": "admin"
-      },
-      "login_password_field": "http_passwd",
-      "login_password_transform": "linksys_md5",
-      "login_password_ref": "wifi-mgmt-login",
-      "session_param_regex": "session_id=([a-f0-9]+)",
-      "session_param_name": "session_id",
-      "verify_tls": true,
-      "detect_regex": "var ipv6_info_buf = '([0-9a-fA-F:]+)/"
+      "last_updated": null
     },
     {
       "domain": "10g-sw02.ad.alshowto.com",

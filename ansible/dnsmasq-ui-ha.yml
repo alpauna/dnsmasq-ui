@@ -46,6 +46,19 @@
     # domain root — dnsmasq.alshowto.com currently serves at root, so this
     # is unused today.
     proxy_path_prefix: ""
+    # Subnet "presence" for a DNS server that otherwise only sits on the
+    # LAN: a persistent VLAN sub-interface (netplan), so it gets a real
+    # IPv4/IPv6 (SLAAC) address on another subnet without another
+    # physical/virtual NIC -- the Proxmox bridge these VMs sit on is
+    # already VLAN-aware (trunk mode), so this is the guest-OS-level
+    # equivalent of adding a tagged NIC in the Proxmox UI, just scriptable
+    # from here instead of a console trip per subnet. Add an entry per
+    # host that needs one; wire the matching subnet's `interface` field
+    # in zones.json separately (see README) so poll_subnets() picks it up.
+    vlan_presence:
+      dns01:
+        - vlan_id: 7
+          name: mgmt
 
   tasks:
     - name: Install system packages
@@ -202,9 +215,30 @@
         name: dnsmasq-ui
         state: started
 
+    - name: Create persistent VLAN sub-interfaces for subnet presence
+      copy:
+        content: |
+          network:
+            version: 2
+            vlans:
+              eth0.{{ item.vlan_id }}:
+                id: {{ item.vlan_id }}
+                link: eth0
+        dest: "/etc/netplan/90-presence-{{ item.name }}.yaml"
+        owner: root
+        group: root
+        mode: '0600'
+      loop: "{{ vlan_presence[inventory_hostname] | default([]) }}"
+      loop_control:
+        label: "{{ item.name }} (VLAN {{ item.vlan_id }})"
+      notify: apply netplan
+
   handlers:
     - name: reload and restart dnsmasq-ui
       systemd:
         name: dnsmasq-ui
         daemon_reload: yes
         state: restarted
+
+    - name: apply netplan
+      command: netplan apply
