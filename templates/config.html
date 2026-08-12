@@ -251,6 +251,39 @@
             margin-bottom: 5px;
         }
 
+        .host-summary {
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .host-summary:hover h4 {
+            color: #667eea;
+        }
+
+        .host-summary-chevron {
+            color: #999;
+            font-size: 11px;
+            transition: transform 0.15s ease;
+        }
+
+        .server-item.expanded .host-summary-chevron {
+            transform: rotate(90deg);
+        }
+
+        .host-details {
+            display: none;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .server-item.expanded .host-details {
+            display: block;
+        }
+
         .loading {
             display: inline-block;
             width: 16px;
@@ -1440,6 +1473,19 @@
         }
 
         let cachedDynamicHosts = [];
+        let expandedHostDomains = new Set();
+
+        function toggleHostExpanded(domain) {
+            const card = document.querySelector(`.server-item[data-domain="${CSS.escape(domain)}"]`);
+            if (!card) return;
+            if (expandedHostDomains.has(domain)) {
+                expandedHostDomains.delete(domain);
+                card.classList.remove('expanded');
+            } else {
+                expandedHostDomains.add(domain);
+                card.classList.add('expanded');
+            }
+        }
         let cachedSubnets = {};
         let cachedVlans = {}; // server_name -> [vlan, ...]
         let editingVlan = null; // { server, vlanId } | null
@@ -1828,18 +1874,25 @@
                                     ${detectNote}`;
                             }
 
-                            html += `<div class="server-item">
-                                <h4>${statusIcon} ${h.domain}</h4>
-                                <p><strong>Zone:</strong> ${h.zone}</p>
-                                <p><strong>Type:</strong> ${h.record_type}</p>
-                                ${trackingNote}
-                                <p><strong>Current value:</strong> <span>${h.last_value || 'unknown'}</span>${h.last_value ? `<button class="copy-btn" onclick="copyToClipboard(this.previousElementSibling)">Copy</button>` : ''}</p>
-                                <p><strong>Last checked:</strong> ${lastChecked}</p>
-                                <p><strong>Last updated:</strong> ${lastUpdated}</p>
-                                <div style="margin-top: 10px; display: flex; gap: 8px;">
-                                    <button class="btn btn-secondary btn-sm" onclick="editDynamicHost('${h.domain}')">Edit</button>
-                                    <button class="btn btn-secondary btn-sm" onclick="toggleDynamicHost('${h.domain}', ${!h.enabled})">${h.enabled ? 'Disable' : 'Enable'}</button>
-                                    <button class="btn btn-secondary btn-sm" onclick="deleteDynamicHost('${h.domain}')">Remove</button>
+                            const isExpanded = expandedHostDomains.has(h.domain);
+                            html += `<div class="server-item${isExpanded ? ' expanded' : ''}" data-domain="${h.domain}">
+                                <div class="host-summary" onclick="toggleHostExpanded('${h.domain}')">
+                                    <h4 style="margin-bottom: 0;">${statusIcon} ${h.domain}</h4>
+                                    <span style="font-size: 11px; color: #666; white-space: nowrap;">${h.last_value || 'unknown'}</span>
+                                    <span class="host-summary-chevron">▶</span>
+                                </div>
+                                <div class="host-details">
+                                    <p><strong>Zone:</strong> ${h.zone}</p>
+                                    <p><strong>Type:</strong> ${h.record_type}</p>
+                                    ${trackingNote}
+                                    <p><strong>Current value:</strong> <span>${h.last_value || 'unknown'}</span>${h.last_value ? `<button class="copy-btn" onclick="event.stopPropagation(); copyToClipboard(this.previousElementSibling)">Copy</button>` : ''}</p>
+                                    <p><strong>Last checked:</strong> ${lastChecked}</p>
+                                    <p><strong>Last updated:</strong> ${lastUpdated}</p>
+                                    <div style="margin-top: 10px; display: flex; gap: 8px;">
+                                        <button class="btn btn-secondary btn-sm" onclick="editDynamicHost('${h.domain}')">Edit</button>
+                                        <button class="btn btn-secondary btn-sm" onclick="toggleDynamicHost('${h.domain}', ${!h.enabled})">${h.enabled ? 'Disable' : 'Enable'}</button>
+                                        <button class="btn btn-secondary btn-sm" onclick="deleteDynamicHost('${h.domain}')">Remove</button>
+                                    </div>
                                 </div>
                             </div>`;
                         }
