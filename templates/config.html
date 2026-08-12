@@ -800,17 +800,17 @@
         </div>
 
         <div class="section">
-            <h2>Proxmox Auto-Update</h2>
+            <h2>Update Groups</h2>
             <div class="alert alert-info">
-                When a tracked subnet's live prefix changes, hosts with both <code>ipv6_host</code> and
-                <code>proxmox_update</code> configured get their new address pushed to the named Proxmox
-                node automatically, one node at a time with a commit-confirm safety net (an unconditional
-                self-revert timer on the node itself, cancelled only after the change is independently
-                confirmed reachable). Any failure halts the rest of that batch and locks out further
-                auto-updates until reviewed here.
+                A <strong>Group Update Plan</strong>: a declared set of HA members that must ALL converge
+                to a target state before the group counts as updated. Each group runs its members through
+                a named script (Proxmox VLAN presence today, e.g. <code>pve01</code> via
+                <code>proxmox_update</code>; other kinds of HA members later) one at a time with a
+                commit-confirm safety net. Any member failure halts the rest of that group immediately and
+                locks it — other groups are unaffected — until reviewed here.
             </div>
-            <div id="proxmox-lock-status">
-                <p style="padding: 20px;">Checking lock status...</p>
+            <div id="update-groups-status">
+                <p style="padding: 20px;">Loading update groups...</p>
             </div>
         </div>
 
@@ -1777,7 +1777,7 @@
         }
 
         function loadDynamicHosts() {
-            fetch('/api/dynamic-hosts')
+            return fetch('/api/dynamic-hosts')
                 .then(response => response.json())
                 .then(data => {
                     let html = '';
@@ -2268,35 +2268,68 @@
                 });
         }
 
-        function loadProxmoxLockStatus() {
-            fetch('/api/proxmox-lock')
+        function loadUpdateGroups() {
+            fetch('/api/update-groups')
                 .then(response => response.json())
-                .then(lock => {
-                    const el = document.getElementById('proxmox-lock-status');
-                    if (!lock.locked) {
-                        el.innerHTML = '<div class="alert alert-success">🟢 Unlocked — auto-updates run normally.</div>';
+                .then(data => {
+                    const groups = data.update_groups || {};
+                    const names = Object.keys(groups);
+                    const el = document.getElementById('update-groups-status');
+                    if (names.length === 0) {
+                        el.innerHTML = '<p style="padding: 20px;">No update groups declared.</p>';
                         return;
                     }
-                    el.innerHTML = `
-                        <div class="alert alert-error">
-                            🔒 <strong>LOCKED</strong> since ${lock.since ? new Date(lock.since).toLocaleString() : 'unknown'}
-                            (${lock.node || '?'}/${lock.iface || '?'})<br>
-                            <span style="font-size: 13px;">${lock.reason || 'No reason recorded'}</span>
-                        </div>
-                        <button class="btn btn-secondary" onclick="unlockProxmox()">Verify &amp; Unlock</button>
-                        <div id="proxmox-unlock-result" style="margin-top: 10px;"></div>`;
+                    el.innerHTML = names.map(name => {
+                        const g = groups[name];
+                        const lock = g.lock || { locked: false };
+                        const currentMembers = g.members || [];
+                        const members = currentMembers.map(m => `
+                            <li>${m}
+                                <button class="btn btn-secondary btn-sm" style="padding: 1px 8px; margin-left: 8px;"
+                                    onclick="removeGroupMember('${name}', '${m}')">Remove</button>
+                            </li>`).join('');
+                        const candidates = (cachedDynamicHosts || [])
+                            .map(h => h.domain)
+                            .filter(d => !currentMembers.includes(d));
+                        const addForm = candidates.length > 0 ? `
+                            <div style="margin-top: 10px;">
+                                <select id="group-add-select-${name}">
+                                    ${candidates.map(d => `<option value="${d}">${d}</option>`).join('')}
+                                </select>
+                                <button class="btn btn-secondary btn-sm" onclick="addGroupMember('${name}')">Add Member</button>
+                            </div>` : '<p style="font-size: 12px; color: #666;">No untracked-in-this-group hosts available to add.</p>';
+                        const statusBlock = !lock.locked
+                            ? '<div class="alert alert-success">🟢 Unlocked — auto-updates run normally.</div>'
+                            : `<div class="alert alert-error">
+                                   🔒 <strong>LOCKED</strong> since ${lock.since ? new Date(lock.since).toLocaleString() : 'unknown'}
+                                   (member: ${lock.member || '?'})<br>
+                                   <span style="font-size: 13px;">${lock.reason || 'No reason recorded'}</span>
+                               </div>
+                               <button class="btn btn-secondary" onclick="unlockGroup('${name}')">Verify &amp; Unlock</button>
+                               <div id="group-unlock-result-${name}" style="margin-top: 10px;"></div>`;
+                        return `
+                            <div class="server-item" style="margin-bottom: 15px;">
+                                <h4>${name}</h4>
+                                <p style="color: #666; font-size: 13px;">${g.description || ''} (script: ${g.script || '?'})</p>
+                                <p><strong>Members:</strong></p>
+                                <ul style="font-size: 13px;">${members}</ul>
+                                ${addForm}
+                                <div id="group-member-result-${name}" style="margin-top: 10px;"></div>
+                                ${statusBlock}
+                            </div>`;
+                    }).join('');
                 })
                 .catch(error => {
-                    console.error('Error loading Proxmox lock status:', error);
-                    document.getElementById('proxmox-lock-status').innerHTML =
-                        '<div class="alert alert-error">Error loading lock status</div>';
+                    console.error('Error loading update groups:', error);
+                    document.getElementById('update-groups-status').innerHTML =
+                        '<div class="alert alert-error">Error loading update groups</div>';
                 });
         }
 
-        function unlockProxmox() {
-            const resultEl = document.getElementById('proxmox-unlock-result');
-            resultEl.innerHTML = '<p>Re-verifying every configured interface\'s live state...</p>';
-            fetch('/api/proxmox-lock/unlock', { method: 'POST' })
+        function unlockGroup(name) {
+            const resultEl = document.getElementById(`group-unlock-result-${name}`);
+            resultEl.innerHTML = '<p>Re-verifying every member\'s live state...</p>';
+            fetch(`/api/update-groups/${encodeURIComponent(name)}/unlock`, { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
                     const details = (data.details || [])
@@ -2305,10 +2338,44 @@
                     resultEl.innerHTML = `
                         <div class="alert ${data.success ? 'alert-success' : 'alert-error'}">${data.message}</div>
                         <ul style="font-size: 13px;">${details}</ul>`;
-                    loadProxmoxLockStatus();
+                    loadUpdateGroups();
                 })
                 .catch(error => {
-                    console.error('Error unlocking Proxmox auto-update:', error);
+                    console.error('Error unlocking update group:', error);
+                    resultEl.innerHTML = '<div class="alert alert-error">Error contacting server</div>';
+                });
+        }
+
+        function addGroupMember(name) {
+            const domain = document.getElementById(`group-add-select-${name}`).value;
+            const resultEl = document.getElementById(`group-member-result-${name}`);
+            fetch(`/api/update-groups/${encodeURIComponent(name)}/members`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domain: domain })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    resultEl.innerHTML = `<div class="alert ${data.success ? 'alert-success' : 'alert-error'}">${data.message}</div>`;
+                    loadUpdateGroups();
+                })
+                .catch(error => {
+                    console.error('Error adding group member:', error);
+                    resultEl.innerHTML = '<div class="alert alert-error">Error contacting server</div>';
+                });
+        }
+
+        function removeGroupMember(name, domain) {
+            if (!confirm(`Remove '${domain}' from group '${name}'?`)) return;
+            const resultEl = document.getElementById(`group-member-result-${name}`);
+            fetch(`/api/update-groups/${encodeURIComponent(name)}/members/${encodeURIComponent(domain)}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(data => {
+                    resultEl.innerHTML = `<div class="alert ${data.success ? 'alert-success' : 'alert-error'}">${data.message}</div>`;
+                    loadUpdateGroups();
+                })
+                .catch(error => {
+                    console.error('Error removing group member:', error);
                     resultEl.innerHTML = '<div class="alert alert-error">Error contacting server</div>';
                 });
         }
@@ -2321,16 +2388,15 @@
         loadServersForSubnetForm();
         loadVlans();
         updateVlanFormVisibility();
-        loadSubnets().then(() => loadDynamicHosts());
+        loadSubnets().then(() => loadDynamicHosts()).then(() => loadUpdateGroups());
         loadZonesForDynamicForm();
         updateDynamicHostFormVisibility();
         loadDeviceCredentials();
-        loadProxmoxLockStatus();
         load2FAStatus();
         setInterval(loadServerStatus, 30000);
         setInterval(loadSubnets, 30000);
         setInterval(loadVlans, 30000);
-        setInterval(loadProxmoxLockStatus, 30000);
+        setInterval(loadUpdateGroups, 30000);
     </script>
 </body>
 </html>

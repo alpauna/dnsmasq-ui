@@ -21,7 +21,7 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 - **⚡ Single VIP**: Same keepalived VIP serves both DNS (port 53) and UI (port 5000)
 - **🔗 WireGuard Mesh**: Full-mesh encrypted network for secure cross-cluster DNS synchronization (v2.2+)
 - **🏷️ VLAN Sub-Interfaces**: Give a DNS server a real address on another subnet (via VLAN tag) without a second NIC, provisioned live from the Config page
-- **🛡️ Proxmox Commit-Confirm Auto-Update**: Auto-push a drifted subnet prefix to a Proxmox VE node's own interface with a self-reverting safety net, serialized one node at a time with a hard-stop-and-lock on any failure
+- **🛡️ Group Update Plans**: Pluggable, script-based HA group updates (Proxmox VE VLAN presence today) with a self-reverting commit-confirm safety net, serialized one member at a time with a hard-stop-and-lock on any failure
 
 ## Architecture
 
@@ -722,30 +722,77 @@ network gear uses for exactly this risk:
 
 `PROXMOX_COMMIT_TIMEOUT_SECONDS` (default `300`) controls the window.
 
-#### One node at a time, hard stop on failure, global lockout
+#### Group Update Plans: one node at a time, hard stop, per-group lockout
 
-When a subnet's prefix changes, every qualifying `proxmox_update` entry
-on it is processed **strictly one at a time, in order** — each must
-fully commit-confirm before the next is even attempted (there's no
-concurrency here to accidentally race, but the code is written to make
-that guarantee explicit rather than incidental). The first failure halts
-the entire batch immediately: every remaining node is left completely
-untouched, not skipped-and-continued, and a `global.proxmox_auto_update_lock`
-flag in `zones.json` engages, blocking **all** further `proxmox_update`
-pushes (DNS-side `ipv6_host` tracking keeps working normally) until
-explicitly unlocked. A detailed failure email goes out — which node
-failed, why, whether it self-reverted via the timer or was never applied,
-and which other hosts got skipped as a result.
+`proxmox_update` entries don't get pushed individually — they're
+processed as members of a declared **Group Update Plan**: a named set
+of HA members that must *all* converge to a target state before the
+group counts as updated, not just each individually attempted. This is
+a level above the commit-confirm handshake itself (which only guarantees
+one member's push is safe) — it's the framework that decides *which*
+members get touched, in what order, and what happens when one of them
+fails.
+
+```json
+"update_groups": {
+  "mgmt-vlan-proxmox": {
+    "description": "Proxmox VE nodes with static IPv6 presence on the mgmt VLAN",
+    "script": "proxmox_vlan_commit",
+    "members": ["pve01.mgmt.alshowto.com"],
+    "lock": { "locked": false, "reason": null, "member": null, "since": null }
+  }
+}
+```
+
+- **members**: `dynamic_hosts` domains (reusing that entry's `subnet`/
+  `ipv6_host`/`proxmox_update` fields — no duplication)
+- **script**: which pluggable commit/verify implementation this group
+  uses (see below) — different *kinds* of HA members need completely
+  different mechanics, so the framework doesn't hardcode how any
+  particular one gets updated
+
+When a subnet's prefix changes, every affected group's members are
+processed **strictly one at a time, in declared order** — each must
+fully commit-confirm before the next is even attempted. The first
+failure halts that group immediately: every remaining member in it is
+left completely untouched, not skipped-and-continued, and the group's
+own `lock` engages — blocking further updates *for that group only*
+(other groups, and DNS-side `ipv6_host` tracking generally, keep working
+normally). A detailed failure email goes out — which member failed, why,
+whether it self-reverted via the timer or was never applied, and which
+other members got skipped as a result.
 
 Unlocking isn't a plain toggle. The Configuration page's "Verify &
-Unlock" button (`POST /api/proxmox-lock/unlock`) re-checks every
-`proxmox_update`-configured interface's *live* state first — recomputes
-the expected address from the subnet's current prefix, confirms the
-node's actual `address6` matches it, and re-runs the same reachability
-check as the commit-confirm handshake — and only clears the lock if
-every single one checks out. A partial pass leaves it locked and reports
-exactly which interface(s) are still wrong, since an admin clicking
-"it's fine now" isn't the same as it actually being fine.
+Unlock" button on a locked group (`POST /api/update-groups/<name>/unlock`)
+re-checks every member's *live* state first — recomputes the expected
+target from current live conditions, confirms the member actually
+matches it, and re-runs the same reachability check as the commit-confirm
+handshake — and only clears the lock if every single member checks out.
+A partial pass leaves it locked and reports exactly which member(s) are
+still wrong, since an admin clicking "it's fine now" isn't the same as
+it actually being fine.
+
+**Scripts** are a registry of Python method pairs (`commit(entry,
+target_state) -> (bool, str)`, `verify(entry) -> (bool, str)`) —
+deliberately code, not something definable from `zones.json` or the
+Config page, since a script is real vendor-specific logic (SSH/API
+calls, quirks), not safe to hand an admin form. `proxmox_vlan_commit`
+(wrapping `commit_proxmox_interface_v6`) is the first one. The
+framework is written so a completely different kind of HA member — the
+still-on-hold opnsense/pfsense DHCPv6/RA drift fix, once that's actually
+researched — can register its own script and reuse the exact same
+group/lock/toll-gate machinery without touching any of this code, just
+adding a new entry to the script registry and a new group in
+`zones.json`.
+
+Add/remove group membership from the Config page, or directly:
+
+```bash
+curl -X POST http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/members \
+  -H "Content-Type: application/json" -d '{"domain": "pve02.mgmt.alshowto.com"}'
+
+curl -X DELETE http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/members/pve02.mgmt.alshowto.com
+```
 
 Verified against production: recomputing all six LAN devices' addresses
 this way matched their existing DNS records exactly, using a single SSH
@@ -1255,19 +1302,24 @@ curl -X DELETE http://localhost:5000/api/servers/dns01/vlans/7
 See [VLAN Sub-Interfaces](#vlan-sub-interfaces) for the field reference
 and the Proxmox-trunk caveat.
 
-### Proxmox Auto-Update Lock
+### Update Groups
 
 ```bash
-# Current lock state
-curl http://localhost:5000/api/proxmox-lock
+# All declared Group Update Plans and their current status
+curl http://localhost:5000/api/update-groups
 
-# Re-verify every proxmox_update-configured interface's live state and
-# clear the lock only if all of them check out
-curl -X POST http://localhost:5000/api/proxmox-lock/unlock
+# Re-verify every member of a locked group's live state and clear that
+# group's lock only if all of them check out
+curl -X POST http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/unlock
+
+# Add/remove a member
+curl -X POST http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/members \
+  -H "Content-Type: application/json" -d '{"domain": "pve02.mgmt.alshowto.com"}'
+curl -X DELETE http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/members/pve02.mgmt.alshowto.com
 ```
 
-See [Closing the loop](#closing-the-loop-auto-pushing-to-a-proxmox-ve-node-proxmox_update)
-for what engages the lock and what "verify" actually checks.
+See [Group Update Plans](#group-update-plans-one-node-at-a-time-hard-stop-per-group-lockout)
+for what a group is, what engages a group's lock, and what "verify" actually checks.
 
 ### SSH Key Management
 
@@ -1400,12 +1452,16 @@ and VLAN management:
 - Requires the underlying Proxmox bridge to already be trunking the VLAN
   to that VM — see [VLAN Sub-Interfaces](#vlan-sub-interfaces)
 
-#### Proxmox Auto-Update
-- **Lock Status**: green if auto-updates are running normally, red with
-  the failure reason/timestamp/node if locked
-- **Verify & Unlock**: re-checks every `proxmox_update`-configured
-  interface's live state and only clears the lock if all of them match
-  expectations — a partial pass reports exactly which one(s) don't
+#### Update Groups
+- **Per-Group Status**: every declared Group Update Plan, its members,
+  and its lock state — green if running normally, red with the failure
+  reason/timestamp/member if locked
+- **Add/Remove Member**: add any tracked host as a group member, or
+  remove one (blocked while the group is locked on that specific member
+  — unlock first, don't remove your way around it)
+- **Verify & Unlock**: re-checks every member's live state and only
+  clears that group's lock if all of them match expectations — a
+  partial pass reports exactly which member(s) don't
 
 #### Dynamic DNS Tracking
 - **Tracked Hosts**: Cards showing each tracked host's zone, record type,
@@ -2028,7 +2084,7 @@ MIT
 - [x] Configurable VIP address in setup script
 - [x] WireGuard mesh networking (v2.2) - full-mesh encrypted inter-node communication
 - [x] VLAN sub-interface management - persistent multi-subnet presence per server, provisioned live from the Config page
-- [x] Proxmox VE commit-confirm auto-update - self-reverting safety net, serialized per-node, hard-stop-and-lock on failure
+- [x] Group Update Plans - pluggable script-based HA group updates (Proxmox VE VLAN presence first), self-reverting safety net, serialized per-member, hard-stop-and-lock per group on failure
 
 ### Planned 📋
 - [ ] Zone file import/export

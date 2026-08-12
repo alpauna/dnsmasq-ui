@@ -1227,177 +1227,285 @@ class ZoneManager:
 
         return True, f"{node}/{iface} committed to {address6} (validated reachable, revert timer cancelled)"
 
-    def get_proxmox_lock(self):
-        """Current Proxmox auto-update lock state (see
-        _propagate_subnet_prefix_change / verify_and_clear_proxmox_lock).
-        Lazily created as unlocked so older zones.json files without
-        this key don't need a migration."""
-        return self.config.get('global', {}).setdefault('proxmox_auto_update_lock', {
-            'locked': False, 'reason': None, 'node': None, 'iface': None, 'since': None
-        })
+    # --- Group Update Plans -------------------------------------------
+    #
+    # A "group" is a declared set of HA members that must ALL converge to
+    # a target state before the group counts as updated — a level above
+    # commit_proxmox_interface_v6, which only guarantees one node's
+    # commit-confirm handshake is safe. Different group *types* need
+    # completely different commit/verify mechanics (Proxmox's pvesh/
+    # systemd-run dance is nothing like what a future opnsense/pfsense
+    # HA pair will need), so each group names a "script" — a pair of
+    # methods on this class, registered below — rather than the
+    # framework hardcoding how any particular kind of member gets
+    # updated. Proxmox VLAN presence (pve01 etc.) is the first script;
+    # see the [[project-opnsense-dhcpv6-drift]] work for the next one.
+    #
+    # zones.json shape (global.update_groups):
+    #   { "<group_name>": {
+    #       "description": str, "script": "<name from _UPDATE_GROUP_SCRIPTS>",
+    #       "members": ["<dynamic_hosts domain>", ...],
+    #       "lock": {"locked": bool, "reason": str|None, "member": str|None, "since": str|None}
+    #   } }
 
-    def _set_proxmox_lock(self, reason, node, iface):
-        lock = self.get_proxmox_lock()
-        lock.update({'locked': True, 'reason': reason, 'node': node, 'iface': iface,
-                     'since': datetime.now().isoformat()})
+    def _script_proxmox_vlan_commit(self, entry, target_address):
+        """proxmox_vlan_commit's commit function — thin adapter from the
+        group framework's generic (entry, target_state) shape onto
+        commit_proxmox_interface_v6's (node, iface, address6)."""
+        proxmox = entry.get('proxmox_update')
+        if not proxmox:
+            return False, f"{entry['domain']} has no proxmox_update configured"
+        return self.commit_proxmox_interface_v6(proxmox['node'], proxmox['iface'], target_address)
+
+    def _script_proxmox_vlan_verify(self, entry):
+        """proxmox_vlan_commit's verify function — does this member's
+        live Proxmox interface match what it's currently expected to be
+        (recomputed from the subnet's live prefix, not cached), and is
+        it independently reachable? Used by verify_and_clear_group_lock,
+        not by the commit path itself."""
+        proxmox = entry.get('proxmox_update')
+        if not proxmox or entry.get('ipv6_host') is None:
+            return False, "not configured for proxmox_vlan_commit (missing ipv6_host/proxmox_update)"
+        subnet = self.get_subnets().get(entry.get('subnet'), {})
+        prefix_v6 = subnet.get('prefix_v6')
+        if not prefix_v6:
+            return False, "subnet has no live prefix_v6 to check against"
+        try:
+            expected = str(_ipv6_from_prefix_and_host(ipaddress.ip_network(prefix_v6), entry['ipv6_host']))
+        except ValueError as e:
+            return False, f"address computation failed: {e}"
+        try:
+            live = self.get_proxmox_interface(proxmox['node'], proxmox['iface'])
+        except Exception as e:
+            return False, f"couldn't read {proxmox['node']}/{proxmox['iface']}: {e}"
+        if live.get('address6') != expected:
+            return False, f"{proxmox['node']}/{proxmox['iface']} has {live.get('address6')}, expected {expected}"
+        valid, detail = self._validate_proxmox_reachability(proxmox['node'], expected)
+        return valid, (detail if valid else f"address matches but unreachable: {detail}")
+
+    # Registry of group scripts: group_name -> method names on this
+    # class implementing commit(entry, target_state) -> (bool, str) and
+    # verify(entry) -> (bool, str). Deliberately code, not zones.json
+    # data — a script is real logic (SSH/API calls, vendor-specific
+    # quirks), not something safe to define from the Config page.
+    _UPDATE_GROUP_SCRIPTS = {
+        'proxmox_vlan_commit': {
+            'commit': '_script_proxmox_vlan_commit',
+            'verify': '_script_proxmox_vlan_verify',
+        },
+    }
+
+    def get_update_groups(self):
+        """All declared update groups (see the Group Update Plans note
+        above). Lazily created as empty so older zones.json files don't
+        need a migration."""
+        return self.config.get('global', {}).setdefault('update_groups', {})
+
+    def get_dynamic_host(self, domain):
+        return next((e for e in self.config.get('dynamic_hosts', []) if e['domain'] == domain), None)
+
+    def add_group_member(self, group_name, domain):
+        """Add a dynamic_hosts entry (by domain) as a member of a
+        declared update group. Doesn't require the entry to already be
+        configured for the group's script (e.g. proxmox_update set) —
+        that's checked at commit/verify time, not membership time, so a
+        member can be added ahead of finishing its own config."""
+        groups = self.get_update_groups()
+        group = groups.get(group_name)
+        if not group:
+            return False, f"Unknown update group '{group_name}'"
+        if not self.get_dynamic_host(domain):
+            return False, f"No dynamic_hosts entry for '{domain}' — track it first"
+        members = group.setdefault('members', [])
+        if domain in members:
+            return False, f"'{domain}' is already a member of '{group_name}'"
+        members.append(domain)
         self.save_config()
+        return True, f"'{domain}' added to '{group_name}'"
 
-    def verify_and_clear_proxmox_lock(self):
-        """Re-verify every proxmox_update-configured interface actually
-        matches what dnsmasq-ui expects (live subnet prefix + its own
-        ipv6_host suffix, AND independently reachable) before clearing
-        the lock. An admin clicking 'unlock' isn't enough on its own —
-        the whole point of the lock is that an unattended failure needs
-        a human to look, and a human can still be wrong or looking at
-        stale info, so this re-checks live state itself rather than
-        trusting the click. Returns (success, message, details) —
-        details is a per-interface list regardless of outcome, so a
-        partial failure clearly shows which one(s) are still bad."""
-        lock = self.get_proxmox_lock()
+    def remove_group_member(self, group_name, domain):
+        """Remove a member from a declared update group. Refuses while
+        the group is locked — removing the failing member out from under
+        a lock would let verify_and_clear_group_lock report 'all good'
+        without the actual problem ever having been resolved."""
+        groups = self.get_update_groups()
+        group = groups.get(group_name)
+        if not group:
+            return False, f"Unknown update group '{group_name}'"
+        lock = group.get('lock', {})
+        if lock.get('locked') and lock.get('member') == domain:
+            return False, (f"'{group_name}' is locked on '{domain}' — unlock (Verify & Unlock) "
+                            "before removing it, not instead of resolving it")
+        members = group.setdefault('members', [])
+        if domain not in members:
+            return False, f"'{domain}' is not a member of '{group_name}'"
+        members.remove(domain)
+        self.save_config()
+        return True, f"'{domain}' removed from '{group_name}'"
+
+    def run_update_group(self, group_name, member_targets):
+        """Run a Group Update Plan: process every member with a target
+        this cycle strictly one at a time, through its script's commit
+        function, and only consider the group updated once every one of
+        them has converged. Any failure halts the rest of the group
+        immediately — remaining members are left completely untouched —
+        and locks that GROUP specifically (other groups are unaffected)
+        until an admin unlocks it via verify_and_clear_group_lock.
+
+        member_targets: {domain: target_state} for every member that
+        actually needs to converge this cycle — a member not in this
+        dict is left alone (e.g. nothing changed for it). target_state
+        is opaque to this method, passed straight through to the
+        script's commit function (an IPv6 address string for
+        proxmox_vlan_commit; a future script might want something
+        else entirely).
+
+        Returns (all_converged, results) — results is a per-member list
+        of {'domain', 'ok', 'detail'} regardless of outcome.
+        """
+        groups = self.get_update_groups()
+        group = groups.get(group_name)
+        if not group:
+            return False, [{'domain': None, 'ok': False, 'detail': f"Unknown update group '{group_name}'"}]
+
+        lock = group.setdefault('lock', {'locked': False, 'reason': None, 'member': None, 'since': None})
+        if lock.get('locked'):
+            logger.error(f"Update group '{group_name}' is LOCKED ({lock.get('reason')}) since "
+                         f"{lock.get('since')} — skipping all updates for this group until unlocked")
+            return False, [{'domain': None, 'ok': False, 'detail': f"Group locked: {lock.get('reason')}"}]
+
+        script = self._UPDATE_GROUP_SCRIPTS.get(group.get('script'))
+        if not script:
+            return False, [{'domain': None, 'ok': False,
+                             'detail': f"Unknown script '{group.get('script')}' for group '{group_name}'"}]
+        commit_fn = getattr(self, script['commit'])
+
+        members = [d for d in group.get('members', []) if d in member_targets]
+        results = []
+        for i, domain in enumerate(members):
+            entry = self.get_dynamic_host(domain)
+            if not entry:
+                results.append({'domain': domain, 'ok': False, 'detail': 'dynamic_hosts entry not found'})
+                continue
+            target = member_targets[domain]
+            success, message = commit_fn(entry, target)
+            results.append({'domain': domain, 'ok': success, 'detail': message})
+            logger.warning(f"Group '{group_name}' member {domain}: {'OK' if success else 'FAILED'} — {message}")
+
+            if success:
+                self._notify_group_member_success(group_name, domain, target, message)
+                continue
+
+            skipped = members[i + 1:]
+            lock.update({'locked': True, 'reason': message, 'member': domain,
+                         'since': datetime.now().isoformat()})
+            self.save_config()
+            self._notify_group_halted(group_name, domain, message, skipped)
+            return False, results
+
+        logger.warning(f"Update group '{group_name}': all {len(members)} member(s) converged")
+        return True, results
+
+    def verify_and_clear_group_lock(self, group_name):
+        """Re-verify every member of a locked group via its script's
+        verify function before clearing the lock. An admin clicking
+        'unlock' isn't enough on its own — this re-checks live state
+        itself rather than trusting the click. Returns (success,
+        message, details) — details is a per-member list regardless of
+        outcome, so a partial failure clearly shows which one(s) are
+        still bad."""
+        groups = self.get_update_groups()
+        group = groups.get(group_name)
+        if not group:
+            return False, f"Unknown update group '{group_name}'", []
+        lock = group.setdefault('lock', {'locked': False, 'reason': None, 'member': None, 'since': None})
         if not lock.get('locked'):
             return True, "Not locked", []
+        script = self._UPDATE_GROUP_SCRIPTS.get(group.get('script'))
+        if not script:
+            return False, f"Unknown script '{group.get('script')}' for group '{group_name}'", []
+        verify_fn = getattr(self, script['verify'])
 
-        subnets = self.get_subnets()
         details = []
         all_good = True
-        for entry in self.config.get('dynamic_hosts', []):
-            proxmox = entry.get('proxmox_update')
-            if not proxmox or entry.get('ipv6_host') is None:
-                continue
-            subnet = subnets.get(entry.get('subnet'), {})
-            prefix_v6 = subnet.get('prefix_v6')
-            if not prefix_v6:
-                details.append({'domain': entry['domain'], 'ok': False,
-                                 'detail': "subnet has no live prefix_v6 to check against"})
+        for domain in group.get('members', []):
+            entry = self.get_dynamic_host(domain)
+            if not entry:
+                details.append({'domain': domain, 'ok': False, 'detail': 'dynamic_hosts entry not found'})
                 all_good = False
                 continue
-            try:
-                expected_addr = str(_ipv6_from_prefix_and_host(ipaddress.ip_network(prefix_v6), entry['ipv6_host']))
-            except ValueError as e:
-                details.append({'domain': entry['domain'], 'ok': False,
-                                 'detail': f"address computation failed: {e}"})
-                all_good = False
-                continue
-            try:
-                live = self.get_proxmox_interface(proxmox['node'], proxmox['iface'])
-            except Exception as e:
-                details.append({'domain': entry['domain'], 'ok': False,
-                                 'detail': f"couldn't read {proxmox['node']}/{proxmox['iface']}: {e}"})
-                all_good = False
-                continue
-            live_addr = live.get('address6')
-            if live_addr != expected_addr:
-                details.append({'domain': entry['domain'], 'ok': False,
-                                 'detail': f"{proxmox['node']}/{proxmox['iface']} has {live_addr}, expected {expected_addr}"})
-                all_good = False
-                continue
-            valid, valid_detail = self._validate_proxmox_reachability(proxmox['node'], expected_addr)
-            details.append({'domain': entry['domain'], 'ok': valid,
-                             'detail': valid_detail if valid else f"address matches but unreachable: {valid_detail}"})
-            if not valid:
+            ok, detail = verify_fn(entry)
+            details.append({'domain': domain, 'ok': ok, 'detail': detail})
+            if not ok:
                 all_good = False
 
         if not all_good:
-            return False, "One or more interfaces still don't match expectations — see details", details
+            return False, "One or more members still don't match expectations — see details", details
 
-        lock.update({'locked': False, 'reason': None, 'node': None, 'iface': None, 'since': None})
+        lock.update({'locked': False, 'reason': None, 'member': None, 'since': None})
         self.save_config()
-        return True, "All proxmox_update interfaces verified good, lock cleared", details
+        return True, "All group members verified good, lock cleared", details
 
-    def _notify_proxmox_auto_update(self, entry, node, iface, address6, success, message):
-        """Email a heads-up for a single successful auto-push — failures
-        that halt the batch use _notify_proxmox_batch_halted instead,
-        which has more to explain (skipped hosts, the lock)."""
+    def _notify_group_member_success(self, group_name, domain, target, message):
         auth_config = _load_auth() or {}
         to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
         if not to_addr:
-            logger.error(f"Proxmox auto-update for {entry['domain']} ({node}/{iface}) "
-                         f"succeeded: {message} — no notification email configured "
-                         "(enable email 2FA to set one)")
+            logger.error(f"Group '{group_name}' member {domain} converged to {target}: {message} "
+                         "— no notification email configured (enable email 2FA to set one)")
             return
         _send_email(
-            to_addr, f"dnsmasq-ui: Proxmox auto-update succeeded ({node}/{iface})",
-            f"The '{entry.get('subnet')}' subnet's live IPv6 prefix changed, so dnsmasq-ui "
-            f"pushed a matching static address to {node}'s {iface} interface for "
-            f"{entry['domain']}.\n\n"
-            f"Address: {address6}\nDetail: {message}\n\n"
-            f"Dashboard: {DASHBOARD_URL}/config"
+            to_addr, f"dnsmasq-ui: Update group '{group_name}' member converged ({domain})",
+            f"Member {domain} of update group '{group_name}' converged to its new target.\n\n"
+            f"Target: {target}\nDetail: {message}\n\nDashboard: {DASHBOARD_URL}/config"
         )
 
-    def _notify_proxmox_batch_halted(self, entry, node, iface, address6, message, skipped_domains):
-        """Email when a failed Proxmox commit halts the whole batch and
-        engages the lock (see _propagate_subnet_prefix_change) — richer
-        than _notify_proxmox_auto_update since this also has to explain
-        what got skipped and how to recover."""
+    def _notify_group_halted(self, group_name, domain, message, skipped_domains):
+        """Email when a failed member commit halts a Group Update Plan
+        and locks that group (see run_update_group)."""
         auth_config = _load_auth() or {}
         to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
         skipped_note = (
-            f"\n\nThe following {len(skipped_domains)} other host(s) on this subnet were NOT "
+            f"\n\nThe following {len(skipped_domains)} other member(s) of '{group_name}' were NOT "
             f"touched this cycle as a result (left exactly as they were, not attempted):\n" +
             "\n".join(f"  - {d}" for d in skipped_domains)
-        ) if skipped_domains else "\n\nNo other hosts on this subnet were pending an update this cycle."
+        ) if skipped_domains else "\n\nNo other members were pending an update this cycle."
         body = (
-            f"A Proxmox auto-update FAILED for {entry['domain']} ({node}/{iface}), target address "
-            f"{address6}.\n\nDetail: {message}\n"
+            f"Update group '{group_name}' FAILED at member {domain}.\n\nDetail: {message}\n"
             f"{skipped_note}\n\n"
-            "Proxmox auto-updates are now LOCKED — no further pushes will be attempted (DNS-side "
-            "tracking keeps working normally) until this is reviewed and unlocked from the "
-            "Configuration page, which re-verifies every configured interface's live state before "
-            f"clearing the lock.\n\nDashboard: {DASHBOARD_URL}/config"
+            f"Group '{group_name}' is now LOCKED — no further updates will be attempted for it "
+            "(other groups are unaffected) until this is reviewed and unlocked from the "
+            "Configuration page, which re-verifies every member's live state before clearing the "
+            f"lock.\n\nDashboard: {DASHBOARD_URL}/config"
         )
         if not to_addr:
-            logger.error(f"Proxmox batch halted for {entry['domain']} ({node}/{iface}): {message} "
+            logger.error(f"Update group '{group_name}' halted at {domain}: {message} "
                          "— no notification email configured (enable email 2FA to set one)")
             return
-        _send_email(to_addr, f"dnsmasq-ui: Proxmox auto-update FAILED, updates LOCKED ({node}/{iface})", body)
+        _send_email(to_addr, f"dnsmasq-ui: Update group '{group_name}' FAILED, LOCKED (member: {domain})", body)
 
     def _propagate_subnet_prefix_change(self, subnet_name, old_prefix, new_prefix):
         """When poll_subnets() finds a subnet's live prefix has actually
-        changed (not just been detected for the first time), push
-        updated addresses — one node at a time, strictly in order — to
-        any dynamic_hosts entries on it that use a manually-assigned
-        ipv6_host (not SLAAC) and have proxmox_update configured. Each
-        node must fully commit-confirm (see commit_proxmox_interface_v6)
-        before the next one is even attempted. Any failure halts the
-        rest of the batch immediately — remaining nodes are left
-        completely untouched, not just skipped-and-continued — and
-        engages a global lock that blocks all further Proxmox pushes
-        until an admin unlocks from the Config page (which re-verifies
-        live state first)."""
-        lock = self.get_proxmox_lock()
-        if lock.get('locked'):
-            logger.error(f"Subnet '{subnet_name}' prefix changed ({old_prefix} -> {new_prefix}) but "
-                         f"Proxmox auto-update is LOCKED ({lock.get('reason')}) since {lock.get('since')} "
-                         "— skipping all Proxmox pushes until unlocked from the Config page")
-            return
+        changed (not just been detected for the first time), compute
+        each affected update-group member's new target address and run
+        that group through its Group Update Plan (run_update_group).
+        This is only one caller of run_update_group — a future
+        non-subnet-triggered source (e.g. the still-on-hold opnsense
+        DHCPv6/RA drift work) would compute its own targets and call it
+        directly instead of going through here."""
         logger.warning(f"Subnet '{subnet_name}' prefix changed: {old_prefix} -> {new_prefix}")
-
-        candidates = [e for e in self.config.get('dynamic_hosts', [])
-                      if e.get('subnet') == subnet_name and e.get('ipv6_host') is not None
-                      and e.get('proxmox_update')]
-
-        for i, entry in enumerate(candidates):
-            proxmox = entry['proxmox_update']
-            try:
-                new_addr = _ipv6_from_prefix_and_host(ipaddress.ip_network(new_prefix), entry['ipv6_host'])
-            except ValueError as e:
-                logger.error(f"Failed computing new Proxmox address for {entry['domain']}: {e}")
-                continue
-
-            success, message = self.commit_proxmox_interface_v6(proxmox['node'], proxmox['iface'], str(new_addr))
-            logger.warning(f"Proxmox commit for {entry['domain']} ({proxmox['node']}/{proxmox['iface']}): "
-                          f"{'OK' if success else 'FAILED'} — {message}")
-
-            if success:
-                self._notify_proxmox_auto_update(entry, proxmox['node'], proxmox['iface'],
-                                                  str(new_addr), True, message)
-                continue
-
-            skipped = [c['domain'] for c in candidates[i + 1:]]
-            self._set_proxmox_lock(reason=message, node=proxmox['node'], iface=proxmox['iface'])
-            self._notify_proxmox_batch_halted(entry, proxmox['node'], proxmox['iface'],
-                                               str(new_addr), message, skipped)
-            break
+        for group_name, group in self.get_update_groups().items():
+            member_targets = {}
+            for domain in group.get('members', []):
+                entry = self.get_dynamic_host(domain)
+                if not entry or entry.get('subnet') != subnet_name or entry.get('ipv6_host') is None:
+                    continue
+                try:
+                    member_targets[domain] = str(
+                        _ipv6_from_prefix_and_host(ipaddress.ip_network(new_prefix), entry['ipv6_host']))
+                except ValueError as e:
+                    logger.error(f"Failed computing new address for {domain}: {e}")
+            if member_targets:
+                self.run_update_group(group_name, member_targets)
 
     def _build_vlan_netplan(self, vlan_id, ipv4_mode, ipv4_address, ipv6_mode, ipv6_address):
         """Netplan v2 YAML for a single VLAN sub-interface. ipv4_mode:
@@ -3287,17 +3395,30 @@ def api_dynamic_hosts_add():
     )
     return jsonify({'success': success, 'message': message})
 
-@app.route('/api/proxmox-lock', methods=['GET'])
-def api_proxmox_lock_get():
-    """API: Current Proxmox auto-update lock state."""
-    return jsonify(manager.get_proxmox_lock())
+@app.route('/api/update-groups', methods=['GET'])
+def api_update_groups_list():
+    """API: All declared Group Update Plans and their current status."""
+    return jsonify({'update_groups': manager.get_update_groups()})
 
-@app.route('/api/proxmox-lock/unlock', methods=['POST'])
-def api_proxmox_lock_unlock():
-    """API: Re-verify every proxmox_update-configured interface's live
-    state and clear the lock only if all of them check out."""
-    success, message, details = manager.verify_and_clear_proxmox_lock()
+@app.route('/api/update-groups/<group_name>/unlock', methods=['POST'])
+def api_update_groups_unlock(group_name):
+    """API: Re-verify every member of a locked group's live state and
+    clear that group's lock only if all of them check out."""
+    success, message, details = manager.verify_and_clear_group_lock(group_name)
     return jsonify({'success': success, 'message': message, 'details': details})
+
+@app.route('/api/update-groups/<group_name>/members', methods=['POST'])
+def api_update_groups_add_member(group_name):
+    """API: Add a dynamic_hosts entry (by domain) as a member of a group."""
+    data = request.json
+    success, message = manager.add_group_member(group_name, data.get('domain'))
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/update-groups/<group_name>/members/<domain>', methods=['DELETE'])
+def api_update_groups_remove_member(group_name, domain):
+    """API: Remove a member from a group."""
+    success, message = manager.remove_group_member(group_name, domain)
+    return jsonify({'success': success, 'message': message})
 
 @app.route('/api/subnets', methods=['GET'])
 def api_subnets_list():

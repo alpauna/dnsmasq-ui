@@ -282,6 +282,21 @@
         "primary_dns": "dns03",
         "interface": "eth0.7"
       }
+    },
+    "update_groups": {
+      "mgmt-vlan-proxmox": {
+        "description": "Proxmox VE nodes with static IPv6 presence on the mgmt VLAN",
+        "script": "proxmox_vlan_commit",
+        "members": [
+          "pve01.mgmt.alshowto.com"
+        ],
+        "lock": {
+          "locked": false,
+          "reason": null,
+          "member": null,
+          "since": null
+        }
+      }
     }
   },
   "dynamic_hosts": [
