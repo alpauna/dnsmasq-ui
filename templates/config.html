@@ -1073,11 +1073,13 @@
                     let html = '';
                     const servers = data.servers || {};
                     const vip = data.vip || 'N/A';
+                    const vip6 = data.vip6;
 
                     // Add VIP status at top
                     html += `<div class="server-item" style="grid-column: 1/-1; background: #e8f5e9; border-color: #4caf50;">
                         <h4>🔷 Keepalived VIP</h4>
                         <p><strong>VIP Address:</strong> ${vip}</p>
+                        ${vip6 ? `<p><strong>IPv6 VIP:</strong> ${vip6}</p>` : ''}
                     </div>`;
 
                     for (const [name, info] of Object.entries(servers)) {
@@ -1090,6 +1092,7 @@
                         html += `<div class="server-item">
                             <h4>${name}</h4>
                             <p><strong>IP:</strong> ${info.ip}</p>
+                            ${info.ipv6 ? `<p><strong>IPv6:</strong> ${info.ipv6}</p>` : ''}
                             <p><strong>Hostname:</strong> ${info.hostname || 'N/A'}</p>
                             <p><strong>DNS Status:</strong> ${statusIcon} ${statusText}</p>
                             <p><strong>Keepalived:</strong> ${kaIcon} ${kaStatus}</p>

@@ -663,6 +663,18 @@ class ZoneManager:
         """Get all servers."""
         return self.config.get('servers', {})
 
+    def get_server_ipv6(self, hostname):
+        """A server's own currently-published AAAA record (e.g.
+        dns01.ad.alshowto.com), for display alongside its IPv4 address —
+        reuses whatever the subnet tracker already keeps current rather
+        than a fresh SSH round-trip just to show it. Returns None if the
+        server has no AAAA record tracked."""
+        for zone in self.config.get('zones', []):
+            for r in zone.get('records', []):
+                if r['type'] == 'AAAA' and r['domain'].startswith(f"{hostname}."):
+                    return r['value']
+        return None
+
     def check_server_status(self, server_ip):
         """Check if dnsmasq is running on server."""
         try:
@@ -2276,10 +2288,12 @@ def api_status():
     for server_name, server_info in manager.get_servers().items():
         dnsmasq_running = manager.check_server_status(server_info['ip'])
         is_master, keepalived_running, ipv6_vip_active = manager.check_keepalived_status(server_info['ip'])
+        hostname = server_info.get('hostname', server_name)
 
         status[server_name] = {
             'ip': server_info['ip'],
-            'hostname': server_info.get('hostname', server_name),
+            'ipv6': manager.get_server_ipv6(hostname),
+            'hostname': hostname,
             'online': dnsmasq_running,
             'dnsmasq': 'active' if dnsmasq_running else 'inactive',
             'keepalived': {
