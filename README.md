@@ -20,6 +20,7 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 - **📁 GlusterFS Replication**: zones.json automatically replicated across all servers (replica-3)
 - **⚡ Single VIP**: Same keepalived VIP serves both DNS (port 53) and UI (port 5000)
 - **🔗 WireGuard Mesh**: Full-mesh encrypted network for secure cross-cluster DNS synchronization (v2.2+)
+- **🏷️ VLAN Sub-Interfaces**: Give a DNS server a real address on another subnet (via VLAN tag) without a second NIC, provisioned live from the Config page
 
 ## Architecture
 
@@ -27,7 +28,7 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  192.168.0.250 (Keepalived VIP)                  │
+│  192.168.0.230 (Keepalived VIP)                  │
 │  ├─ :53   → dnsmasq DNS (MASTER)                │
 │  └─ :5000 → dnsmasq-ui (MASTER)                 │
 └──────────────┬───────────────────────────────────┘
@@ -108,7 +109,7 @@ The **setup.sh** script provides an interactive way to configure DNS clusters of
 #   1. SSH user (default: debian)
 #   2. Number of servers (e.g., 3)
 #   3. Server addresses (e.g., 192.168.0.231-233)
-#   4. VIP address (default: 192.168.0.250)
+#   4. VIP address (default: 192.168.0.252)
 #   5. Confirm configuration
 
 # 2. Deploy DNS servers and keepalived
@@ -119,13 +120,13 @@ ansible-playbook -i inventory.ini dnsmasq-setup.yml
 ansible-playbook -i inventory.ini dnsmasq-ui-ha.yml
 
 # 4. Verify UI is accessible on all servers
-curl http://192.168.0.250:5000/api/status     # Via VIP
+curl http://192.168.0.230:5000/api/status     # Via VIP
 curl http://192.168.0.231:5000/api/status     # Direct to dns01
 curl http://192.168.0.232:5000/api/status     # Direct to dns02
 curl http://192.168.0.233:5000/api/status     # Direct to dns03
 
 # 5. Access dashboard in browser
-# http://192.168.0.250:5000
+# http://192.168.0.230:5000
 ```
 
 ### Builder VM Setup (Testing & Development)
@@ -480,7 +481,7 @@ The main configuration file that defines zones, servers, and global settings:
   },
   "global": {
     "upstream_dns": ["1.1.1.1", "8.8.8.8"],
-    "keepalive_vip": "192.168.0.250",
+    "keepalive_vip": "192.168.0.230",
     "keepalive_interval": 300
   }
 }
@@ -552,12 +553,14 @@ in `zones.json`'s global config holds each L3 segment's CIDR and a
   "lan": {
     "cidr_v4": "192.168.0.0/23",
     "prefix_v6": "2605:4a80:b004:b120::/64",
-    "primary_dns": "dns01"
+    "primary_dns": "dns01",
+    "interface": "eth0"
   },
   "mgmt": {
     "cidr_v4": "192.168.7.0/24",
-    "prefix_v6": null,
-    "primary_dns": null
+    "prefix_v6": "2605:4a80:b009:c100::/64",
+    "primary_dns": "dns01",
+    "interface": "eth0.7"
   }
 }
 ```
@@ -567,7 +570,11 @@ LAN is actually a `/23` (see the keepalived VIP's mask), not the `/24` a
 naive per-octet assumption would guess. `primary_dns` names a server from
 `servers` (resolved to its IP at poll time, so it stays correct if that
 server's IP is ever edited in one place) rather than a hand-typed
-address.
+address. `interface` is which NIC on `primary_dns` actually sits on this
+subnet — defaults to `eth0`, but a server that's only on a subnet via a
+[VLAN sub-interface](#vlan-sub-interfaces) (like `mgmt` below) needs the
+real one named here, or `poll_subnets()` would read the wrong subnet's
+prefix.
 
 Individual `dynamic_hosts` entries for devices in a subnet with a
 `primary_dns` become just a MAC address instead of connection details:
@@ -606,11 +613,18 @@ carry the `ff:fe` midpoint EUI-64 requires and this will error rather than
 silently compute nonsense).
 
 A subnet only helps once something in it can be reliably polled for the
-live prefix. `wifi.mgmt.alshowto.com` is the only thing on
-`192.168.7.0/24` reachable at all, so the `mgmt` subnet above has no
-`primary_dns` — `poll_subnets()` logs and skips prefix detection for it,
-and that entry keeps using the older direct-polling approach (`target_host`
-+ `connection: http`) instead.
+live prefix. `mgmt` (`192.168.7.0/24`) had no DNS server on it at all
+originally, so it had no `primary_dns` and the one device on it,
+`wifi.mgmt.alshowto.com`, fell back to the older direct-polling approach
+(`target_host` + `connection: http` — a login flow against the device's
+own web UI). That approach was the flakiest tracked device in this
+project's history (login flow, `detect_regex`, session-param handling all
+had to hold up every cycle). Giving `dns01` a real presence on `mgmt` via
+a [VLAN sub-interface](#vlan-sub-interfaces) let `mgmt` get a proper
+`primary_dns` like `lan` has, so `wifi.mgmt.alshowto.com` now uses the
+same subnet+MAC tracking as everything else — no HTTP requests at all.
+The `connection: http` approach still exists in the code for subnets that
+genuinely have nothing pollable on them.
 
 #### Advanced: Non-Linux Devices (Switches, Routers)
 
@@ -715,6 +729,65 @@ usually enough:
   "detect_command": "ip -4 -o addr show eth0 scope global | awk '{print $4}' | cut -d/ -f1"
 }
 ```
+
+### VLAN Sub-Interfaces
+
+A DNS server sometimes needs a real IPv4/IPv6 presence on another subnet
+it isn't otherwise on — for example so it can act as [`primary_dns`](#subnet-based-tracking-poll-the-prefix-once-not-every-device)
+for that subnet's tracking. Adding another physical/virtual NIC per subnet
+doesn't scale, but the Proxmox bridge these VMs already sit on is
+VLAN-aware (trunk mode), so a persistent VLAN sub-interface (netplan)
+gives the guest OS a tagged presence on that VLAN without touching
+hardware — the guest-OS-level equivalent of adding a tagged NIC in the
+Proxmox UI, just scriptable from here.
+
+**This only handles the guest-OS side** — the underlying Proxmox
+bridge/port for that VM must already be trunking the VLAN, or the
+sub-interface comes up locally with no traffic actually reaching it (no
+ARP replies, no router advertisements). If a newly-added VLAN interface
+never picks up an address, check the trunk on the Proxmox host before
+assuming the netplan config is wrong.
+
+Manage VLANs per server from the **Configuration** page, or via the
+[API](#vlan-management) directly. Each entry lives in `zones.json` under
+that server's entry in `servers`:
+
+```json
+"servers": {
+  "dns01": {
+    "ip": "192.168.0.231",
+    "hostname": "dns01",
+    "port": 22,
+    "enabled": true,
+    "vlans": [
+      {
+        "vlan_id": 7,
+        "name": "mgmt",
+        "ipv4_mode": "static",
+        "ipv4_address": "192.168.7.231/24",
+        "ipv6_mode": "slaac",
+        "ipv6_address": null
+      }
+    ]
+  }
+}
+```
+
+- **vlan_id**: 802.1Q VLAN tag (1-4094) — the sub-interface is named
+  `eth0.<vlan_id>`
+- **name**: label for the netplan file (`/etc/netplan/90-presence-<name>.yaml`)
+  and for referencing the VLAN in the UI
+- **ipv4_mode**/**ipv6_mode**: `none`, `dhcp` (v4 only), `static`, or
+  `slaac` (v6 only) — `static` requires the matching `ipv4_address`/
+  `ipv6_address` in CIDR form (e.g. `192.168.7.231/24`)
+
+Adding or updating a VLAN writes the netplan file over SSH and runs
+`netplan apply` immediately, so it takes effect right away rather than
+waiting for the next Ansible run. Removing one deletes the netplan file
+and tears down the live interface (`ip link delete eth0.<vlan_id>`) —
+note that reliably removing an already-created VLAN link isn't guaranteed
+just because its config file is gone, so verify with `ip addr` after a
+delete if it matters.
 
 ### Environment Variables
 
@@ -922,7 +995,7 @@ The application monitors keepalived status on each server via SSH:
 ssh debian@192.168.0.231 sudo systemctl status keepalived
 
 # Check if VIP is active (only on MASTER)
-ssh debian@192.168.0.231 ip addr | grep 192.168.0.250
+ssh debian@192.168.0.231 ip addr | grep 192.168.0.230
 ```
 
 ## API Reference
@@ -976,11 +1049,11 @@ curl http://localhost:5000/api/status
 #       "keepalived": {
 #         "running": true,
 #         "status": "MASTER",  // MASTER, STANDBY, or INACTIVE
-#         "vip": "192.168.0.250"
+#         "vip": "192.168.0.230"
 #       }
 #     }
 #   },
-#   "vip": "192.168.0.250"
+#   "vip": "192.168.0.230"
 # }
 ```
 
@@ -1007,6 +1080,29 @@ curl -X DELETE http://localhost:5000/api/dynamic-hosts/middle-01.ad.alshowto.com
 # every DYNAMIC_POLL_INTERVAL seconds)
 curl -X POST http://localhost:5000/api/dynamic-hosts/poll
 ```
+
+### VLAN Management
+
+```bash
+# List a server's configured VLAN sub-interfaces
+curl http://localhost:5000/api/servers/dns01/vlans
+
+# Create and provision a VLAN sub-interface (writes netplan + applies immediately)
+curl -X POST http://localhost:5000/api/servers/dns01/vlans \
+  -H "Content-Type: application/json" \
+  -d '{"vlan_id": 7, "name": "mgmt", "ipv4_mode": "static", "ipv4_address": "192.168.7.231/24", "ipv6_mode": "slaac"}'
+
+# Update and re-provision an existing VLAN
+curl -X PUT http://localhost:5000/api/servers/dns01/vlans/7 \
+  -H "Content-Type: application/json" \
+  -d '{"ipv4_mode": "none"}'
+
+# Tear down a VLAN sub-interface
+curl -X DELETE http://localhost:5000/api/servers/dns01/vlans/7
+```
+
+See [VLAN Sub-Interfaces](#vlan-sub-interfaces) for the field reference
+and the Proxmox-trunk caveat.
 
 ### SSH Key Management
 
@@ -1127,7 +1223,17 @@ curl http://localhost:5000/api/wireguard/status
   - Smart recommendation to switch to grid view when zones > 3
 
 ### Configuration Page
-The configuration page (`/config`) provides SSH key, server, and dynamic-DNS management:
+The configuration page (`/config`) provides SSH key, server, dynamic-DNS,
+and VLAN management:
+
+#### VLAN Sub-Interface Management
+- **Per-Server VLAN List**: View each server's configured VLAN
+  sub-interfaces (tag, name, IPv4/IPv6 mode and address)
+- **Add VLAN**: Create a persistent VLAN sub-interface and provision it
+  over SSH immediately (netplan + `netplan apply`), no Ansible run needed
+- **Edit/Remove**: Update a VLAN's addressing or tear it down entirely
+- Requires the underlying Proxmox bridge to already be trunking the VLAN
+  to that VM — see [VLAN Sub-Interfaces](#vlan-sub-interfaces)
 
 #### Dynamic DNS Tracking
 - **Tracked Hosts**: Cards showing each tracked host's zone, record type,
@@ -1466,7 +1572,7 @@ Backups are standard JSON files with the following structure:
   },
   "global": {
     "upstream_dns": ["1.1.1.1", "8.8.8.8"],
-    "keepalive_vip": "192.168.0.250",
+    "keepalive_vip": "192.168.0.230",
     "keepalive_interval": 300
   }
 }
@@ -1748,6 +1854,7 @@ MIT
 - [x] Automatic UI failover with keepalived health checks
 - [x] Configurable VIP address in setup script
 - [x] WireGuard mesh networking (v2.2) - full-mesh encrypted inter-node communication
+- [x] VLAN sub-interface management - persistent multi-subnet presence per server, provisioned live from the Config page
 
 ### Planned 📋
 - [ ] Zone file import/export

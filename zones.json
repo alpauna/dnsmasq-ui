@@ -188,7 +188,17 @@
         "tunnel_ip": "10.99.0.1",
         "listen_port": 51820,
         "generated": "2026-03-15T14:22:34.507636"
-      }
+      },
+      "vlans": [
+        {
+          "vlan_id": 7,
+          "name": "mgmt",
+          "ipv4_mode": "none",
+          "ipv4_address": null,
+          "ipv6_mode": "slaac",
+          "ipv6_address": null
+        }
+      ]
     },
     "dns02": {
       "ip": "192.168.0.232",
@@ -200,7 +210,17 @@
         "tunnel_ip": "10.99.0.2",
         "listen_port": 51820,
         "generated": "2026-03-15T14:22:34.507790"
-      }
+      },
+      "vlans": [
+        {
+          "vlan_id": 7,
+          "name": "mgmt",
+          "ipv4_mode": "static",
+          "ipv4_address": "192.168.7.232/24",
+          "ipv6_mode": "slaac",
+          "ipv6_address": null
+        }
+      ]
     },
     "dns03": {
       "ip": "192.168.0.233",
@@ -212,7 +232,17 @@
         "tunnel_ip": "10.99.0.3",
         "listen_port": 51820,
         "generated": "2026-03-15T14:22:34.507914"
-      }
+      },
+      "vlans": [
+        {
+          "vlan_id": 7,
+          "name": "mgmt",
+          "ipv4_mode": "static",
+          "ipv4_address": "192.168.7.233/24",
+          "ipv6_mode": "slaac",
+          "ipv6_address": null
+        }
+      ]
     }
   },
   "global": {
