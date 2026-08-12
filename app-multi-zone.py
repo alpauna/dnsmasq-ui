@@ -228,6 +228,17 @@ def _ipv6_from_prefix_and_mac(prefix_net, mac):
     device's MAC-derived EUI-64 host bits into its full SLAAC address."""
     return ipaddress.IPv6Address(int(prefix_net.network_address) | _eui64_from_mac(mac))
 
+def _ipv6_from_prefix_and_host(prefix_net, ipv6_host):
+    """Combine a subnet's /64 network with an explicit, manually-assigned
+    host suffix (e.g. '::11') into its full address -- the static
+    counterpart to _ipv6_from_prefix_and_mac, for devices whose address
+    isn't SLAAC/EUI-64 derived (e.g. a Proxmox host with a hand-configured
+    interface), addressed the same way the IPv6 VIP itself is (see
+    README). ipv6_host is parsed as a standalone IPv6Address so its
+    integer value *is* the 64 host bits directly, as long as the input
+    only used the low 64 bits (e.g. '::11', not a full routable address)."""
+    return ipaddress.IPv6Address(int(prefix_net.network_address) | int(ipaddress.IPv6Address(ipv6_host)))
+
 def _ipv4_from_cidr_and_host(cidr, host_number):
     """Combine a subnet's CIDR (e.g. '192.168.0.0/23') with an explicit
     host number into a full IPv4Address, validated to actually fall
@@ -1105,7 +1116,7 @@ class ZoneManager:
                           cli_prompt_regex=None, enable_command=None,
                           enable_password_ref=None, logout_command='exit',
                           ssh_password_ref=None, detect_url=None, login_url=None,
-                          subnet=None, mac_address=None, ipv4_host=None,
+                          subnet=None, mac_address=None, ipv4_host=None, ipv6_host=None,
                           login_fields=None, login_password_field=None,
                           login_password_transform='none', login_password_ref=None,
                           session_param_regex=None, session_param_name='session_id',
@@ -1154,14 +1165,23 @@ class ZoneManager:
         session_param_name is the query param name to append to detect_url.
         verify_tls: set False for self-signed-cert devices.
 
-        subnet/mac_address/ipv4_host: the cheaper alternative to all of the
-        above — for a device on a subnet with a primary_dns configured
-        (see add_subnet), its address is computed from that subnet's live
-        prefix instead of polling the device directly. mac_address is used
-        for AAAA (SLAAC/EUI-64 derives the suffix from it — see the
-        subnet-tracking section in README.md), ipv4_host is an explicit
-        host number for A. Mutually exclusive with target_host/connection/
-        detect_command/etc — this bypasses per-device polling entirely.
+        subnet/mac_address/ipv4_host/ipv6_host: the cheaper alternative to
+        all of the above — for a device on a subnet with a primary_dns
+        configured (see add_subnet), its address is computed from that
+        subnet's live prefix instead of polling the device directly. For
+        AAAA, exactly one of mac_address (SLAAC/EUI-64 derives the suffix
+        from it) or ipv6_host (an explicit, manually-assigned suffix like
+        '::11' — for devices like a Proxmox host that don't self-configure
+        via SLAAC, addressed the same way the IPv6 VIP itself is) is
+        required — see the subnet-tracking section in README.md. Note that
+        ipv6_host only keeps the *DNS record* in sync with a drifting
+        prefix; unlike a MAC-derived address, the device's own static
+        interface config doesn't auto-follow the prefix and needs updating
+        by hand (or via Ansible) if it ever rotates — same class of
+        follow-up as the IPv6 VIP drift monitoring. ipv4_host is an
+        explicit host number for A. Mutually exclusive with target_host/
+        connection/detect_command/etc — this bypasses per-device polling
+        entirely.
         """
         if not self.get_zone(zone_name):
             return False, "Zone not found"
@@ -1173,8 +1193,16 @@ class ZoneManager:
         if subnet:
             if subnet not in self.get_subnets():
                 return False, f"Unknown subnet '{subnet}'"
-            if record_type == 'AAAA' and not mac_address:
-                return False, "mac_address is required for AAAA subnet tracking"
+            if record_type == 'AAAA':
+                if not mac_address and ipv6_host is None:
+                    return False, "mac_address or ipv6_host is required for AAAA subnet tracking"
+                if mac_address and ipv6_host is not None:
+                    return False, "mac_address and ipv6_host are mutually exclusive"
+                if ipv6_host is not None:
+                    try:
+                        ipaddress.IPv6Address(ipv6_host)
+                    except ValueError:
+                        return False, f"ipv6_host '{ipv6_host}' is not a valid IPv6 address/suffix"
             if record_type == 'A' and ipv4_host is None:
                 return False, "ipv4_host is required for A subnet tracking"
             self.config['dynamic_hosts'].append({
@@ -1184,6 +1212,7 @@ class ZoneManager:
                 'subnet': subnet,
                 'mac_address': mac_address,
                 'ipv4_host': ipv4_host,
+                'ipv6_host': ipv6_host,
                 'enabled': enabled,
                 'last_checked': None,
                 'last_value': None,
@@ -1236,7 +1265,7 @@ class ZoneManager:
                    'logout_command', 'ssh_password_ref', 'detect_url', 'login_url',
                    'login_fields', 'login_password_field', 'login_password_transform',
                    'login_password_ref', 'session_param_regex', 'session_param_name',
-                   'verify_tls', 'subnet', 'mac_address', 'ipv4_host')
+                   'verify_tls', 'subnet', 'mac_address', 'ipv4_host', 'ipv6_host')
         for entry in self.config['dynamic_hosts']:
             if entry['domain'] == domain:
                 entry.update({k: v for k, v in fields.items() if k in allowed})
@@ -1847,8 +1876,9 @@ expect eof
 
     def _detect_subnet_member_address(self, entry):
         """Compute a subnet-tracked device's current address from its
-        subnet's live prefix/CIDR plus its own MAC (AAAA) or host number
-        (A) — no per-device polling needed, see poll_subnets()."""
+        subnet's live prefix/CIDR plus its own MAC (AAAA, SLAAC/EUI-64),
+        an explicit static suffix (AAAA, ipv6_host), or host number (A) —
+        no per-device polling needed, see poll_subnets()."""
         subnet = self.config.get('global', {}).get('subnets', {}).get(entry.get('subnet'))
         if not subnet:
             logger.error(f"'{entry['domain']}' references unknown subnet '{entry.get('subnet')}'")
@@ -1856,10 +1886,16 @@ expect eof
         record_type = entry.get('record_type', 'AAAA')
         try:
             if record_type == 'AAAA':
-                prefix_v6, mac = subnet.get('prefix_v6'), entry.get('mac_address')
-                if not prefix_v6 or not mac:
+                prefix_v6 = subnet.get('prefix_v6')
+                if not prefix_v6:
                     return None
-                return str(_ipv6_from_prefix_and_mac(ipaddress.ip_network(prefix_v6), mac))
+                mac = entry.get('mac_address')
+                ipv6_host = entry.get('ipv6_host')
+                if mac:
+                    return str(_ipv6_from_prefix_and_mac(ipaddress.ip_network(prefix_v6), mac))
+                elif ipv6_host is not None:
+                    return str(_ipv6_from_prefix_and_host(ipaddress.ip_network(prefix_v6), ipv6_host))
+                return None
             else:
                 cidr_v4, host_number = subnet.get('cidr_v4'), entry.get('ipv4_host')
                 if not cidr_v4 or host_number is None:
@@ -2773,7 +2809,8 @@ def api_dynamic_hosts_add():
         verify_tls=data.get('verify_tls', True),
         subnet=data.get('subnet'),
         mac_address=data.get('mac_address'),
-        ipv4_host=data.get('ipv4_host')
+        ipv4_host=data.get('ipv4_host'),
+        ipv6_host=data.get('ipv6_host')
     )
     return jsonify({'success': success, 'message': message})
 

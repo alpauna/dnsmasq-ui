@@ -602,6 +602,40 @@ IPv4 address that's calculable the way EUI-64 is), so an IPv4-tracked
 entry instead stores an explicit `ipv4_host` number, combined with the
 subnet's `cidr_v4`.
 
+#### Devices with a manually-assigned address (ipv6_host)
+
+Not every device on a tracked subnet is MAC-derived. A Proxmox host given
+a hand-configured static address on the `mgmt` VLAN, for example, doesn't
+self-configure via SLAAC, so there's no MAC to derive a suffix from —
+`mac_address` doesn't apply. `ipv6_host` covers this case instead: an
+explicit, manually-chosen 64-bit suffix combined with the subnet's live
+`prefix_v6`, the same addressing style already used for the [IPv6
+VIP](#ipv6-vip) itself (`2605:4a80:b004:b120::230` — prefix plus a chosen
+`::230`):
+
+```json
+{
+  "domain": "pve01.ad.alshowto.com",
+  "zone": "ad.alshowto.com",
+  "record_type": "AAAA",
+  "subnet": "mgmt",
+  "ipv6_host": "::11"
+}
+```
+
+`prefix | ipv6_host` → `2605:4a80:b009:c100::11`. A subnet-tracked AAAA
+entry needs exactly one of `mac_address` or `ipv6_host` — not both.
+
+The catch: this only keeps the *DNS record* in sync when
+`poll_subnets()` detects the delegated prefix has changed. Unlike a
+MAC-derived address, the device's own static interface configuration
+doesn't auto-follow the prefix — if the ISP/router ever rotates it,
+`pve01`'s actual interface still needs to be updated by hand (or via
+Ansible) to `<new-prefix>::11` separately, or DNS and the device's real
+address go out of sync. This is the same class of manual follow-up as the
+[IPv6 VIP drift monitoring](#monitoring) already requires — no
+auto-remediation, just automatic detection of one side of it.
+
 Verified against production: recomputing all six LAN devices' addresses
 this way matched their existing DNS records exactly, using a single SSH
 call to `dns01` — no connections to either switch or to `dns02`/`dns03` at

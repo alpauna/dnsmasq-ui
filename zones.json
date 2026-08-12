@@ -173,6 +173,11 @@
           "domain": "wifi.mgmt.alshowto.com",
           "type": "A",
           "value": "192.168.7.21"
+        },
+        {
+          "domain": "pve01.mgmt.alshowto.com",
+          "type": "AAAA",
+          "value": "2605:4a80:b009:c100::11"
         }
       ]
     }
@@ -268,7 +273,7 @@
       },
       "mgmt": {
         "cidr_v4": "192.168.7.0/24",
-        "prefix_v6": null,
+        "prefix_v6": "2605:4a80:b009:c100::/64",
         "primary_dns": "dns01",
         "interface": "eth0.7"
       }
@@ -347,6 +352,17 @@
       "record_type": "AAAA",
       "subnet": "lan",
       "mac_address": "bc:24:11:5c:e8:3c",
+      "enabled": true,
+      "last_checked": null,
+      "last_value": null,
+      "last_updated": null
+    },
+    {
+      "domain": "pve01.mgmt.alshowto.com",
+      "zone": "mgmt.alshowto.com",
+      "record_type": "AAAA",
+      "subnet": "mgmt",
+      "ipv6_host": "::11",
       "enabled": true,
       "last_checked": null,
       "last_value": null,

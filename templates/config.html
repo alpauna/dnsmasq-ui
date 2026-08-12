@@ -597,6 +597,18 @@
                             by reversing EUI-64 if you don't have it handy (see README).
                         </p>
                     </div>
+                    <div class="form-group" id="dh-ipv6-host-group">
+                        <label for="dh-ipv6-host">...or Static IPv6 Suffix</label>
+                        <input type="text" id="dh-ipv6-host" placeholder="::11">
+                        <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                            For devices with a manually-assigned address (not SLAAC), e.g. a Proxmox
+                            host — same addressing style as the IPv6 VIP. Combined with the subnet's
+                            live prefix, e.g. ::11 in 2605:4a80:b009:c100::/64 →
+                            2605:4a80:b009:c100::11. Fill in exactly one of MAC Address or this —
+                            keeps the DNS record in sync with a drifting prefix, but the device's own
+                            static interface config still needs updating by hand if it ever rotates.
+                        </p>
+                    </div>
                     <div class="form-group" id="dh-ipv4-host-group" style="display: none;">
                         <label for="dh-ipv4-host">IPv4 Host Number</label>
                         <input type="number" id="dh-ipv4-host" placeholder="231" min="0">
@@ -1758,7 +1770,7 @@
                                 const primary = s && s.primary_dns ? s.primary_dns : '(none set)';
                                 trackingNote = `
                                     <p><strong>📡 Subnet:</strong> ${h.subnet} <span style="color: #666;">(primary: ${primary})</span></p>
-                                    <p><strong>MAC:</strong> ${h.mac_address || h.ipv4_host || 'not set'}</p>`;
+                                    <p><strong>${h.mac_address ? 'MAC' : h.ipv6_host ? 'Static suffix' : 'Host'}:</strong> ${h.mac_address || h.ipv6_host || h.ipv4_host || 'not set'}</p>`;
                             } else {
                                 const connectionNote = h.connection && h.connection !== 'paramiko'
                                     ? `<p><strong>Connection:</strong> ${h.connection}</p>` : '';
@@ -1822,6 +1834,7 @@
                     record_type: recordType,
                     subnet: document.getElementById('dh-subnet').value,
                     mac_address: document.getElementById('dh-mac-address').value.trim() || null,
+                    ipv6_host: document.getElementById('dh-ipv6-host').value.trim() || null,
                     ipv4_host: document.getElementById('dh-ipv4-host').value
                         ? parseInt(document.getElementById('dh-ipv4-host').value, 10) : null
                 };
@@ -1879,6 +1892,7 @@
 
             const isAAAA = document.getElementById('dh-record-type').value === 'AAAA';
             document.getElementById('dh-mac-group').style.display = isAAAA ? 'block' : 'none';
+            document.getElementById('dh-ipv6-host-group').style.display = isAAAA ? 'block' : 'none';
             document.getElementById('dh-ipv4-host-group').style.display = isAAAA ? 'none' : 'block';
         }
 
@@ -2106,6 +2120,7 @@
             document.getElementById('dh-tracking-method').disabled = true;
             document.getElementById('dh-subnet').value = entry.subnet || '';
             document.getElementById('dh-mac-address').value = entry.mac_address || '';
+            document.getElementById('dh-ipv6-host').value = entry.ipv6_host || '';
             document.getElementById('dh-ipv4-host').value = entry.ipv4_host != null ? entry.ipv4_host : '';
             document.getElementById('dh-target').value = entry.target_host || '';
             document.getElementById('dh-ssh-user').value = entry.ssh_user || '';
