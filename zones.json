@@ -339,6 +339,48 @@
       "last_checked": "2026-08-12T02:19:31.260083",
       "last_value": "2605:4a80:b004:b120:56af:97ff:fe8f:c7a7",
       "last_updated": "2026-08-11T22:59:39.700407"
+    },
+    {
+      "domain": "dns01.ad.alshowto.com",
+      "zone": "ad.alshowto.com",
+      "record_type": "AAAA",
+      "target_host": "192.168.0.231",
+      "interface": "eth0",
+      "ssh_user": null,
+      "enabled": true,
+      "detect_command": "ip -6 -o addr show eth0 scope global dynamic",
+      "detect_regex": "inet6 ([0-9a-fA-F:]+)/",
+      "last_checked": null,
+      "last_value": null,
+      "last_updated": null
+    },
+    {
+      "domain": "dns02.ad.alshowto.com",
+      "zone": "ad.alshowto.com",
+      "record_type": "AAAA",
+      "target_host": "192.168.0.232",
+      "interface": "eth0",
+      "ssh_user": null,
+      "enabled": true,
+      "detect_command": "ip -6 -o addr show eth0 scope global dynamic",
+      "detect_regex": "inet6 ([0-9a-fA-F:]+)/",
+      "last_checked": null,
+      "last_value": null,
+      "last_updated": null
+    },
+    {
+      "domain": "dns03.ad.alshowto.com",
+      "zone": "ad.alshowto.com",
+      "record_type": "AAAA",
+      "target_host": "192.168.0.233",
+      "interface": "eth0",
+      "ssh_user": null,
+      "enabled": true,
+      "detect_command": "ip -6 -o addr show eth0 scope global dynamic",
+      "detect_regex": "inet6 ([0-9a-fA-F:]+)/",
+      "last_checked": null,
+      "last_value": null,
+      "last_updated": null
     }
   ]
 }
