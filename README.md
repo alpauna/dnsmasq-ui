@@ -21,6 +21,7 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 - **⚡ Single VIP**: Same keepalived VIP serves both DNS (port 53) and UI (port 5000)
 - **🔗 WireGuard Mesh**: Full-mesh encrypted network for secure cross-cluster DNS synchronization (v2.2+)
 - **🏷️ VLAN Sub-Interfaces**: Give a DNS server a real address on another subnet (via VLAN tag) without a second NIC, provisioned live from the Config page
+- **🛡️ Proxmox Commit-Confirm Auto-Update**: Auto-push a drifted subnet prefix to a Proxmox VE node's own interface with a self-reverting safety net, serialized one node at a time with a hard-stop-and-lock on any failure
 
 ## Architecture
 
@@ -687,6 +688,65 @@ address configured for email 2FA, same as the IPv6 VIP drift notice —
 even a successful unattended change to hypervisor networking is worth
 knowing about.
 
+#### Commit-confirm: surviving a push that breaks reachability
+
+The diff-check above only proves the *config being staged* looks
+correct — it can't catch a case where an otherwise-valid config still
+breaks the actual network path (e.g. the new prefix isn't really routed
+yet). If that happens after applying, a plain client-side revert is
+useless: the same connection needed to send it may be the thing that
+just broke. `commit_proxmox_interface_v6()` (what `poll_subnets()`
+actually calls, layered on top of `update_proxmox_interface_v6()`)
+closes that gap with a commit-confirm handshake, the same pattern
+network gear uses for exactly this risk:
+
+1. **Before touching anything**, schedule an unconditional self-revert
+   on the node's *own* systemd — `systemd-run --on-active=<timeout>
+   --unit=dnsmasq-ui-revert-<iface> /bin/bash -c '<rebuild old config> &&
+   <apply>'` (`at` would be the traditional tool for this, but isn't
+   installed on these nodes and `systemd-run` needs nothing extra —
+   confirmed directly, including that cancelling via `systemctl stop
+   <unit>.timer` reliably removes it). Because this runs locally on the
+   node, it fires even if dnsmasq-ui loses all contact with the node
+   right after applying — the one failure mode a client-side-only revert
+   can't cover.
+2. Stage, diff-verify, and apply the real change (`update_proxmox_interface_v6`).
+3. **Independently validate** the node is actually reachable at the new
+   address: `ping6` to the new address itself, plus a fresh SSH connect
+   to the node's stable mgmt IP (proves the box as a whole is still up,
+   not just that one address answers ICMP).
+4. Only if validation passes: cancel the revert timer. Otherwise — including
+   if dnsmasq-ui can't even reach the node to check — do nothing and let
+   the timer fire on its own; the node self-heals with no further action
+   needed.
+
+`PROXMOX_COMMIT_TIMEOUT_SECONDS` (default `300`) controls the window.
+
+#### One node at a time, hard stop on failure, global lockout
+
+When a subnet's prefix changes, every qualifying `proxmox_update` entry
+on it is processed **strictly one at a time, in order** — each must
+fully commit-confirm before the next is even attempted (there's no
+concurrency here to accidentally race, but the code is written to make
+that guarantee explicit rather than incidental). The first failure halts
+the entire batch immediately: every remaining node is left completely
+untouched, not skipped-and-continued, and a `global.proxmox_auto_update_lock`
+flag in `zones.json` engages, blocking **all** further `proxmox_update`
+pushes (DNS-side `ipv6_host` tracking keeps working normally) until
+explicitly unlocked. A detailed failure email goes out — which node
+failed, why, whether it self-reverted via the timer or was never applied,
+and which other hosts got skipped as a result.
+
+Unlocking isn't a plain toggle. The Configuration page's "Verify &
+Unlock" button (`POST /api/proxmox-lock/unlock`) re-checks every
+`proxmox_update`-configured interface's *live* state first — recomputes
+the expected address from the subnet's current prefix, confirms the
+node's actual `address6` matches it, and re-runs the same reachability
+check as the commit-confirm handshake — and only clears the lock if
+every single one checks out. A partial pass leaves it locked and reports
+exactly which interface(s) are still wrong, since an admin clicking
+"it's fine now" isn't the same as it actually being fine.
+
 Verified against production: recomputing all six LAN devices' addresses
 this way matched their existing DNS records exactly, using a single SSH
 call to `dns01` — no connections to either switch or to `dns02`/`dns03` at
@@ -896,6 +956,7 @@ export DASHBOARD_URL=http://192.168.0.233:5000          # Used in links for emai
 export PROXMOX_SSH_USER=root                            # SSH user for pvesh commands, not the DNS-server SSH_USER
 export PROXMOX_NODES='pve01;pve04;pve06;pve3'           # ';'-separated node names, paired positionally with PROXMOX_IPS
 export PROXMOX_IPS='192.168.7.11;192.168.7.14;192.168.7.16;192.168.7.13'
+export PROXMOX_COMMIT_TIMEOUT_SECONDS=300               # Self-revert window for the commit-confirm handshake
 
 # Reverse Proxy Support
 export PROXY_PATH_PREFIX=/dnsmasq-ui                    # URL path prefix (optional)
@@ -1194,6 +1255,20 @@ curl -X DELETE http://localhost:5000/api/servers/dns01/vlans/7
 See [VLAN Sub-Interfaces](#vlan-sub-interfaces) for the field reference
 and the Proxmox-trunk caveat.
 
+### Proxmox Auto-Update Lock
+
+```bash
+# Current lock state
+curl http://localhost:5000/api/proxmox-lock
+
+# Re-verify every proxmox_update-configured interface's live state and
+# clear the lock only if all of them check out
+curl -X POST http://localhost:5000/api/proxmox-lock/unlock
+```
+
+See [Closing the loop](#closing-the-loop-auto-pushing-to-a-proxmox-ve-node-proxmox_update)
+for what engages the lock and what "verify" actually checks.
+
 ### SSH Key Management
 
 ```bash
@@ -1324,6 +1399,13 @@ and VLAN management:
 - **Edit/Remove**: Update a VLAN's addressing or tear it down entirely
 - Requires the underlying Proxmox bridge to already be trunking the VLAN
   to that VM — see [VLAN Sub-Interfaces](#vlan-sub-interfaces)
+
+#### Proxmox Auto-Update
+- **Lock Status**: green if auto-updates are running normally, red with
+  the failure reason/timestamp/node if locked
+- **Verify & Unlock**: re-checks every `proxmox_update`-configured
+  interface's live state and only clears the lock if all of them match
+  expectations — a partial pass reports exactly which one(s) don't
 
 #### Dynamic DNS Tracking
 - **Tracked Hosts**: Cards showing each tracked host's zone, record type,
@@ -1946,6 +2028,7 @@ MIT
 - [x] Configurable VIP address in setup script
 - [x] WireGuard mesh networking (v2.2) - full-mesh encrypted inter-node communication
 - [x] VLAN sub-interface management - persistent multi-subnet presence per server, provisioned live from the Config page
+- [x] Proxmox VE commit-confirm auto-update - self-reverting safety net, serialized per-node, hard-stop-and-lock on failure
 
 ### Planned 📋
 - [ ] Zone file import/export

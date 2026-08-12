@@ -59,6 +59,7 @@ SSH_BIN = next((p for p in ('/usr/bin/ssh', '/bin/ssh', '/usr/local/bin/ssh') if
 DOCKER_BIN = next((p for p in ('/usr/bin/docker', '/usr/local/bin/docker') if os.path.exists(p)), 'docker')
 SUDO_BIN = next((p for p in ('/usr/bin/sudo', '/bin/sudo') if os.path.exists(p)), 'sudo')
 IP_BIN = next((p for p in ('/usr/sbin/ip', '/sbin/ip', '/usr/bin/ip') if os.path.exists(p)), 'ip')
+PING_BIN = next((p for p in ('/usr/bin/ping', '/bin/ping') if os.path.exists(p)), 'ping')
 # The service account isn't in the docker group (avoids that standing,
 # effectively-root-equivalent grant); reuses the passwordless sudo access
 # already relied on elsewhere in this app for remote commands. -n fails
@@ -110,6 +111,11 @@ PROXMOX_NODE_IPS = dict(zip(
     (n.strip() for n in os.getenv('PROXMOX_NODES', '').split(';') if n.strip()),
     (i.strip() for i in os.getenv('PROXMOX_IPS', '').split(';') if i.strip())
 ))
+# How long a Proxmox node waits, after applying an auto-pushed address
+# change, before self-reverting if dnsmasq-ui never confirms it — see
+# commit_proxmox_interface_v6. Scheduled via systemd-run on the node
+# itself, so this fires even if dnsmasq-ui can't reach the node again.
+PROXMOX_COMMIT_TIMEOUT_SECONDS = int(os.getenv('PROXMOX_COMMIT_TIMEOUT_SECONDS', '300'))
 
 # Reverse proxy configuration
 PROXY_PATH_PREFIX = os.getenv('PROXY_PATH_PREFIX', '')  # e.g., '/dnsmasq-ui' for http://proxy/dnsmasq-ui/
@@ -1015,6 +1021,83 @@ class ZoneManager:
     _PVESH_VLAN_FIELDS = ('cidr', 'gateway', 'cidr6', 'gateway6', 'mtu', 'autostart',
                            'comments', 'comments6', 'vlan-id', 'vlan-raw-device')
 
+    def _build_pvesh_set_cmd(self, node, iface, fields):
+        """Build a `pvesh set` command string for a type=vlan interface
+        from a fields dict (see _PVESH_VLAN_FIELDS) — shared by the real
+        update and by the revert-timer command scheduled against the
+        node's own systemd (see _schedule_proxmox_revert), so both stay
+        in sync with the same field-quoting logic."""
+        cmd = ["pvesh", "set", f"/nodes/{node}/network/{iface}", "--type", "vlan"]
+        for k, v in fields.items():
+            if isinstance(v, bool):
+                v = 1 if v else 0
+            cmd += [f"--{k}", shlex.quote(str(v))]
+        return " ".join(cmd)
+
+    def _schedule_proxmox_revert(self, node, iface, revert_fields, timeout_seconds):
+        """Schedule an unconditional self-revert on the Proxmox node
+        itself, via a transient systemd timer (systemd-run --on-active —
+        no extra package needed, unlike `at`, which isn't installed on
+        these nodes). This must be scheduled BEFORE the real change is
+        ever applied: if it fires, it restores revert_fields (the
+        interface's config from just before the change) and applies —
+        running locally on the node's own systemd, so it fires even if
+        dnsmasq-ui itself loses all contact with the node right after
+        applying the real change. Returns (success, unit_name_or_error)."""
+        revert_cmd = self._build_pvesh_set_cmd(node, iface, revert_fields)
+        apply_cmd = f"pvesh set /nodes/{node}/network"
+        unit = f"dnsmasq-ui-revert-{iface}"
+        inner = f"{revert_cmd} && {apply_cmd}"
+        schedule_cmd = (
+            f"systemd-run --on-active={int(timeout_seconds)}s --unit={shlex.quote(unit)} "
+            f"--description={shlex.quote(f'dnsmasq-ui auto-revert safety net for {iface}')} "
+            f"/bin/bash -c {shlex.quote(inner)}"
+        )
+        ok, output = self._run_proxmox_ssh_command(node, schedule_cmd)
+        if not ok:
+            return False, f"Failed to schedule revert timer for {node}/{iface}: {output}"
+        return True, unit
+
+    def _cancel_proxmox_revert(self, node, iface):
+        """Cancel a revert timer scheduled by _schedule_proxmox_revert —
+        called once a pushed change is applied and independently
+        confirmed reachable. Deliberately NOT called on a failed/unclear
+        outcome — an uncancelled timer is exactly the safety net that's
+        supposed to fire in that case."""
+        unit = f"dnsmasq-ui-revert-{iface}"
+        return self._run_proxmox_ssh_command(node, f"systemctl stop {shlex.quote(unit)}.timer")
+
+    def _validate_proxmox_reachability(self, node, address6, timeout=10):
+        """Confirm a Proxmox node is actually reachable at a
+        newly-applied IPv6 address — run from wherever dnsmasq-ui itself
+        is, NOT via SSH into the node, since the point is proving the
+        network path TO it still works, which an SSH session already
+        established from inside a prior step can't demonstrate. Both
+        checks must pass: ping6 to the specific new address (proves that
+        address is live and routed, not just that the node is up), and a
+        fresh SSH connect to the node's stable mgmt IP (proves the box
+        itself is still fully up, not e.g. mid-reboot from a botched
+        network reload)."""
+        try:
+            ping = subprocess.run(
+                [PING_BIN, '-6', '-c', '3', '-W', str(timeout), address6],
+                capture_output=True, timeout=timeout + 5)
+        except Exception as e:
+            return False, f"ping6 to {address6} failed to run: {e}"
+        if ping.returncode != 0:
+            return False, f"ping6 to {address6} got no response"
+
+        host = PROXMOX_NODE_IPS.get(node)
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(host, username=PROXMOX_SSH_USER, key_filename=SSH_KEY, timeout=timeout)
+            ssh.close()
+        except Exception as e:
+            return False, f"SSH connect to {node} ({host}) failed after applying: {e}"
+
+        return True, f"{address6} reachable, SSH to {node} OK"
+
     def update_proxmox_interface_v6(self, node, iface, address6, apply=True):
         """Push a new static IPv6 address onto a Proxmox VE node's own
         VLAN interface (e.g. pve01's vlan7 mgmt-subnet presence) — the
@@ -1065,12 +1148,7 @@ class ZoneManager:
                   if current.get(k) is not None}
         fields['cidr6'] = new_cidr6
 
-        cmd = ["pvesh", "set", f"/nodes/{node}/network/{iface}", "--type", "vlan"]
-        for k, v in fields.items():
-            if isinstance(v, bool):
-                v = 1 if v else 0
-            cmd += [f"--{k}", shlex.quote(str(v))]
-        ok, output = self._run_proxmox_ssh_command(node, " ".join(cmd))
+        ok, output = self._run_proxmox_ssh_command(node, self._build_pvesh_set_cmd(node, iface, fields))
         if not ok:
             return False, f"pvesh set failed for {node}/{iface}: {output}"
 
@@ -1099,61 +1177,227 @@ class ZoneManager:
             return False, f"pvesh apply failed for {node}/{iface} (still pending, not reverted): {output}"
         return True, f"{node}/{iface} updated to {new_addr} and applied"
 
+    def commit_proxmox_interface_v6(self, node, iface, address6):
+        """Full commit-confirm push of a new static IPv6 address to a
+        Proxmox VE node's own interface — the safe wrapper around
+        update_proxmox_interface_v6 that _propagate_subnet_prefix_change
+        actually calls.
+
+        Order matters: the self-revert timer (_schedule_proxmox_revert)
+        is scheduled FIRST, on the node's own systemd, before the real
+        change is ever applied — so it fires unconditionally within
+        PROXMOX_COMMIT_TIMEOUT_SECONDS unless explicitly cancelled,
+        including in the case a plain client-side revert can't cover:
+        the push breaks dnsmasq-ui's own connectivity back to the node.
+        Only cancelled once the change is both applied AND independently
+        confirmed reachable (_validate_proxmox_reachability) — a failure
+        at any step leaves the timer running (or nothing was ever
+        applied) rather than trying to clean up from this side.
+
+        Returns (success, message).
+        """
+        try:
+            current = self.get_proxmox_interface(node, iface)
+        except Exception as e:
+            return False, f"Failed to read current config for {node}/{iface}: {e}"
+
+        revert_fields = {k: current[k] for k in self._PVESH_VLAN_FIELDS if current.get(k) is not None}
+        scheduled, detail = self._schedule_proxmox_revert(node, iface, revert_fields, PROXMOX_COMMIT_TIMEOUT_SECONDS)
+        if not scheduled:
+            return False, (f"Refusing to proceed — couldn't schedule the safety-net revert timer "
+                            f"for {node}/{iface}: {detail}")
+
+        success, message = self.update_proxmox_interface_v6(node, iface, address6, apply=True)
+        if not success:
+            self._cancel_proxmox_revert(node, iface)
+            return False, f"Update failed, nothing was left applied (revert timer cancelled, nothing to revert): {message}"
+
+        valid, valid_detail = self._validate_proxmox_reachability(node, address6)
+        if not valid:
+            return False, (f"Applied but failed post-apply validation ({valid_detail}) — NOT cancelling "
+                            f"the revert timer; {node}/{iface} will self-revert to its previous config "
+                            f"within {PROXMOX_COMMIT_TIMEOUT_SECONDS}s if this isn't resolved first")
+
+        cancel_ok, cancel_detail = self._cancel_proxmox_revert(node, iface)
+        if not cancel_ok:
+            return False, (f"Applied and validated OK, but failed to cancel the revert timer "
+                            f"({cancel_detail}) — {node}/{iface} WILL self-revert in "
+                            f"{PROXMOX_COMMIT_TIMEOUT_SECONDS}s unless stopped manually: "
+                            f"systemctl stop dnsmasq-ui-revert-{iface}.timer")
+
+        return True, f"{node}/{iface} committed to {address6} (validated reachable, revert timer cancelled)"
+
+    def get_proxmox_lock(self):
+        """Current Proxmox auto-update lock state (see
+        _propagate_subnet_prefix_change / verify_and_clear_proxmox_lock).
+        Lazily created as unlocked so older zones.json files without
+        this key don't need a migration."""
+        return self.config.get('global', {}).setdefault('proxmox_auto_update_lock', {
+            'locked': False, 'reason': None, 'node': None, 'iface': None, 'since': None
+        })
+
+    def _set_proxmox_lock(self, reason, node, iface):
+        lock = self.get_proxmox_lock()
+        lock.update({'locked': True, 'reason': reason, 'node': node, 'iface': iface,
+                     'since': datetime.now().isoformat()})
+        self.save_config()
+
+    def verify_and_clear_proxmox_lock(self):
+        """Re-verify every proxmox_update-configured interface actually
+        matches what dnsmasq-ui expects (live subnet prefix + its own
+        ipv6_host suffix, AND independently reachable) before clearing
+        the lock. An admin clicking 'unlock' isn't enough on its own —
+        the whole point of the lock is that an unattended failure needs
+        a human to look, and a human can still be wrong or looking at
+        stale info, so this re-checks live state itself rather than
+        trusting the click. Returns (success, message, details) —
+        details is a per-interface list regardless of outcome, so a
+        partial failure clearly shows which one(s) are still bad."""
+        lock = self.get_proxmox_lock()
+        if not lock.get('locked'):
+            return True, "Not locked", []
+
+        subnets = self.get_subnets()
+        details = []
+        all_good = True
+        for entry in self.config.get('dynamic_hosts', []):
+            proxmox = entry.get('proxmox_update')
+            if not proxmox or entry.get('ipv6_host') is None:
+                continue
+            subnet = subnets.get(entry.get('subnet'), {})
+            prefix_v6 = subnet.get('prefix_v6')
+            if not prefix_v6:
+                details.append({'domain': entry['domain'], 'ok': False,
+                                 'detail': "subnet has no live prefix_v6 to check against"})
+                all_good = False
+                continue
+            try:
+                expected_addr = str(_ipv6_from_prefix_and_host(ipaddress.ip_network(prefix_v6), entry['ipv6_host']))
+            except ValueError as e:
+                details.append({'domain': entry['domain'], 'ok': False,
+                                 'detail': f"address computation failed: {e}"})
+                all_good = False
+                continue
+            try:
+                live = self.get_proxmox_interface(proxmox['node'], proxmox['iface'])
+            except Exception as e:
+                details.append({'domain': entry['domain'], 'ok': False,
+                                 'detail': f"couldn't read {proxmox['node']}/{proxmox['iface']}: {e}"})
+                all_good = False
+                continue
+            live_addr = live.get('address6')
+            if live_addr != expected_addr:
+                details.append({'domain': entry['domain'], 'ok': False,
+                                 'detail': f"{proxmox['node']}/{proxmox['iface']} has {live_addr}, expected {expected_addr}"})
+                all_good = False
+                continue
+            valid, valid_detail = self._validate_proxmox_reachability(proxmox['node'], expected_addr)
+            details.append({'domain': entry['domain'], 'ok': valid,
+                             'detail': valid_detail if valid else f"address matches but unreachable: {valid_detail}"})
+            if not valid:
+                all_good = False
+
+        if not all_good:
+            return False, "One or more interfaces still don't match expectations — see details", details
+
+        lock.update({'locked': False, 'reason': None, 'node': None, 'iface': None, 'since': None})
+        self.save_config()
+        return True, "All proxmox_update interfaces verified good, lock cleared", details
+
     def _notify_proxmox_auto_update(self, entry, node, iface, address6, success, message):
-        """Email a heads-up whenever a subnet prefix change triggers an
-        auto-push to a Proxmox node's interface — success or failure,
-        since even a successful unattended change to hypervisor
-        networking is worth knowing about, same reasoning as the IPv6
-        VIP drift notice."""
+        """Email a heads-up for a single successful auto-push — failures
+        that halt the batch use _notify_proxmox_batch_halted instead,
+        which has more to explain (skipped hosts, the lock)."""
         auth_config = _load_auth() or {}
         to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
         if not to_addr:
             logger.error(f"Proxmox auto-update for {entry['domain']} ({node}/{iface}) "
-                         f"{'succeeded' if success else 'FAILED'}: {message} — no notification "
-                         "email configured (enable email 2FA to set one)")
+                         f"succeeded: {message} — no notification email configured "
+                         "(enable email 2FA to set one)")
             return
-        status = 'succeeded' if success else 'FAILED'
         _send_email(
-            to_addr, f"dnsmasq-ui: Proxmox auto-update {status} ({node}/{iface})",
+            to_addr, f"dnsmasq-ui: Proxmox auto-update succeeded ({node}/{iface})",
             f"The '{entry.get('subnet')}' subnet's live IPv6 prefix changed, so dnsmasq-ui "
-            f"tried to push a matching static address to {node}'s {iface} interface for "
+            f"pushed a matching static address to {node}'s {iface} interface for "
             f"{entry['domain']}.\n\n"
-            f"Target address: {address6}\n"
-            f"Result: {status}\n"
-            f"Detail: {message}\n\n"
-            + ("" if success else
-               f"No changes were left applied — either nothing was staged, or a staged "
-               f"change didn't match expectations and was reverted. {node}'s networking "
-               f"was not touched.\n\n") +
+            f"Address: {address6}\nDetail: {message}\n\n"
             f"Dashboard: {DASHBOARD_URL}/config"
         )
+
+    def _notify_proxmox_batch_halted(self, entry, node, iface, address6, message, skipped_domains):
+        """Email when a failed Proxmox commit halts the whole batch and
+        engages the lock (see _propagate_subnet_prefix_change) — richer
+        than _notify_proxmox_auto_update since this also has to explain
+        what got skipped and how to recover."""
+        auth_config = _load_auth() or {}
+        to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+        skipped_note = (
+            f"\n\nThe following {len(skipped_domains)} other host(s) on this subnet were NOT "
+            f"touched this cycle as a result (left exactly as they were, not attempted):\n" +
+            "\n".join(f"  - {d}" for d in skipped_domains)
+        ) if skipped_domains else "\n\nNo other hosts on this subnet were pending an update this cycle."
+        body = (
+            f"A Proxmox auto-update FAILED for {entry['domain']} ({node}/{iface}), target address "
+            f"{address6}.\n\nDetail: {message}\n"
+            f"{skipped_note}\n\n"
+            "Proxmox auto-updates are now LOCKED — no further pushes will be attempted (DNS-side "
+            "tracking keeps working normally) until this is reviewed and unlocked from the "
+            "Configuration page, which re-verifies every configured interface's live state before "
+            f"clearing the lock.\n\nDashboard: {DASHBOARD_URL}/config"
+        )
+        if not to_addr:
+            logger.error(f"Proxmox batch halted for {entry['domain']} ({node}/{iface}): {message} "
+                         "— no notification email configured (enable email 2FA to set one)")
+            return
+        _send_email(to_addr, f"dnsmasq-ui: Proxmox auto-update FAILED, updates LOCKED ({node}/{iface})", body)
 
     def _propagate_subnet_prefix_change(self, subnet_name, old_prefix, new_prefix):
         """When poll_subnets() finds a subnet's live prefix has actually
         changed (not just been detected for the first time), push
-        updated addresses to any dynamic_hosts entries on it that use a
-        manually-assigned ipv6_host (not SLAAC) and have proxmox_update
-        configured — see update_proxmox_interface_v6. Logs/emails and
-        continues past failures so one bad push doesn't block others."""
+        updated addresses — one node at a time, strictly in order — to
+        any dynamic_hosts entries on it that use a manually-assigned
+        ipv6_host (not SLAAC) and have proxmox_update configured. Each
+        node must fully commit-confirm (see commit_proxmox_interface_v6)
+        before the next one is even attempted. Any failure halts the
+        rest of the batch immediately — remaining nodes are left
+        completely untouched, not just skipped-and-continued — and
+        engages a global lock that blocks all further Proxmox pushes
+        until an admin unlocks from the Config page (which re-verifies
+        live state first)."""
+        lock = self.get_proxmox_lock()
+        if lock.get('locked'):
+            logger.error(f"Subnet '{subnet_name}' prefix changed ({old_prefix} -> {new_prefix}) but "
+                         f"Proxmox auto-update is LOCKED ({lock.get('reason')}) since {lock.get('since')} "
+                         "— skipping all Proxmox pushes until unlocked from the Config page")
+            return
         logger.warning(f"Subnet '{subnet_name}' prefix changed: {old_prefix} -> {new_prefix}")
-        for entry in self.config.get('dynamic_hosts', []):
-            if entry.get('subnet') != subnet_name or entry.get('ipv6_host') is None:
-                continue
-            proxmox = entry.get('proxmox_update')
-            if not proxmox:
-                continue
+
+        candidates = [e for e in self.config.get('dynamic_hosts', [])
+                      if e.get('subnet') == subnet_name and e.get('ipv6_host') is not None
+                      and e.get('proxmox_update')]
+
+        for i, entry in enumerate(candidates):
+            proxmox = entry['proxmox_update']
             try:
                 new_addr = _ipv6_from_prefix_and_host(ipaddress.ip_network(new_prefix), entry['ipv6_host'])
             except ValueError as e:
                 logger.error(f"Failed computing new Proxmox address for {entry['domain']}: {e}")
                 continue
-            success, message = self.update_proxmox_interface_v6(
-                proxmox['node'], proxmox['iface'], str(new_addr))
-            logger.warning(f"Proxmox auto-update for {entry['domain']} "
-                          f"({proxmox['node']}/{proxmox['iface']}): "
+
+            success, message = self.commit_proxmox_interface_v6(proxmox['node'], proxmox['iface'], str(new_addr))
+            logger.warning(f"Proxmox commit for {entry['domain']} ({proxmox['node']}/{proxmox['iface']}): "
                           f"{'OK' if success else 'FAILED'} — {message}")
-            self._notify_proxmox_auto_update(entry, proxmox['node'], proxmox['iface'],
-                                              str(new_addr), success, message)
+
+            if success:
+                self._notify_proxmox_auto_update(entry, proxmox['node'], proxmox['iface'],
+                                                  str(new_addr), True, message)
+                continue
+
+            skipped = [c['domain'] for c in candidates[i + 1:]]
+            self._set_proxmox_lock(reason=message, node=proxmox['node'], iface=proxmox['iface'])
+            self._notify_proxmox_batch_halted(entry, proxmox['node'], proxmox['iface'],
+                                               str(new_addr), message, skipped)
+            break
 
     def _build_vlan_netplan(self, vlan_id, ipv4_mode, ipv4_address, ipv6_mode, ipv6_address):
         """Netplan v2 YAML for a single VLAN sub-interface. ipv4_mode:
@@ -3042,6 +3286,18 @@ def api_dynamic_hosts_add():
         proxmox_update=data.get('proxmox_update')
     )
     return jsonify({'success': success, 'message': message})
+
+@app.route('/api/proxmox-lock', methods=['GET'])
+def api_proxmox_lock_get():
+    """API: Current Proxmox auto-update lock state."""
+    return jsonify(manager.get_proxmox_lock())
+
+@app.route('/api/proxmox-lock/unlock', methods=['POST'])
+def api_proxmox_lock_unlock():
+    """API: Re-verify every proxmox_update-configured interface's live
+    state and clear the lock only if all of them check out."""
+    success, message, details = manager.verify_and_clear_proxmox_lock()
+    return jsonify({'success': success, 'message': message, 'details': details})
 
 @app.route('/api/subnets', methods=['GET'])
 def api_subnets_list():

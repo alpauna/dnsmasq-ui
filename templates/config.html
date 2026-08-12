@@ -800,6 +800,21 @@
         </div>
 
         <div class="section">
+            <h2>Proxmox Auto-Update</h2>
+            <div class="alert alert-info">
+                When a tracked subnet's live prefix changes, hosts with both <code>ipv6_host</code> and
+                <code>proxmox_update</code> configured get their new address pushed to the named Proxmox
+                node automatically, one node at a time with a commit-confirm safety net (an unconditional
+                self-revert timer on the node itself, cancelled only after the change is independently
+                confirmed reachable). Any failure halts the rest of that batch and locks out further
+                auto-updates until reviewed here.
+            </div>
+            <div id="proxmox-lock-status">
+                <p style="padding: 20px;">Checking lock status...</p>
+            </div>
+        </div>
+
+        <div class="section">
             <h2>Backup & Restore</h2>
 
             <div class="tab-group" style="margin-bottom: 20px;">
@@ -2253,6 +2268,51 @@
                 });
         }
 
+        function loadProxmoxLockStatus() {
+            fetch('/api/proxmox-lock')
+                .then(response => response.json())
+                .then(lock => {
+                    const el = document.getElementById('proxmox-lock-status');
+                    if (!lock.locked) {
+                        el.innerHTML = '<div class="alert alert-success">🟢 Unlocked — auto-updates run normally.</div>';
+                        return;
+                    }
+                    el.innerHTML = `
+                        <div class="alert alert-error">
+                            🔒 <strong>LOCKED</strong> since ${lock.since ? new Date(lock.since).toLocaleString() : 'unknown'}
+                            (${lock.node || '?'}/${lock.iface || '?'})<br>
+                            <span style="font-size: 13px;">${lock.reason || 'No reason recorded'}</span>
+                        </div>
+                        <button class="btn btn-secondary" onclick="unlockProxmox()">Verify &amp; Unlock</button>
+                        <div id="proxmox-unlock-result" style="margin-top: 10px;"></div>`;
+                })
+                .catch(error => {
+                    console.error('Error loading Proxmox lock status:', error);
+                    document.getElementById('proxmox-lock-status').innerHTML =
+                        '<div class="alert alert-error">Error loading lock status</div>';
+                });
+        }
+
+        function unlockProxmox() {
+            const resultEl = document.getElementById('proxmox-unlock-result');
+            resultEl.innerHTML = '<p>Re-verifying every configured interface\'s live state...</p>';
+            fetch('/api/proxmox-lock/unlock', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    const details = (data.details || [])
+                        .map(d => `<li>${d.ok ? '✅' : '❌'} ${d.domain}: ${d.detail}</li>`)
+                        .join('');
+                    resultEl.innerHTML = `
+                        <div class="alert ${data.success ? 'alert-success' : 'alert-error'}">${data.message}</div>
+                        <ul style="font-size: 13px;">${details}</ul>`;
+                    loadProxmoxLockStatus();
+                })
+                .catch(error => {
+                    console.error('Error unlocking Proxmox auto-update:', error);
+                    resultEl.innerHTML = '<div class="alert alert-error">Error contacting server</div>';
+                });
+        }
+
         // Load data on page load
         loadSSHKeyInfo();
         loadServerStatus();
@@ -2265,10 +2325,12 @@
         loadZonesForDynamicForm();
         updateDynamicHostFormVisibility();
         loadDeviceCredentials();
+        loadProxmoxLockStatus();
         load2FAStatus();
         setInterval(loadServerStatus, 30000);
         setInterval(loadSubnets, 30000);
         setInterval(loadVlans, 30000);
+        setInterval(loadProxmoxLockStatus, 30000);
     </script>
 </body>
 </html>
