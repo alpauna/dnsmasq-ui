@@ -2592,4 +2592,8 @@ def _dynamic_host_poller():
 
 if __name__ == '__main__':
     threading.Thread(target=_dynamic_host_poller, daemon=True).start()
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # '::' rather than '0.0.0.0' — with the OS default of
+    # net.ipv6.bindv6only=0, a single dual-stack socket serves both IPv4 and
+    # IPv6 clients (needed for the dashboard to be reachable on the IPv6
+    # keepalived VIP as well as the IPv4 one).
+    app.run(host='::', port=5000, debug=False)
