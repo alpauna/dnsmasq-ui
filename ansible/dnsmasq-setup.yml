@@ -101,7 +101,7 @@
           address=/dns02.ad.alshowto.com/192.168.0.232
           address=/dns03.ad.alshowto.com/192.168.0.233
           address=/mfc-printer.ad.alshowto.com/192.168.0.70
-          address=/middle-01.ad.alshowto.com/192.168.0.252
+          address=/middle-01.ad.alshowto.com/192.168.0.250
 
           cname=esphome.ad.alshowto.com,middle-01.ad.alshowto.com
           cname=frigate.ad.alshowto.com,middle-01.ad.alshowto.com
