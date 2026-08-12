@@ -1852,8 +1852,10 @@ class ZoneManager:
         """Stop tracking a host."""
         before = len(self.config['dynamic_hosts'])
         self.config['dynamic_hosts'] = [e for e in self.config['dynamic_hosts'] if e['domain'] != domain]
+        if before == len(self.config['dynamic_hosts']):
+            return False, f"'{domain}' was not tracked"
         self.save_config()
-        return before != len(self.config['dynamic_hosts']), "Dynamic host removed"
+        return True, "Dynamic host removed"
 
     def _load_vault_file(self):
         """Load the raw credentials file. 'credentials' values are still
@@ -3200,6 +3202,31 @@ expect eof
 
 # Initialize manager
 manager = ZoneManager(ZONES_FILE)
+
+@app.before_request
+def _reload_config_from_disk():
+    """Reload zones.json from disk before handling each request.
+
+    ZoneManager otherwise only ever loads it once, at process startup
+    (_load_config() in __init__) — and this app runs as three separate
+    processes simultaneously (one per DNS server). _sync_peer_state()
+    pushes a fresh copy of the file to the *other* two nodes' disks on
+    every save, but never tells their already-running processes to pick
+    it up, so each process's in-memory config can silently drift from
+    what's actually on its own disk.
+
+    Confirmed as the root cause of a real bug: add a host on one node,
+    delete it (handled by a different node — e.g. after a keepalived
+    failover, or hitting a node directly), then re-add it — the node
+    handling the re-add could still have the deleted entry sitting in
+    memory and reject the re-add as a duplicate, even though disk
+    already correctly had it removed.
+
+    Safe to do unconditionally: app.run() at the bottom of this file
+    doesn't pass threaded=True, so Werkzeug serves one request at a
+    time — no request can be mid-mutation in this same process when the
+    next one reloads."""
+    manager.config = manager._load_config()
 
 # Request logging middleware
 @app.before_request

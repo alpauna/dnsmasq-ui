@@ -2329,7 +2329,10 @@
             if (!confirm(`Stop tracking ${domain}?`)) return;
             fetch(`/api/dynamic-hosts/${encodeURIComponent(domain)}`, { method: 'DELETE' })
                 .then(response => response.json())
-                .then(() => loadDynamicHosts())
+                .then(data => {
+                    if (!data.success) alert(data.message);
+                    loadDynamicHosts();
+                })
                 .catch(error => console.error('Error removing dynamic host:', error));
         }
 
