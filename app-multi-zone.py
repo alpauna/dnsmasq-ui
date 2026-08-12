@@ -884,6 +884,220 @@ class ZoneManager:
         self.save_config()
         return True, "Subnet removed"
 
+    _VLAN_NAME_RE = re.compile(r'^[a-z][a-z0-9_-]{0,30}$')
+
+    def _write_remote_root_file(self, server_ip, content, remote_path, mode='600'):
+        """Write a file to a root-owned path on a remote server.
+
+        Goes over SFTP to a temp path first, then a short, fixed-shape
+        `sudo mv` — rather than embedding arbitrary content in a shell
+        command line (the `echo '...' | sudo tee` pattern used elsewhere
+        in this file for dnsmasq's own config, which is fine there since
+        that content is DNS records, not the kind of thing that starts
+        containing shell metacharacters). VLAN netplan content can include
+        admin-supplied static addresses, so it goes through SFTP instead,
+        where quoting doesn't apply at all.
+        """
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=10)
+        tmp_path = f"/tmp/.dnsmasq-ui-upload-{secrets.token_hex(8)}"
+        try:
+            sftp = ssh.open_sftp()
+            with sftp.file(tmp_path, 'w') as f:
+                f.write(content)
+            sftp.close()
+            cmd = (
+                f"sudo install -o root -g root -m {mode} {tmp_path} {remote_path} && "
+                f"rm -f {tmp_path}"
+            )
+            stdin, stdout, stderr = ssh.exec_command(cmd)
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                raise RuntimeError(stderr.read().decode() or f"remote command exited {exit_status}")
+        finally:
+            ssh.close()
+
+    def _run_remote_root_command(self, server_ip, command, timeout=30):
+        """Run a fixed (not admin-content-carrying) command as root on a
+        remote server. Returns (success, output_or_error)."""
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=10)
+            stdin, stdout, stderr = ssh.exec_command(f"sudo {command}", timeout=timeout)
+            exit_status = stdout.channel.recv_exit_status()
+            out = stdout.read().decode()
+            err = stderr.read().decode()
+            ssh.close()
+            if exit_status != 0:
+                return False, err or out or f"exited {exit_status}"
+            return True, out
+        except Exception as e:
+            return False, str(e)
+
+    def _build_vlan_netplan(self, vlan_id, ipv4_mode, ipv4_address, ipv6_mode, ipv6_address):
+        """Netplan v2 YAML for a single VLAN sub-interface. ipv4_mode:
+        'none'|'dhcp'|'static'. ipv6_mode: 'none'|'slaac'|'static'.
+        Static addresses are pre-validated by the caller (add/update
+        methods below) — this only formats them."""
+        lines = [
+            "network:",
+            "  version: 2",
+            "  vlans:",
+            f"    eth0.{vlan_id}:",
+            f"      id: {vlan_id}",
+            "      link: eth0",
+        ]
+        addresses = []
+        if ipv4_mode == 'dhcp':
+            lines.append("      dhcp4: true")
+        elif ipv4_mode == 'static':
+            addresses.append(ipv4_address)
+        if ipv6_mode == 'slaac':
+            lines.append("      accept-ra: true")
+        elif ipv6_mode == 'static':
+            addresses.append(ipv6_address)
+        if addresses:
+            lines.append("      addresses:")
+            lines.extend(f"        - {a}" for a in addresses)
+        return "\n".join(lines) + "\n"
+
+    def _validate_vlan_fields(self, vlan_id, name, ipv4_mode, ipv4_address, ipv6_mode, ipv6_address):
+        if not isinstance(vlan_id, int) or not (1 <= vlan_id <= 4094):
+            return "vlan_id must be an integer between 1 and 4094"
+        if not self._VLAN_NAME_RE.match(name or ''):
+            return "name must be lowercase alphanumeric/hyphen/underscore, starting with a letter"
+        if ipv4_mode not in ('none', 'dhcp', 'static'):
+            return "ipv4_mode must be 'none', 'dhcp', or 'static'"
+        if ipv4_mode == 'static':
+            try:
+                ipaddress.IPv4Interface(ipv4_address)
+            except (ValueError, TypeError):
+                return f"ipv4_address '{ipv4_address}' is not a valid IPv4 address/CIDR (e.g. 192.168.7.5/24)"
+        if ipv6_mode not in ('none', 'slaac', 'static'):
+            return "ipv6_mode must be 'none', 'slaac', or 'static'"
+        if ipv6_mode == 'static':
+            try:
+                ipaddress.IPv6Interface(ipv6_address)
+            except (ValueError, TypeError):
+                return f"ipv6_address '{ipv6_address}' is not a valid IPv6 address/CIDR (e.g. 2605:4a80:b009:c100::5/64)"
+        return None
+
+    def get_server_vlans(self, server_name):
+        server = self.get_servers().get(server_name, {})
+        return server.get('vlans', [])
+
+    def add_server_vlan(self, server_name, vlan_id, name, ipv4_mode='none', ipv4_address=None,
+                         ipv6_mode='slaac', ipv6_address=None):
+        """Create a persistent VLAN sub-interface on a server (netplan),
+        giving it a real IPv4/IPv6 presence on another subnet without a
+        second physical NIC — requires the underlying Proxmox bridge (or
+        equivalent) to already be trunking that VLAN to the VM; this only
+        handles the guest-OS side. Provisions immediately over SSH rather
+        than waiting for the next Ansible run, so it actually takes effect
+        when added from the Config page."""
+        servers = self.get_servers()
+        if server_name not in servers:
+            return False, f"Unknown server '{server_name}'"
+        error = self._validate_vlan_fields(vlan_id, name, ipv4_mode, ipv4_address, ipv6_mode, ipv6_address)
+        if error:
+            return False, error
+
+        vlans = servers[server_name].setdefault('vlans', [])
+        if any(v['vlan_id'] == vlan_id for v in vlans):
+            return False, f"VLAN {vlan_id} already configured on {server_name}"
+        if any(v['name'] == name for v in vlans):
+            return False, f"A VLAN named '{name}' already exists on {server_name}"
+
+        netplan = self._build_vlan_netplan(vlan_id, ipv4_mode, ipv4_address, ipv6_mode, ipv6_address)
+        server_ip = servers[server_name]['ip']
+        try:
+            self._write_remote_root_file(server_ip, netplan, f"/etc/netplan/90-presence-{name}.yaml")
+        except Exception as e:
+            return False, f"Failed to write netplan config to {server_name}: {e}"
+        ok, output = self._run_remote_root_command(server_ip, "netplan apply")
+        if not ok:
+            return False, f"netplan apply failed on {server_name}: {output}"
+
+        vlans.append({
+            'vlan_id': vlan_id, 'name': name,
+            'ipv4_mode': ipv4_mode, 'ipv4_address': ipv4_address,
+            'ipv6_mode': ipv6_mode, 'ipv6_address': ipv6_address
+        })
+        self.save_config()
+        return True, "VLAN interface created"
+
+    def update_server_vlan(self, server_name, vlan_id, **fields):
+        """Update and re-provision an existing VLAN sub-interface. name
+        isn't updatable (it's the netplan filename on disk) — remove and
+        re-add if it needs to change."""
+        servers = self.get_servers()
+        if server_name not in servers:
+            return False, f"Unknown server '{server_name}'"
+        vlans = servers[server_name].get('vlans', [])
+        entry = next((v for v in vlans if v['vlan_id'] == vlan_id), None)
+        if not entry:
+            return False, f"VLAN {vlan_id} not found on {server_name}"
+
+        merged = {**entry, **{k: v for k, v in fields.items()
+                               if k in ('ipv4_mode', 'ipv4_address', 'ipv6_mode', 'ipv6_address')}}
+        error = self._validate_vlan_fields(vlan_id, entry['name'], merged['ipv4_mode'],
+                                            merged['ipv4_address'], merged['ipv6_mode'], merged['ipv6_address'])
+        if error:
+            return False, error
+
+        netplan = self._build_vlan_netplan(vlan_id, merged['ipv4_mode'], merged['ipv4_address'],
+                                            merged['ipv6_mode'], merged['ipv6_address'])
+        server_ip = servers[server_name]['ip']
+        try:
+            self._write_remote_root_file(server_ip, netplan, f"/etc/netplan/90-presence-{entry['name']}.yaml")
+        except Exception as e:
+            return False, f"Failed to update netplan config on {server_name}: {e}"
+        ok, output = self._run_remote_root_command(server_ip, "netplan apply")
+        if not ok:
+            return False, f"netplan apply failed on {server_name}: {output}"
+
+        entry.update(merged)
+        self.save_config()
+        return True, "VLAN interface updated"
+
+    def delete_server_vlan(self, server_name, vlan_id):
+        """Tear down a VLAN sub-interface: remove its netplan file, then
+        explicitly delete the link itself. `netplan apply` alone doesn't
+        reliably remove an already-created VLAN link just because its
+        declaration disappeared — confirmed empirically (the interface
+        stayed up after apply, only `ip link delete` actually removed
+        it) — so this doesn't rely on netplan for that part."""
+        servers = self.get_servers()
+        if server_name not in servers:
+            return False, f"Unknown server '{server_name}'"
+        vlans = servers[server_name].get('vlans', [])
+        entry = next((v for v in vlans if v['vlan_id'] == vlan_id), None)
+        if not entry:
+            return False, f"VLAN {vlan_id} not found on {server_name}"
+
+        in_use = [name for name, s in self.get_subnets().items()
+                  if s.get('primary_dns') == server_name and s.get('interface') == f"eth0.{vlan_id}"]
+        if in_use:
+            return False, f"Still referenced by subnet(s): {', '.join(in_use)} — change their interface/primary_dns first"
+
+        server_ip = servers[server_name]['ip']
+        ok, output = self._run_remote_root_command(server_ip, f"rm -f /etc/netplan/90-presence-{entry['name']}.yaml")
+        if not ok:
+            return False, f"Failed to remove netplan config on {server_name}: {output}"
+        ok, output = self._run_remote_root_command(server_ip, "netplan apply")
+        if not ok:
+            return False, f"netplan apply failed on {server_name}: {output}"
+        # Best-effort: ignore failure if the link is already gone (netplan
+        # occasionally does clean it up) rather than erroring the whole
+        # delete over it.
+        self._run_remote_root_command(server_ip, f"ip link delete eth0.{vlan_id}")
+
+        vlans.remove(entry)
+        self.save_config()
+        return True, "VLAN interface removed"
+
     def add_dynamic_host(self, domain, zone_name, target_host=None, interface='eth0',
                           record_type='AAAA', ssh_user=None, enabled=True,
                           connection='paramiko', ssh_extra_args=None,
@@ -2591,6 +2805,39 @@ def api_subnets_update(name):
 def api_subnets_delete(name):
     """API: Remove a named subnet (refuses if still referenced)."""
     success, message = manager.delete_subnet(name)
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/servers/<server_name>/vlans', methods=['GET'])
+def api_server_vlans_list(server_name):
+    """API: List a server's configured VLAN sub-interfaces."""
+    return jsonify({'vlans': manager.get_server_vlans(server_name)})
+
+@app.route('/api/servers/<server_name>/vlans', methods=['POST'])
+def api_server_vlans_add(server_name):
+    """API: Create and provision a new VLAN sub-interface on a server."""
+    data = request.json
+    success, message = manager.add_server_vlan(
+        server_name,
+        vlan_id=data.get('vlan_id'),
+        name=data.get('name'),
+        ipv4_mode=data.get('ipv4_mode', 'none'),
+        ipv4_address=data.get('ipv4_address'),
+        ipv6_mode=data.get('ipv6_mode', 'slaac'),
+        ipv6_address=data.get('ipv6_address')
+    )
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/servers/<server_name>/vlans/<int:vlan_id>', methods=['PUT'])
+def api_server_vlans_update(server_name, vlan_id):
+    """API: Update and re-provision an existing VLAN sub-interface."""
+    data = request.json
+    success, message = manager.update_server_vlan(server_name, vlan_id, **data)
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/servers/<server_name>/vlans/<int:vlan_id>', methods=['DELETE'])
+def api_server_vlans_delete(server_name, vlan_id):
+    """API: Tear down a VLAN sub-interface."""
+    success, message = manager.delete_server_vlan(server_name, vlan_id)
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/dynamic-hosts/<domain>', methods=['PUT'])

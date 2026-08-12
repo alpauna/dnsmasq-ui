@@ -432,6 +432,66 @@
         </div>
 
         <div class="section">
+            <h2>VLAN Interfaces</h2>
+            <div class="alert alert-info">
+                <strong>Subnet presence</strong>: give a DNS server a real IPv4/IPv6 presence on another
+                subnet via a persistent VLAN sub-interface (netplan) — no second physical NIC needed,
+                as long as the underlying bridge/switch already trunks that VLAN to the server. Wire the
+                resulting interface into a subnet's config below so <code>poll_subnets()</code> can use it.
+            </div>
+
+            <div id="vlans-list" class="server-list" style="margin-bottom: 20px;">
+                <p style="padding: 20px; grid-column: 1/-1;">Loading VLAN interfaces...</p>
+            </div>
+
+            <h3 id="vlan-form-heading" style="color: #333; margin-bottom: 15px;">Add a VLAN Interface</h3>
+            <form id="vlan-form" onsubmit="submitVlan(event)">
+                <div class="form-group">
+                    <label for="vl-server">Server</label>
+                    <select id="vl-server" required></select>
+                </div>
+                <div class="form-group">
+                    <label for="vl-id">VLAN ID</label>
+                    <input type="number" id="vl-id" min="1" max="4094" placeholder="7" required>
+                </div>
+                <div class="form-group">
+                    <label for="vl-name">Name</label>
+                    <input type="text" id="vl-name" placeholder="mgmt" pattern="[a-z][a-z0-9_-]*" required>
+                    <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                        Lowercase, used as the netplan filename (90-presence-&lt;name&gt;.yaml) — not
+                        changeable after creation; remove and re-add instead.
+                    </p>
+                </div>
+                <div class="form-group">
+                    <label for="vl-ipv4-mode">IPv4</label>
+                    <select id="vl-ipv4-mode" onchange="updateVlanFormVisibility()">
+                        <option value="none" selected>None</option>
+                        <option value="dhcp">DHCP</option>
+                        <option value="static">Static</option>
+                    </select>
+                </div>
+                <div class="form-group" id="vl-ipv4-address-group" style="display: none;">
+                    <label for="vl-ipv4-address">IPv4 Address (CIDR)</label>
+                    <input type="text" id="vl-ipv4-address" placeholder="192.168.7.5/24">
+                </div>
+                <div class="form-group">
+                    <label for="vl-ipv6-mode">IPv6</label>
+                    <select id="vl-ipv6-mode" onchange="updateVlanFormVisibility()">
+                        <option value="slaac" selected>SLAAC (automatic)</option>
+                        <option value="static">Static</option>
+                        <option value="none">None</option>
+                    </select>
+                </div>
+                <div class="form-group" id="vl-ipv6-address-group" style="display: none;">
+                    <label for="vl-ipv6-address">IPv6 Address (CIDR)</label>
+                    <input type="text" id="vl-ipv6-address" placeholder="2605:4a80:b009:c100::5/64">
+                </div>
+                <button type="submit" class="btn btn-primary">Add VLAN Interface</button>
+            </form>
+            <div id="vlan-add-result" style="margin-top: 15px;"></div>
+        </div>
+
+        <div class="section">
             <h2>Subnets</h2>
             <div class="alert alert-info">
                 <strong>Subnet-based tracking</strong>: register an L3 segment here (its CIDR, and which
@@ -1342,6 +1402,183 @@
 
         let cachedDynamicHosts = [];
         let cachedSubnets = {};
+        let cachedVlans = {}; // server_name -> [vlan, ...]
+        let editingVlan = null; // { server, vlanId } | null
+
+        function loadServersForVlanForm() {
+            return fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    const names = Object.keys(data.servers || {});
+                    document.getElementById('vl-server').innerHTML =
+                        names.map(n => `<option value="${n}">${n}</option>`).join('');
+                    return names;
+                })
+                .catch(error => console.error('Error loading servers for VLAN form:', error));
+        }
+
+        function loadVlans() {
+            return loadServersForVlanForm().then(names => {
+                return Promise.all((names || []).map(name =>
+                    fetch(`/api/servers/${encodeURIComponent(name)}/vlans`)
+                        .then(r => r.json())
+                        .then(data => ({ name, vlans: data.vlans || [] }))
+                )).then(results => {
+                    cachedVlans = {};
+                    let html = '';
+                    let total = 0;
+                    for (const { name, vlans } of results) {
+                        cachedVlans[name] = vlans;
+                        for (const v of vlans) {
+                            total++;
+                            const v4 = v.ipv4_mode === 'static' ? `static (${v.ipv4_address})`
+                                : v.ipv4_mode === 'dhcp' ? 'DHCP' : 'none';
+                            const v6 = v.ipv6_mode === 'static' ? `static (${v.ipv6_address})`
+                                : v.ipv6_mode === 'slaac' ? 'SLAAC' : 'none';
+                            html += `<div class="server-item">
+                                <h4>${name}: eth0.${v.vlan_id} (${v.name})</h4>
+                                <p><strong>IPv4:</strong> ${v4}</p>
+                                <p><strong>IPv6:</strong> ${v6}</p>
+                                <div style="margin-top: 10px; display: flex; gap: 8px;">
+                                    <button class="btn btn-secondary btn-sm" onclick="editVlan('${name}', ${v.vlan_id})">Edit</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="deleteVlan('${name}', ${v.vlan_id})">Remove</button>
+                                </div>
+                            </div>`;
+                        }
+                    }
+                    document.getElementById('vlans-list').innerHTML = total > 0
+                        ? html
+                        : '<p style="padding: 20px; grid-column: 1/-1;">No VLAN interfaces configured yet</p>';
+                });
+            }).catch(error => {
+                console.error('Error loading VLANs:', error);
+                document.getElementById('vlans-list').innerHTML = '<div class="alert alert-error">Error loading VLAN interfaces</div>';
+            });
+        }
+
+        function updateVlanFormVisibility() {
+            document.getElementById('vl-ipv4-address-group').style.display =
+                document.getElementById('vl-ipv4-mode').value === 'static' ? 'block' : 'none';
+            document.getElementById('vl-ipv6-address-group').style.display =
+                document.getElementById('vl-ipv6-mode').value === 'static' ? 'block' : 'none';
+        }
+
+        function submitVlan(event) {
+            event.preventDefault();
+            const resultDiv = document.getElementById('vlan-add-result');
+            const isEdit = editingVlan !== null;
+            const server = isEdit ? editingVlan.server : document.getElementById('vl-server').value;
+            const vlanId = isEdit ? editingVlan.vlanId : parseInt(document.getElementById('vl-id').value, 10);
+
+            const payload = {
+                ipv4_mode: document.getElementById('vl-ipv4-mode').value,
+                ipv4_address: document.getElementById('vl-ipv4-address').value.trim() || null,
+                ipv6_mode: document.getElementById('vl-ipv6-mode').value,
+                ipv6_address: document.getElementById('vl-ipv6-address').value.trim() || null
+            };
+            if (!isEdit) {
+                payload.vlan_id = vlanId;
+                payload.name = document.getElementById('vl-name').value.trim();
+            }
+
+            const url = isEdit
+                ? `/api/servers/${encodeURIComponent(server)}/vlans/${vlanId}`
+                : `/api/servers/${encodeURIComponent(server)}/vlans`;
+            const method = isEdit ? 'PUT' : 'POST';
+
+            const btn = event.target.querySelector('button[type="submit"]');
+            btn.disabled = true;
+            btn.innerHTML = `<span class="loading"></span> ${isEdit ? 'Saving...' : 'Provisioning...'}`;
+
+            fetch(url, {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(response => response.json())
+                .then(data => {
+                    btn.disabled = false;
+                    if (data.success) {
+                        resultDiv.innerHTML = `<div class="alert alert-success">VLAN interface ${isEdit ? 'updated' : 'created'}.</div>`;
+                        if (isEdit) {
+                            cancelEditVlan();
+                        } else {
+                            btn.innerHTML = 'Add VLAN Interface';
+                            document.getElementById('vlan-form').reset();
+                            updateVlanFormVisibility();
+                        }
+                        loadVlans();
+                        loadServersForSubnetForm();
+                    } else {
+                        btn.innerHTML = isEdit ? 'Save Changes' : 'Add VLAN Interface';
+                        resultDiv.innerHTML = `<div class="alert alert-error">${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    btn.disabled = false;
+                    console.error(`Error ${isEdit ? 'updating' : 'adding'} VLAN:`, error);
+                    resultDiv.innerHTML = `<div class="alert alert-error">Error ${isEdit ? 'updating' : 'adding'} VLAN interface</div>`;
+                });
+        }
+
+        function editVlan(server, vlanId) {
+            const v = (cachedVlans[server] || []).find(x => x.vlan_id === vlanId);
+            if (!v) return;
+
+            editingVlan = { server, vlanId };
+            document.getElementById('vl-server').value = server;
+            document.getElementById('vl-server').disabled = true;
+            document.getElementById('vl-id').value = vlanId;
+            document.getElementById('vl-id').disabled = true;
+            document.getElementById('vl-name').value = v.name;
+            document.getElementById('vl-name').disabled = true;
+            document.getElementById('vl-ipv4-mode').value = v.ipv4_mode;
+            document.getElementById('vl-ipv4-address').value = v.ipv4_address || '';
+            document.getElementById('vl-ipv6-mode').value = v.ipv6_mode;
+            document.getElementById('vl-ipv6-address').value = v.ipv6_address || '';
+            updateVlanFormVisibility();
+
+            document.getElementById('vlan-form-heading').textContent = `Edit VLAN: ${server} eth0.${vlanId}`;
+            const submitBtn = document.querySelector('#vlan-form button[type="submit"]');
+            submitBtn.textContent = 'Save Changes';
+            if (!document.getElementById('vl-cancel-edit')) {
+                const cancelBtn = document.createElement('button');
+                cancelBtn.type = 'button';
+                cancelBtn.id = 'vl-cancel-edit';
+                cancelBtn.className = 'btn btn-secondary';
+                cancelBtn.style.marginLeft = '8px';
+                cancelBtn.textContent = 'Cancel';
+                cancelBtn.onclick = cancelEditVlan;
+                submitBtn.insertAdjacentElement('afterend', cancelBtn);
+            }
+
+            document.getElementById('vlan-form').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function cancelEditVlan() {
+            editingVlan = null;
+            document.getElementById('vlan-form').reset();
+            document.getElementById('vl-server').disabled = false;
+            document.getElementById('vl-id').disabled = false;
+            document.getElementById('vl-name').disabled = false;
+            updateVlanFormVisibility();
+            document.getElementById('vlan-form-heading').textContent = 'Add a VLAN Interface';
+            const submitBtn = document.querySelector('#vlan-form button[type="submit"]');
+            submitBtn.textContent = 'Add VLAN Interface';
+            const cancelBtn = document.getElementById('vl-cancel-edit');
+            if (cancelBtn) cancelBtn.remove();
+        }
+
+        function deleteVlan(server, vlanId) {
+            if (!confirm(`Remove VLAN ${vlanId} from ${server}? This tears down the interface immediately.`)) return;
+            fetch(`/api/servers/${encodeURIComponent(server)}/vlans/${vlanId}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) alert(data.message);
+                    loadVlans();
+                })
+                .catch(error => console.error('Error removing VLAN:', error));
+        }
 
         function subnetLabel(name) {
             const s = cachedSubnets[name];
@@ -1989,6 +2226,8 @@
         loadProxyCheck();
         loadSyncServers();
         loadServersForSubnetForm();
+        loadVlans();
+        updateVlanFormVisibility();
         loadSubnets().then(() => loadDynamicHosts());
         loadZonesForDynamicForm();
         updateDynamicHostFormVisibility();
@@ -1996,6 +2235,7 @@
         load2FAStatus();
         setInterval(loadServerStatus, 30000);
         setInterval(loadSubnets, 30000);
+        setInterval(loadVlans, 30000);
     </script>
 </body>
 </html>
