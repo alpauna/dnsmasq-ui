@@ -30,6 +30,22 @@
     # and a failover into it doesn't lose data. Change if dns03 is ever
     # rebuilt from scratch and another node becomes the source of truth.
     primary_host: dns03
+    # Public URL for links in background-context emails (e.g. the
+    # vault-locked notification) — reachable via Pangolin, not just the
+    # internal VIP, so a notification email is actually clickable from
+    # anywhere rather than only from inside the LAN.
+    dashboard_url: "https://dnsmasq.alshowto.com"
+    # Only trust X-Forwarded-* headers (client IP, scheme, host — used for
+    # both request logging and Flask-WTF's CSRF origin check) from this
+    # host — where Pangolin's newt tunnel agent actually runs (middle-01).
+    # Anything else connecting directly (e.g. another LAN host) has its
+    # X-Forwarded-* headers ignored rather than blindly trusted, since
+    # those are otherwise trivially spoofable by any direct connection.
+    trusted_proxies: "192.168.0.250"
+    # e.g. '/dnsmasq-ui' if ever served under a subpath rather than at the
+    # domain root — dnsmasq.alshowto.com currently serves at root, so this
+    # is unused today.
+    proxy_path_prefix: ""
 
   tasks:
     - name: Install system packages

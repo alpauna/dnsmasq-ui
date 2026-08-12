@@ -42,10 +42,6 @@ app = Flask(__name__)
 CORS(app)
 csrf = CSRFProtect(app)
 
-# Reverse proxy support: trust X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host
-# Handles proper IP tracking and URL construction behind reverse proxies
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
-
 # Logging for request tracking
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -101,7 +97,51 @@ DASHBOARD_URL = os.getenv('DASHBOARD_URL', 'http://192.168.0.233:5000')
 
 # Reverse proxy configuration
 PROXY_PATH_PREFIX = os.getenv('PROXY_PATH_PREFIX', '')  # e.g., '/dnsmasq-ui' for http://proxy/dnsmasq-ui/
-TRUSTED_PROXIES = os.getenv('TRUSTED_PROXIES', '*').split(',')  # Comma-separated IPs or '*'
+TRUSTED_PROXIES = [p.strip() for p in os.getenv('TRUSTED_PROXIES', '*').split(',') if p.strip()]  # comma-separated IPs, or '*'
+
+def _normalize_ip(ip):
+    """IPv4-mapped IPv6 ('::ffff:192.168.0.250', what a dual-stack socket
+    sees for an IPv4 peer) and its plain IPv4 form should compare equal
+    for TRUSTED_PROXIES matching -- otherwise a correctly-configured
+    '192.168.0.250' would silently never match."""
+    try:
+        addr = ipaddress.ip_address(ip)
+        return str(addr.ipv4_mapped) if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped else str(addr)
+    except ValueError:
+        return ip
+
+def _trusted_proxy_fix(wsgi_app):
+    """Only apply ProxyFix's X-Forwarded-* trust when the request's
+    direct peer is a known reverse proxy (e.g. wherever Pangolin's newt
+    agent runs) -- otherwise those headers could be spoofed by anything
+    able to reach this app directly (e.g. another host on the LAN), not
+    just the actual proxy in front of it. TRUSTED_PROXIES='*' (the
+    default) trusts unconditionally, matching this app's behavior before
+    this was wired up -- tightening it is opt-in."""
+    proxied = ProxyFix(wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+    trust_all = '*' in TRUSTED_PROXIES
+
+    def wrapped(environ, start_response):
+        if trust_all or _normalize_ip(environ.get('REMOTE_ADDR', '')) in TRUSTED_PROXIES:
+            return proxied(environ, start_response)
+        return wsgi_app(environ, start_response)
+    return wrapped
+
+def _script_name_prefix(wsgi_app, prefix):
+    """Serve the app under a subpath (e.g. a proxy exposing it at
+    /dnsmasq-ui/ instead of /) -- an explicit, static override rather
+    than trusting an X-Forwarded-Prefix header from the proxy."""
+    if not prefix:
+        return wsgi_app
+
+    def wrapped(environ, start_response):
+        environ['SCRIPT_NAME'] = prefix
+        if environ.get('PATH_INFO', '').startswith(prefix):
+            environ['PATH_INFO'] = environ['PATH_INFO'][len(prefix):]
+        return wsgi_app(environ, start_response)
+    return wrapped
+
+app.wsgi_app = _trusted_proxy_fix(_script_name_prefix(app.wsgi_app, PROXY_PATH_PREFIX))
 
 def get_client_ip():
     """Get client IP, respecting X-Forwarded-For from reverse proxy."""

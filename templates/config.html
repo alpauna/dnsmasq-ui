@@ -419,6 +419,19 @@
         </div>
 
         <div class="section">
+            <h2>Reverse Proxy</h2>
+            <div class="alert alert-info">
+                Checks how <em>this page load</em> actually reached the server — load this page through
+                your public URL (e.g. https://dnsmasq.alshowto.com/config) to verify a reverse proxy in
+                front of it (Pangolin, etc.) is passing X-Forwarded-* headers correctly. Loading it
+                directly by IP will correctly show "not behind a proxy".
+            </div>
+            <div id="proxy-check-result" class="server-list">
+                <p style="padding: 20px; grid-column: 1/-1;">Checking...</p>
+            </div>
+        </div>
+
+        <div class="section">
             <h2>Subnets</h2>
             <div class="alert alert-info">
                 <strong>Subnet-based tracking</strong>: register an L3 segment here (its CIDR, and which
@@ -1138,6 +1151,30 @@
                     btn.innerHTML = 'Sync Public Key to Servers';
                     console.error('Error:', error);
                     document.getElementById('sync-result').innerHTML = '<div class="alert alert-error">Error syncing SSH key</div>';
+                });
+        }
+
+        function loadProxyCheck() {
+            fetch('/api/proxy-check')
+                .then(response => response.json())
+                .then(data => {
+                    const badge = data.behind_proxy
+                        ? '<span style="background: #d4edda; color: #155724; padding: 4px 10px; border-radius: 4px; font-size: 13px;">✅ Behind a reverse proxy</span>'
+                        : '<span style="background: #e2e3e5; color: #383d41; padding: 4px 10px; border-radius: 4px; font-size: 13px;">Direct connection (no proxy)</span>';
+                    let html = `<div class="server-item" style="grid-column: 1/-1;">
+                        <h4>${badge}</h4>
+                        <p><strong>Resolved client IP:</strong> ${data.resolved.client_ip}</p>
+                        <p><strong>Resolved scheme/host:</strong> ${data.resolved.scheme}://${data.resolved.host}</p>
+                        <p><strong>CSRF expected origin:</strong> ${data.expected_origin}</p>`;
+                    if (data.direct_connection) {
+                        html += `<p><strong>Direct connection (pre-proxy):</strong> ${data.direct_connection.scheme}://${data.direct_connection.host} from ${data.direct_connection.ip}</p>`;
+                    }
+                    html += `<p style="margin-top: 10px; color: #666;">${data.verdict}</p></div>`;
+                    document.getElementById('proxy-check-result').innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error checking proxy status:', error);
+                    document.getElementById('proxy-check-result').innerHTML = '<div class="alert alert-error">Error checking proxy status</div>';
                 });
         }
 
@@ -1878,6 +1915,7 @@
         // Load data on page load
         loadSSHKeyInfo();
         loadServerStatus();
+        loadProxyCheck();
         loadSyncServers();
         loadServersForSubnetForm();
         loadSubnets().then(() => loadDynamicHosts());

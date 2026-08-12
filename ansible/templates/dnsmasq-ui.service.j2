@@ -12,7 +12,9 @@ Environment="DNSMASQ_RECORDS_FILE=/etc/dnsmasq.d/local-records.conf"
 Environment="SSH_KEY=/home/{{ ssh_user }}/.ssh/id_rsa"
 Environment="SSH_USER={{ ssh_user }}"
 Environment="DYNAMIC_POLL_INTERVAL={{ dynamic_poll_interval }}"
-Environment="DASHBOARD_URL=http://{{ keepalive_vip }}:5000"
+Environment="DASHBOARD_URL={{ dashboard_url }}"
+Environment="TRUSTED_PROXIES={{ trusted_proxies }}"
+Environment="PROXY_PATH_PREFIX={{ proxy_path_prefix }}"
 EnvironmentFile=-{{ ui_path }}/smtp.env
 ExecStart={{ ui_path }}/venv/bin/python app-multi-zone.py
 Restart=on-failure
