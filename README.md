@@ -391,6 +391,40 @@ servers), so a single socket serves both address families rather than
 needing separate v4/v6 listeners. `dnsmasq` needed no changes — it already
 listens on all local addresses.
 
+A hostname for the VIP itself is also published: `dns.ad.alshowto.com`
+resolves to `192.168.0.230` (A) and `2605:4a80:b004:b120::230` (AAAA), so
+scripts/clients don't need to hardcode the raw VIP addresses. The
+individual nodes' own real addresses are published too, for anything that
+specifically needs to reach one server rather than whichever is active —
+`dns01`/`dns02`/`dns03`.ad.alshowto.com each have an AAAA record for that
+server's actual RA/SLAAC address (separate from the VIP).
+
+#### Monitoring
+
+`/api/status` reports the IPv6 VIP the same way it already reports the v4
+one — both a top-level `vip6` (the configured address) and, per server, a
+`keepalived.vip6_active` boolean showing whether *that* node currently has
+it assigned. In the dashboard this shows up as an "IPv6 VIP" line next to
+the existing VIP display. Checked independently of the v4 `status` field
+(`MASTER`/`STANDBY`) even though a `vrrp_sync_group` should always keep
+them in lockstep — so a divergence (e.g. a bad `keepalived.conf` edit on
+one node) shows up in monitoring instead of being silently assumed away.
+
+Since the IPv6 VIP's address is manually managed rather than
+auto-generated, it can only go stale one way: the ISP renumbers the
+delegated prefix out from under it (the drift risk called out above). The
+background poller — already gated to run only on whichever node currently
+holds the VIP, same as the `dynamic_hosts` polling — checks this every
+cycle: it reads the active node's own real RA/SLAAC `/64` (filtering
+specifically for the `dynamic` flag in `ip -6 addr show`, since the VIP
+address itself also shows up as `scope global` on the same interface and
+would otherwise be compared against itself) and compares it to the
+configured `keepalive_vip6`. A mismatch logs an error and — same
+notification-only pattern as the vault-locked email, not an
+auto-remediation — emails whatever address is configured for email 2FA,
+with a reminder to update `keepalive_vip6` in `zones.json` and
+`virtual_ipaddress` in `keepalived.conf` on all three servers by hand.
+
 ## Configuration
 
 ### zones.json
