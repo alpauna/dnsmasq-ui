@@ -927,6 +927,30 @@ class ZoneManager:
                     config += f"cname={domain},{value}\n"
                 elif record_type == 'TXT':
                     config += f"txt-record={domain},{value}\n"
+                elif record_type == 'MX':
+                    # value is '<preference> <hostname>' -- MX needs two
+                    # fields and the record schema is just {domain, type,
+                    # value}, so they're encoded into that one string
+                    # rather than widening the schema for every record
+                    # type. Malformed values are skipped (as a comment,
+                    # not raised) since this loop builds every zone's
+                    # config in one pass -- one bad record must never take
+                    # down the whole deploy.
+                    parts = value.split(None, 1)
+                    if len(parts) == 2 and parts[0].isdigit():
+                        preference, hostname = parts
+                        config += f"mx-host={domain},{hostname},{preference}\n"
+                    else:
+                        config += f"# Skipped malformed MX record for {domain}: '{value}' (expected '<preference> <hostname>')\n"
+                elif record_type == 'SRV':
+                    # value is '<target> <port> <priority> <weight>' --
+                    # same single-string encoding rationale as MX above.
+                    parts = value.split()
+                    if len(parts) == 4 and all(p.isdigit() for p in parts[1:]):
+                        target, port, priority, weight = parts
+                        config += f"srv-host={domain},{target},{port},{priority},{weight}\n"
+                    else:
+                        config += f"# Skipped malformed SRV record for {domain}: '{value}' (expected '<target> <port> <priority> <weight>')\n"
                 else:
                     config += f"address=/{domain}/{value}\n"
             config += "\n"

@@ -225,6 +225,18 @@
             background: #ff9800;
         }
 
+        .record-type.txt {
+            background: #4caf50;
+        }
+
+        .record-type.mx {
+            background: #9c27b0;
+        }
+
+        .record-type.srv {
+            background: #795548;
+        }
+
         .record-actions {
             display: flex;
             gap: 8px;
@@ -368,15 +380,27 @@
                     </div>
                     <div class="form-group">
                         <label for="record-type">Record Type</label>
-                        <select id="record-type">
+                        <select id="record-type" onchange="onRecordTypeChange()">
                             <option value="A">A (IPv4)</option>
                             <option value="AAAA">AAAA (IPv6)</option>
                             <option value="CNAME">CNAME (Alias)</option>
+                            <option value="TXT">TXT (Text)</option>
+                            <option value="MX">MX (Mail Exchanger)</option>
+                            <option value="SRV">SRV (Service)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="txt-preset-group" style="display: none;">
+                        <label for="txt-preset">TXT Preset</label>
+                        <select id="txt-preset" onchange="applyTxtPreset()">
+                            <option value="custom">Custom</option>
+                            <option value="spf">SPF</option>
+                            <option value="dkim">DKIM</option>
+                            <option value="dmarc">DMARC</option>
                         </select>
                     </div>
                     <div class="form-group">
                         <label for="record-value">Value</label>
-                        <input type="text" id="record-value" placeholder="192.168.0.100 or 2604:7a00::100 or target.com" required>
+                        <input type="text" id="record-value" placeholder="192.168.0.100" required>
                     </div>
                 </div>
                 <button type="submit" class="btn btn-primary">Add Record</button>
@@ -402,7 +426,7 @@
                         <tr>
                             <td>{{ record.domain }}</td>
                             <td>
-                                <span class="record-type {% if record.type == 'AAAA' %}aaaa{% elif record.type == 'CNAME' %}cname{% endif %}">
+                                <span class="record-type {% if record.type == 'AAAA' %}aaaa{% elif record.type == 'CNAME' %}cname{% elif record.type == 'TXT' %}txt{% elif record.type == 'MX' %}mx{% elif record.type == 'SRV' %}srv{% endif %}">
                                     {{ record.type }}
                                 </span>
                             </td>
@@ -453,6 +477,60 @@
         })();
 
         const zoneName = "{{ zone.name }}";
+
+        // Value-field placeholders per type. MX/SRV need more than one
+        // sub-value (preference, or target/port/priority/weight) but the
+        // record schema is just {domain, type, value} -- rather than
+        // restructure the form per type, these are entered as one
+        // space-separated string here and split apart server-side in
+        // generate_dnsmasq_config(). The placeholder is what documents
+        // the expected order.
+        const VALUE_PLACEHOLDERS = {
+            A: '192.168.0.100',
+            AAAA: '2604:7a00::100',
+            CNAME: 'target.example.com',
+            TXT: 'v=spf1 -all',
+            MX: '10 mail.example.com',
+            SRV: 'sipserver.example.com 5060 10 20'
+        };
+
+        function onRecordTypeChange() {
+            const type = document.getElementById('record-type').value;
+            document.getElementById('record-value').placeholder = VALUE_PLACEHOLDERS[type] || '';
+
+            const presetGroup = document.getElementById('txt-preset-group');
+            if (type === 'TXT') {
+                presetGroup.style.display = '';
+            } else {
+                presetGroup.style.display = 'none';
+                document.getElementById('txt-preset').value = 'custom';
+            }
+        }
+
+        // SPF/DKIM/DMARC aren't separate record types to dnsmasq -- they're
+        // all TXT records, just at conventional names with conventional
+        // content. This only pre-fills the domain/value fields to match
+        // those conventions; the record that actually gets saved is a
+        // plain TXT record like any other.
+        function applyTxtPreset() {
+            const preset = document.getElementById('txt-preset').value;
+            const domainField = document.getElementById('domain');
+            const valueField = document.getElementById('record-value');
+            const base = domainField.value.trim() || zoneName;
+
+            if (preset === 'spf') {
+                domainField.value = base;
+                valueField.placeholder = 'v=spf1 include:_spf.google.com ~all';
+            } else if (preset === 'dkim') {
+                domainField.value = `selector._domainkey.${base}`;
+                valueField.placeholder = 'v=DKIM1; k=rsa; p=<public key>';
+            } else if (preset === 'dmarc') {
+                domainField.value = `_dmarc.${base}`;
+                valueField.placeholder = 'v=DMARC1; p=reject; rua=mailto:dmarc@' + base;
+            } else {
+                valueField.placeholder = VALUE_PLACEHOLDERS.TXT;
+            }
+        }
 
         function addRecord(event) {
             event.preventDefault();
@@ -522,6 +600,7 @@
             document.getElementById('domain').value = domain;
             document.getElementById('record-type').value = type;
             document.getElementById('record-value').value = value;
+            onRecordTypeChange();
 
             // Scroll to form
             document.querySelector('.add-record-form').scrollIntoView({ behavior: 'smooth' });

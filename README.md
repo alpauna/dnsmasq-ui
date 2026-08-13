@@ -1730,6 +1730,26 @@ curl http://localhost:5000/api/wireguard/status
 - **A**: IPv4 address
 - **AAAA**: IPv6 address
 - **CNAME**: Canonical name (alias)
+- **TXT**: Arbitrary text (SPF, DKIM, DMARC, domain verification, etc.) —
+  also what the [ACME DNS-01](#acme-dns-01-challenges-acme_hook_keys--acme_dns_backend)
+  feature writes under the `local` backend; both paths share the same
+  zone record storage, so a manually-added TXT record and an ACME
+  challenge record behave identically once created. The zone page's "Add
+  New Record" form has a **TXT Preset** dropdown (SPF/DKIM/DMARC/Custom)
+  that pre-fills the conventional domain name and a content example for
+  each — it's still a plain TXT record underneath, the preset is purely a
+  UI convenience, not a distinct stored type
+- **MX**: Mail exchanger. `value` holds *two* fields as one
+  space-separated string — `"<preference> <hostname>"`, e.g.
+  `"10 mail.example.com"` — since the record schema is just
+  `{domain, type, value}` and MX was the first type here to need more
+  than one. A value that doesn't parse that way is skipped (as a comment
+  in the generated config) rather than breaking the whole deploy.
+- **SRV**: Service location (RFC 2782). `value` holds *four* fields the
+  same way — `"<target> <port> <priority> <weight>"`, e.g.
+  `"sipserver.example.com 5060 10 20"` — and `domain` is the full
+  `_service._proto.name` (e.g. `_sip._tcp.example.com`). Same
+  skip-on-malformed behavior as MX.
 
 ## Web UI
 
@@ -1746,7 +1766,10 @@ curl http://localhost:5000/api/wireguard/status
 
 ### Zone Management
 - View all DNS records organized by zone
-- Add new records to any zone
+- Add new records to any zone — **A, AAAA, CNAME, TXT, MX, SRV**; a
+  **TXT Preset** dropdown (SPF/DKIM/DMARC/Custom) appears when TXT is
+  selected and pre-fills the conventional domain name plus a content
+  example for each
 - Edit and delete existing records
 - Inline record editing with save functionality
 - Deploy changes across all servers with one click
@@ -1878,6 +1901,21 @@ address=/example.ad.alshowto.com/2604:7a00:ea40::100
 
 # CNAME records
 cname=www.ad.alshowto.com,example.ad.alshowto.com
+
+# TXT records
+txt-record=example.ad.alshowto.com,v=spf1 -all
+
+# TXT records (DMARC/DKIM presets are the same directive, just at their
+# conventional names -- _dmarc.<domain>, <selector>._domainkey.<domain>)
+txt-record=_dmarc.ad.alshowto.com,v=DMARC1; p=reject; rua=mailto:dmarc@ad.alshowto.com
+
+# MX records (stored value "10 mail.ad.alshowto.com" splits into
+# hostname + preference here)
+mx-host=ad.alshowto.com,mail.ad.alshowto.com,10
+
+# SRV records (stored value "sipserver.ad.alshowto.com 5060 10 20"
+# splits into hostname + port + priority + weight here)
+srv-host=_sip._tcp.ad.alshowto.com,sipserver.ad.alshowto.com,5060,10,20
 
 # Upstream DNS
 server=1.1.1.1
@@ -2195,7 +2233,7 @@ The dashboard supports flexible viewing of DNS zones to accommodate varying numb
 
 **Record Preview:**
 - First 3 records displayed inline
-- Record type shown with colored badge (A, AAAA, CNAME)
+- Record type shown with colored badge (A, AAAA, CNAME, TXT, MX, SRV)
 - "+X more records" indicator for zones with 4+ records
 - No need to click through to see zone contents
 
