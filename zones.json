@@ -183,6 +183,21 @@
           "domain": "pve01.mgmt.alshowto.com",
           "type": "AAAA",
           "value": "2605:4a80:b009:c100::11"
+        },
+        {
+          "domain": "pve04.mgmt.alshowto.com",
+          "type": "AAAA",
+          "value": "2605:4a80:b009:c100::14"
+        },
+        {
+          "domain": "pve06.mgmt.alshowto.com",
+          "type": "AAAA",
+          "value": "2605:4a80:b009:c100::16"
+        },
+        {
+          "domain": "pve3.mgmt.alshowto.com",
+          "type": "AAAA",
+          "value": "2605:4a80:b009:c100::13"
         }
       ]
     }
@@ -288,7 +303,10 @@
         "description": "Proxmox VE nodes with static IPv6 presence on the mgmt VLAN",
         "script": "proxmox_vlan_commit",
         "members": [
-          "pve01.mgmt.alshowto.com"
+          "pve01.mgmt.alshowto.com",
+          "pve06.mgmt.alshowto.com",
+          "pve3.mgmt.alshowto.com",
+          "pve04.mgmt.alshowto.com"
         ],
         "lock": {
           "locked": false,
@@ -296,6 +314,13 @@
           "member": null,
           "since": null
         }
+      }
+    },
+    "proxmox_ipset_tracking": {
+      "mgmt": {
+        "ipset": "proxmox-cluster",
+        "cidr": "2605:4a80:b009:c100::/64",
+        "label": "mgmt subnet (VLAN 7)"
       }
     }
   },
@@ -307,7 +332,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:d7:4c:ec",
       "enabled": true,
-      "last_checked": "2026-08-12T20:48:55.735787",
+      "last_checked": "2026-08-13T00:52:21.657088",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fed7:4cec",
       "last_updated": null
     },
@@ -318,7 +343,7 @@
       "subnet": "lan",
       "mac_address": "5c:a6:e6:27:41:7c",
       "enabled": true,
-      "last_checked": "2026-08-12T20:48:55.735865",
+      "last_checked": "2026-08-13T00:52:21.657165",
       "last_value": "2605:4a80:b004:b120:5ea6:e6ff:fe27:417c",
       "last_updated": "2026-08-11T18:35:38.201059"
     },
@@ -329,7 +354,7 @@
       "subnet": "mgmt",
       "mac_address": "80:69:1a:02:49:36",
       "enabled": true,
-      "last_checked": "2026-08-12T20:48:55.735904",
+      "last_checked": "2026-08-13T00:52:21.657208",
       "last_value": "2605:4a80:b009:c100:8269:1aff:fe02:4936",
       "last_updated": null
     },
@@ -340,7 +365,7 @@
       "subnet": "lan",
       "mac_address": "54:af:97:8f:c7:a7",
       "enabled": true,
-      "last_checked": "2026-08-12T20:48:55.735936",
+      "last_checked": "2026-08-13T00:52:21.657259",
       "last_value": "2605:4a80:b004:b120:56af:97ff:fe8f:c7a7",
       "last_updated": "2026-08-11T22:59:39.700407"
     },
@@ -351,7 +376,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:0b:78:55",
       "enabled": true,
-      "last_checked": "2026-08-12T20:48:55.735964",
+      "last_checked": "2026-08-13T00:52:21.657304",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fe0b:7855",
       "last_updated": null
     },
@@ -362,7 +387,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:46:49:4d",
       "enabled": true,
-      "last_checked": "2026-08-12T20:48:55.735999",
+      "last_checked": "2026-08-13T00:52:21.657339",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fe46:494d",
       "last_updated": null
     },
@@ -373,7 +398,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:5c:e8:3c",
       "enabled": true,
-      "last_checked": "2026-08-12T20:48:55.736027",
+      "last_checked": "2026-08-13T00:52:21.657368",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fe5c:e83c",
       "last_updated": null
     },
@@ -384,13 +409,64 @@
       "subnet": "mgmt",
       "ipv6_host": "::11",
       "enabled": true,
-      "last_checked": null,
-      "last_value": null,
+      "last_checked": "2026-08-13T00:52:21.657402",
+      "last_value": "2605:4a80:b009:c100::11",
       "last_updated": null,
       "proxmox_update": {
         "node": "pve01",
         "iface": "vlan7"
       }
+    },
+    {
+      "domain": "pve04.mgmt.alshowto.com",
+      "zone": "mgmt.alshowto.com",
+      "record_type": "AAAA",
+      "subnet": "mgmt",
+      "mac_address": null,
+      "ipv4_host": null,
+      "ipv6_host": "::14",
+      "proxmox_update": {
+        "node": "pve04",
+        "iface": "vlan7"
+      },
+      "enabled": true,
+      "last_checked": "2026-08-13T00:52:21.657443",
+      "last_value": "2605:4a80:b009:c100::14",
+      "last_updated": "2026-08-13T00:52:22.000509"
+    },
+    {
+      "domain": "pve06.mgmt.alshowto.com",
+      "zone": "mgmt.alshowto.com",
+      "record_type": "AAAA",
+      "subnet": "mgmt",
+      "mac_address": null,
+      "ipv4_host": null,
+      "ipv6_host": "::16",
+      "proxmox_update": {
+        "node": "pve06",
+        "iface": "vlan7"
+      },
+      "enabled": true,
+      "last_checked": "2026-08-13T00:52:22.000611",
+      "last_value": "2605:4a80:b009:c100::16",
+      "last_updated": "2026-08-13T00:52:22.281487"
+    },
+    {
+      "domain": "pve3.mgmt.alshowto.com",
+      "zone": "mgmt.alshowto.com",
+      "record_type": "AAAA",
+      "subnet": "mgmt",
+      "mac_address": null,
+      "ipv4_host": null,
+      "ipv6_host": "::13",
+      "proxmox_update": {
+        "node": "pve3",
+        "iface": "vlan7"
+      },
+      "enabled": true,
+      "last_checked": "2026-08-13T00:52:22.281573",
+      "last_value": "2605:4a80:b009:c100::13",
+      "last_updated": "2026-08-13T00:52:22.560549"
     }
   ]
 }
