@@ -951,6 +951,17 @@ class ZoneManager:
                         config += f"srv-host={domain},{target},{port},{priority},{weight}\n"
                     else:
                         config += f"# Skipped malformed SRV record for {domain}: '{value}' (expected '<target> <port> <priority> <weight>')\n"
+                elif record_type == 'CAA':
+                    # value is '<flags> <tag> <value>' -- same encoding
+                    # rationale as MX/SRV above. maxsplit=2 so the CAA
+                    # value itself (3rd field) can still contain spaces
+                    # (e.g. an iodef contact string), unlike flags/tag.
+                    parts = value.split(None, 2)
+                    if len(parts) == 3 and parts[0].isdigit():
+                        flags, tag, caa_value = parts
+                        config += f"caa-record={domain},{flags},{tag},{caa_value}\n"
+                    else:
+                        config += f"# Skipped malformed CAA record for {domain}: '{value}' (expected '<flags> <tag> <value>')\n"
                 else:
                     config += f"address=/{domain}/{value}\n"
             config += "\n"

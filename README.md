@@ -1750,6 +1750,18 @@ curl http://localhost:5000/api/wireguard/status
   `"sipserver.example.com 5060 10 20"` — and `domain` is the full
   `_service._proto.name` (e.g. `_sip._tcp.example.com`). Same
   skip-on-malformed behavior as MX.
+- **CAA**: Restricts which CAs may issue certs for a domain (RFC 6844).
+  `value` holds *three* fields the same way —
+  `"<flags> <tag> <value>"`, e.g. `"0 issue letsencrypt.org"`. The Add
+  New Record form's **CAA Preset** dropdown fills in the exact syntax
+  for the common cases so nobody has to remember the numeric flags field
+  or exact tag spelling: `Let's Encrypt (issue)`, `Let's Encrypt
+  (issuewild)` (both `0 issue<wild> letsencrypt.org`), and `Disallow all
+  CAs` (`0 issue ;` — a literal semicolon, the RFC 6844 way to say no CA
+  is authorized). Ties directly into the [ACME DNS-01](#acme-dns-01-challenges-acme_hook_keys--acme_dns_backend)
+  feature — a CAA record is what actually enforces that only the
+  expected CA (Let's Encrypt, here) can act on a `_acme-challenge`
+  record it publishes.
 
 ## Web UI
 
@@ -1766,10 +1778,12 @@ curl http://localhost:5000/api/wireguard/status
 
 ### Zone Management
 - View all DNS records organized by zone
-- Add new records to any zone — **A, AAAA, CNAME, TXT, MX, SRV**; a
-  **TXT Preset** dropdown (SPF/DKIM/DMARC/Custom) appears when TXT is
+- Add new records to any zone — **A, AAAA, CNAME, TXT, MX, SRV, CAA**;
+  a **TXT Preset** dropdown (SPF/DKIM/DMARC/Custom) appears when TXT is
   selected and pre-fills the conventional domain name plus a content
-  example for each
+  example for each, and a **CAA Preset** dropdown (Let's Encrypt
+  issue/issuewild, Disallow all CAs, Custom) appears when CAA is
+  selected and fills in the complete, correctly-formatted value
 - Edit and delete existing records
 - Inline record editing with save functionality
 - Deploy changes across all servers with one click
@@ -1916,6 +1930,10 @@ mx-host=ad.alshowto.com,mail.ad.alshowto.com,10
 # SRV records (stored value "sipserver.ad.alshowto.com 5060 10 20"
 # splits into hostname + port + priority + weight here)
 srv-host=_sip._tcp.ad.alshowto.com,sipserver.ad.alshowto.com,5060,10,20
+
+# CAA records (stored value "0 issue letsencrypt.org" splits into
+# flags + tag + value here)
+caa-record=ad.alshowto.com,0,issue,letsencrypt.org
 
 # Upstream DNS
 server=1.1.1.1
@@ -2233,7 +2251,7 @@ The dashboard supports flexible viewing of DNS zones to accommodate varying numb
 
 **Record Preview:**
 - First 3 records displayed inline
-- Record type shown with colored badge (A, AAAA, CNAME, TXT, MX, SRV)
+- Record type shown with colored badge (A, AAAA, CNAME, TXT, MX, SRV, CAA)
 - "+X more records" indicator for zones with 4+ records
 - No need to click through to see zone contents
 

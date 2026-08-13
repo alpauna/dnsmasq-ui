@@ -237,6 +237,10 @@
             background: #795548;
         }
 
+        .record-type.caa {
+            background: #e91e63;
+        }
+
         .record-actions {
             display: flex;
             gap: 8px;
@@ -387,6 +391,7 @@
                             <option value="TXT">TXT (Text)</option>
                             <option value="MX">MX (Mail Exchanger)</option>
                             <option value="SRV">SRV (Service)</option>
+                            <option value="CAA">CAA (Cert Authorization)</option>
                         </select>
                     </div>
                     <div class="form-group" id="txt-preset-group" style="display: none;">
@@ -396,6 +401,15 @@
                             <option value="spf">SPF</option>
                             <option value="dkim">DKIM</option>
                             <option value="dmarc">DMARC</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="caa-preset-group" style="display: none;">
+                        <label for="caa-preset">CAA Preset</label>
+                        <select id="caa-preset" onchange="applyCaaPreset()">
+                            <option value="custom">Custom</option>
+                            <option value="le-issue">Let's Encrypt (issue)</option>
+                            <option value="le-issuewild">Let's Encrypt (issuewild)</option>
+                            <option value="none">Disallow all CAs (issue)</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -426,7 +440,7 @@
                         <tr>
                             <td>{{ record.domain }}</td>
                             <td>
-                                <span class="record-type {% if record.type == 'AAAA' %}aaaa{% elif record.type == 'CNAME' %}cname{% elif record.type == 'TXT' %}txt{% elif record.type == 'MX' %}mx{% elif record.type == 'SRV' %}srv{% endif %}">
+                                <span class="record-type {% if record.type == 'AAAA' %}aaaa{% elif record.type == 'CNAME' %}cname{% elif record.type == 'TXT' %}txt{% elif record.type == 'MX' %}mx{% elif record.type == 'SRV' %}srv{% elif record.type == 'CAA' %}caa{% endif %}">
                                     {{ record.type }}
                                 </span>
                             </td>
@@ -491,19 +505,28 @@
             CNAME: 'target.example.com',
             TXT: 'v=spf1 -all',
             MX: '10 mail.example.com',
-            SRV: 'sipserver.example.com 5060 10 20'
+            SRV: 'sipserver.example.com 5060 10 20',
+            CAA: '0 issue letsencrypt.org'
         };
 
         function onRecordTypeChange() {
             const type = document.getElementById('record-type').value;
             document.getElementById('record-value').placeholder = VALUE_PLACEHOLDERS[type] || '';
 
-            const presetGroup = document.getElementById('txt-preset-group');
+            const txtPresetGroup = document.getElementById('txt-preset-group');
             if (type === 'TXT') {
-                presetGroup.style.display = '';
+                txtPresetGroup.style.display = '';
             } else {
-                presetGroup.style.display = 'none';
+                txtPresetGroup.style.display = 'none';
                 document.getElementById('txt-preset').value = 'custom';
+            }
+
+            const caaPresetGroup = document.getElementById('caa-preset-group');
+            if (type === 'CAA') {
+                caaPresetGroup.style.display = '';
+            } else {
+                caaPresetGroup.style.display = 'none';
+                document.getElementById('caa-preset').value = 'custom';
             }
         }
 
@@ -529,6 +552,25 @@
                 valueField.placeholder = 'v=DMARC1; p=reject; rua=mailto:dmarc@' + base;
             } else {
                 valueField.placeholder = VALUE_PLACEHOLDERS.TXT;
+            }
+        }
+
+        // CAA restricts which CAs may issue certs for this domain -- ties
+        // directly into the ACME DNS-01 feature elsewhere on this page's
+        // zone. flags/tag/value are encoded into the same single `value`
+        // string as MX/SRV (see VALUE_PLACEHOLDERS comment above); these
+        // presets just fill in the well-known correct values so nobody
+        // has to remember the numeric flags field or exact tag spelling.
+        function applyCaaPreset() {
+            const preset = document.getElementById('caa-preset').value;
+            const valueField = document.getElementById('record-value');
+
+            if (preset === 'le-issue') {
+                valueField.value = '0 issue letsencrypt.org';
+            } else if (preset === 'le-issuewild') {
+                valueField.value = '0 issuewild letsencrypt.org';
+            } else if (preset === 'none') {
+                valueField.value = '0 issue ;';
             }
         }
 
