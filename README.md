@@ -1136,6 +1136,10 @@ not repeating.
   authoritative DNS moves onto these servers themselves — flipping this
   one setting is meant to be the entire migration for ACME at that point,
   with no changes needed to hook scripts or the API contract either way.
+  That same future migration is also why `--auth-zone` mode (true
+  `*.domain` wildcard records) is tracked in the [Roadmap](#roadmap)'s
+  Planned section rather than needed now — see that entry for why it's
+  a separate design effort, not just another record type.
 
 **Auth is per-key, not a single shared secret.** Generate a key from the
 Config page's **ACME Hook Keys** section (or `POST /api/acme-hook-keys`)
@@ -2571,6 +2575,17 @@ MIT
 - [ ] Record templates and macros
 - [ ] Audit logging for all changes
 - [ ] DNS query analytics and caching stats
+- [ ] `--auth-zone` mode (true `*.domain` wildcard records, e.g. wildcard
+  CNAMEs) — not needed today, since `address=/domain/` already implicitly
+  covers "domain and all its subdomains" for the simple host-override
+  records this app generates. Becomes a real requirement only once
+  alshowto.com's authoritative DNS moves from Cloudflare onto these
+  servers themselves (the same future migration `ACME_DNS_BACKEND`'s
+  `local` option is kept working for) — `--auth-zone` is a fundamentally
+  different dnsmasq mode (SOA/NS records, real zone authority) than the
+  per-record directives (`address=`, `cname=`, `mx-host=`, etc.) used
+  today, so this is a separate design effort, not another record type
+  to bolt on
 
 ---
 
