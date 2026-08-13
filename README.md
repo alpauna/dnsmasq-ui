@@ -1115,6 +1115,12 @@ dnsmasq-ui to publish the `_acme-challenge` TXT record the CA checks for
 — no manual DNS editing per renewal, and no long-lived credentials handed
 to the cert-requesting host itself.
 
+See [`acme-test-example.md`](acme-test-example.md) for a reproducible,
+step-by-step run of the whole chain against a real domain (staging CA,
+throwaway `acme.sh` install) — exactly what was used to verify this
+feature end-to-end, including a real mistake made along the way worth
+not repeating.
+
 **Where the record actually gets published is backend-switchable**
 (`ACME_DNS_BACKEND` in `acme.env`):
 
