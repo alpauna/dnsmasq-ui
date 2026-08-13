@@ -23,6 +23,7 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 - **🏷️ VLAN Sub-Interfaces**: Give a DNS server a real address on another subnet (via VLAN tag) without a second NIC, provisioned live from the Config page
 - **🛡️ Group Update Plans**: Pluggable, script-based HA group updates (Proxmox VE VLAN presence today) with a self-reverting commit-confirm safety net, serialized one member at a time with a hard-stop-and-lock on any failure
 - **🧯 Proxmox Firewall IPSet Tracking**: Keeps a Proxmox cluster ipset CIDR entry in sync with a subnet's live prefix, closing a `ctstate INVALID`/conntrack reachability gap discovered on the mgmt VLAN — auto-syncs on drift, manual "Sync Now" for first-time setup
+- **🔏 ACME DNS-01 Challenges**: Publishes `_acme-challenge` TXT records for unattended `acme.sh`/`certbot` cert issuance, authenticated by revocable per-key bearer tokens; backend-switchable between Cloudflare's API (current) and this app's own zones (once self-hosted authoritative DNS replaces it)
 
 ## Architecture
 
@@ -1106,6 +1107,122 @@ note that reliably removing an already-created VLAN link isn't guaranteed
 just because its config file is gone, so verify with `ip addr` after a
 delete if it matters.
 
+### ACME DNS-01 Challenges (acme_hook_keys / ACME_DNS_BACKEND)
+
+Lets an unattended ACME client (`acme.sh`, `certbot`) prove domain
+ownership for a Let's Encrypt (or any ACME CA) certificate by asking
+dnsmasq-ui to publish the `_acme-challenge` TXT record the CA checks for
+— no manual DNS editing per renewal, and no long-lived credentials handed
+to the cert-requesting host itself.
+
+**Where the record actually gets published is backend-switchable**
+(`ACME_DNS_BACKEND` in `acme.env`):
+
+- **`cloudflare`** (current default) — calls Cloudflare's API directly.
+  Cloudflare is alshowto.com's real authoritative public DNS today (these
+  dnsmasq servers are internal/split-horizon only), so this is the only
+  backend a public CA's validation servers can actually see. Requires a
+  Cloudflare API token (`Zone:DNS:Edit`, scoped to the zone) and that
+  zone's ID.
+- **`local`** — writes the TXT record into `zones.json` and pushes it to
+  `dns31`/`dns32`/`dns33` like any other record, restarting dnsmasq on
+  each. Not useful yet, but kept working for the day alshowto.com's
+  authoritative DNS moves onto these servers themselves — flipping this
+  one setting is meant to be the entire migration for ACME at that point,
+  with no changes needed to hook scripts or the API contract either way.
+
+**Auth is per-key, not a single shared secret.** Generate a key from the
+Config page's **ACME Hook Keys** section (or `POST /api/acme-hook-keys`)
+— the plaintext is shown exactly once; only its hash is ever stored, so a
+lost key means generating a replacement, not recovering it. Revoking a
+key (Config page, or `DELETE /api/acme-hook-keys/<id>`) takes effect on
+its very next use. Give each script/host its own key so a compromised
+one can be revoked without disturbing anything else using this feature.
+
+#### Using it with `acme.sh`
+
+```bash
+# One-time: install the hook and point it at dnsmasq-ui
+cp acme/dns_dnsmasqui.sh ~/.acme.sh/dnsapi/dns_dnsmasqui.sh
+export DNSMASQUI_URL="http://192.168.0.230:5000"
+export DNSMASQUI_TOKEN="<key from Config page -> ACME Hook Keys -> Generate>"
+
+# Issue a cert -- acme.sh calls the hook to create/remove the TXT record
+# and polls public DNS for propagation itself before asking the CA to validate
+acme.sh --issue -d example.ad.alshowto.com --dns dns_dnsmasqui
+
+# Wildcard + apex in one request needs two challenge values live under the
+# same _acme-challenge name at once -- add_txt_challenge/the Cloudflare
+# backend both support that, acme.sh handles the two calls automatically
+acme.sh --issue -d alshowto.com -d '*.alshowto.com' --dns dns_dnsmasqui
+```
+
+#### Using it with `certbot`
+
+```bash
+export DNSMASQUI_URL="http://192.168.0.230:5000"
+export DNSMASQUI_TOKEN="<key from Config page -> ACME Hook Keys -> Generate>"
+
+certbot certonly --manual --preferred-challenges dns \
+  --manual-auth-hook acme/certbot-auth-hook.sh \
+  --manual-cleanup-hook acme/certbot-cleanup-hook.sh \
+  -d example.ad.alshowto.com
+```
+
+Unlike acme.sh, certbot's manual plugin doesn't poll for propagation
+itself — the auth hook already blocks until dnsmasq-ui's publish call
+returns, but it also sleeps briefly afterward as a second margin before
+returning control to certbot (see `acme/certbot-auth-hook.sh`).
+
+#### Renewing automatically
+
+Both clients' normal renewal machinery works unmodified as long as the
+same environment variables (`DNSMASQUI_URL`, `DNSMASQUI_TOKEN`) are
+available when the renewal runs — e.g. exported in the systemd
+timer/cron environment, not just an interactive shell:
+
+```bash
+# acme.sh: renewal is automatic via its own cron/systemd timer once
+# issued -- just confirm it's actually scheduled
+acme.sh --list
+
+# certbot: manual-auth-hook mode still auto-renews via certbot's own
+# timer, since the hooks are recorded in the renewal config
+sudo certbot renew --dry-run
+```
+
+#### What each request does
+
+```bash
+# Create the challenge record (blocks until it's actually live)
+curl -X POST http://192.168.0.230:5000/api/acme-challenge \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{"fulldomain": "_acme-challenge.example.ad.alshowto.com", "value": "<CA-provided token>"}'
+
+# Remove it once the CA has validated (cleanup hook)
+curl -X DELETE http://192.168.0.230:5000/api/acme-challenge \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{"fulldomain": "_acme-challenge.example.ad.alshowto.com", "value": "<CA-provided token>"}'
+```
+
+`fulldomain` must match `_acme-challenge.<name>` and `value` must look
+like a real challenge token (both regex-validated before touching
+Cloudflare or zones.json) — this is a lower-trust entry point than the
+dashboard's own session-authenticated APIs, reachable by anything holding
+a live key, so malformed input is rejected outright rather than passed
+through.
+
+Two things only surfaced deploying this against production, worth
+knowing if this feature is ever touched again: the endpoint has to be
+exempt from Flask-WTF's CSRF protection (hook scripts have no browser
+session to carry a token — bearer-token auth already covers what CSRF
+protects against here), and `deploy_to_servers()` must only run for the
+`local` backend — calling it unconditionally restarted dnsmasq on all
+three DNS servers for every single Cloudflare-backed request, which
+never touched local zone data at all.
+
 ### Environment Variables
 
 ```bash
@@ -1133,6 +1250,14 @@ export PROXMOX_COMMIT_TIMEOUT_SECONDS=300               # Self-revert window for
 # Reverse Proxy Support
 export PROXY_PATH_PREFIX=/dnsmasq-ui                    # URL path prefix (optional)
 export TRUSTED_PROXIES=*                                # Trusted proxy IPs (or '*' for all)
+
+# ACME DNS-01 challenge publishing (see ACME DNS-01 Challenges above) --
+# lives in acme.env in production, not the main .env, same treatment as
+# smtp.env/proxmox.env (gitignored, synced to peers, loaded via the
+# systemd unit's EnvironmentFile)
+export ACME_DNS_BACKEND=cloudflare                      # 'cloudflare' or 'local'
+export CLOUDFLARE_API_TOKEN=                            # Zone:DNS:Edit token, cloudflare backend only
+export CLOUDFLARE_ZONE_ID=                              # Target zone's ID, cloudflare backend only
 ```
 
 ### WireGuard Mesh Network
@@ -1470,6 +1595,45 @@ curl -X POST http://localhost:5000/api/proxmox-ipset-tracking/mgmt/sync-now
 See [Keeping a Proxmox firewall ipset in sync](#keeping-a-proxmox-firewall-ipset-in-sync-proxmox_ipset_tracking)
 for why this exists and the incident that led to it.
 
+### ACME Hook Keys
+
+```bash
+# List keys (metadata only -- never the plaintext key or its hash)
+curl http://localhost:5000/api/acme-hook-keys
+
+# Generate a key -- the response's "key" field is shown exactly once
+curl -X POST http://localhost:5000/api/acme-hook-keys \
+  -H "Content-Type: application/json" \
+  -d '{"label": "acme.sh on wiki-vm"}'
+
+# Revoke a key -- takes effect on its very next use
+curl -X DELETE http://localhost:5000/api/acme-hook-keys/<id>
+```
+
+These three are session-authenticated (dashboard login), same as the rest
+of the Config page's API — unlike the challenge endpoint below.
+
+### ACME Challenge
+
+```bash
+# Create/publish a challenge TXT record -- bearer-token authenticated
+# with a key from the section above, not a dashboard session
+curl -X POST http://localhost:5000/api/acme-challenge \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{"fulldomain": "_acme-challenge.example.ad.alshowto.com", "value": "<token>"}'
+
+# Remove it
+curl -X DELETE http://localhost:5000/api/acme-challenge \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{"fulldomain": "_acme-challenge.example.ad.alshowto.com", "value": "<token>"}'
+```
+
+See [ACME DNS-01 Challenges](#acme-dns-01-challenges-acme_hook_keys--acme_dns_backend)
+for the backend-switching design, the acme.sh/certbot hook scripts in
+`acme/`, and full walkthroughs of issuing a cert with each client.
+
 ### SSH Key Management
 
 ```bash
@@ -1630,6 +1794,17 @@ and VLAN management:
   hand-maintained entries in the same cluster-wide ipset — never edit or
   remove an entry without that prefix by hand without also updating the
   tracking config here
+
+#### ACME Hook Keys
+- **List**: Every generated key's label, creation time, and last-used time
+  (never the plaintext key or its hash — the plaintext only ever appears
+  once, in the Generate response)
+- **Generate**: Create a new key for a specific script/host — copy it
+  immediately, it cannot be retrieved again afterward
+- **Revoke**: Immediate — a script still using a revoked key starts
+  failing on its very next call
+- See [ACME DNS-01 Challenges](#acme-dns-01-challenges-acme_hook_keys--acme_dns_backend)
+  for what these keys authorize and how to wire them into `acme.sh`/`certbot`
 
 #### Dynamic DNS Tracking
 - **Tracked Hosts**: Cards showing each tracked host's zone, record type,
@@ -2320,6 +2495,7 @@ MIT
 - [x] VLAN sub-interface management - persistent multi-subnet presence per server, provisioned live from the Config page
 - [x] Group Update Plans - pluggable script-based HA group updates (Proxmox VE VLAN presence first), self-reverting safety net, serialized per-member, hard-stop-and-lock per group on failure
 - [x] Proxmox firewall ipset tracking - keeps a cluster ipset CIDR entry in sync with a subnet's live prefix, closing the renumber-fragility gap left by the mgmt-VLAN `ctstate INVALID` fix
+- [x] ACME DNS-01 challenge support - revocable per-key bearer tokens, acme.sh/certbot hook scripts, backend-switchable between Cloudflare's API (current authoritative DNS) and this app's own zones (once that migrates)
 
 ### Planned 📋
 - [ ] Zone file import/export
