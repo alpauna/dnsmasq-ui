@@ -3304,6 +3304,7 @@ expect eof
                     self.add_record(entry['zone'], domain, record_type, current)
                 else:
                     self.update_record(entry['zone'], domain, record_type, current)
+                self._sync_ptr_record(zone, domain, existing, current)
                 entry['last_updated'] = datetime.now().isoformat()
                 results[domain] = {'changed': True, 'old': existing, 'new': current}
                 changed_any = True
@@ -3315,6 +3316,47 @@ expect eof
             self.deploy_to_servers()
 
         return {'changes': results, 'deployed': changed_any}
+
+    def _sync_ptr_record(self, zone, forward_domain, old_address, new_address):
+        """Keep a tracked host's PTR record in sync with its forward
+        A/AAAA record -- called from poll_dynamic_hosts() every time it
+        detects an address change, so reverse DNS doesn't silently go
+        stale the way it would if only the forward record were kept
+        current. Removes the PTR at the old address (if any -- None on a
+        brand-new entry) and (re)creates it at the new one. Mutates
+        zone['records'] in place and does not call save_config() itself;
+        poll_dynamic_hosts() already does one unconditional save_config()
+        per poll cycle (plus add_record()/update_record()'s own), so this
+        rides along with those rather than costing its own peer-sync SSH
+        round trip on top.
+
+        old_address/new_address aren't guaranteed to be real IPs -- e.g.
+        a failed detection upstream -- so a value that doesn't parse is
+        treated as "nothing to do" for that side rather than raised, same
+        as the other record types' malformed-input handling elsewhere in
+        generate_dnsmasq_config()."""
+        if old_address:
+            try:
+                old_ptr_name = ipaddress.ip_address(old_address).reverse_pointer
+            except (ValueError, TypeError):
+                old_ptr_name = None
+            if old_ptr_name:
+                zone['records'] = [r for r in zone['records']
+                                    if not (r['domain'] == old_ptr_name and r['type'] == 'PTR'
+                                            and r['value'] == forward_domain)]
+
+        if new_address:
+            try:
+                new_ptr_name = ipaddress.ip_address(new_address).reverse_pointer
+            except (ValueError, TypeError):
+                return
+            # Replace rather than duplicate, in case a stale PTR for this
+            # exact (name, forward_domain) pair is already sitting there
+            # (e.g. a re-poll that lands back on a previously-seen address).
+            zone['records'] = [r for r in zone['records']
+                                if not (r['domain'] == new_ptr_name and r['type'] == 'PTR'
+                                        and r['value'] == forward_domain)]
+            zone['records'].append({'domain': new_ptr_name, 'type': 'PTR', 'value': forward_domain})
 
     def get_ssh_key_info(self):
         """Get current SSH key information."""

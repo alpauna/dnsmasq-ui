@@ -544,6 +544,20 @@ that behavior to every record:
   stored record, updates `zones.json` and redeploys to all DNS servers
   automatically. `last_checked`/`last_value`/`last_updated` are written back
   after each check.
+- **The matching PTR record is kept in sync automatically, every time.**
+  A tracked host's whole point is that its address changes over time —
+  if only the forward A/AAAA record were maintained, reverse DNS would
+  silently go stale (or point at the wrong host) the moment a device's
+  address changed. `poll_dynamic_hosts()` is the single place an address
+  change ever gets applied (manual "Poll Now", the background timer, and
+  a subnet prefix change all funnel through it), so that's the one place
+  PTR maintenance needed to hook in: on a detected change it removes the
+  PTR at the *old* address and creates one at the *new* address, in the
+  same zone as the forward record. A brand-new entry (no prior address)
+  just gets the new PTR created, nothing to remove. This only covers
+  `dynamic_hosts` entries — a manually-added A/AAAA record via the Zone
+  Management page does not currently get an automatic PTR; add one
+  yourself if you want reverse DNS for it too.
 - Manage tracked hosts from the **Configuration** page in the dashboard, or
   via the [API](#dynamic-dns-tracking-1) directly.
 
