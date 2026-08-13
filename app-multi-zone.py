@@ -4060,11 +4060,13 @@ def api_revoke_acme_hook_key(key_id):
 @app.route('/api/acme-challenge', methods=['POST'])
 @csrf.exempt
 def api_add_acme_challenge():
-    """API: create an ACME DNS-01 challenge TXT record and deploy it
+    """API: create an ACME DNS-01 challenge TXT record and publish it
     immediately -- both acme.sh's custom dnsapi hook and certbot's
     manual-auth-hook call this, then ask the CA to validate right away, so
     this blocks until the change is actually live rather than returning
-    before deploy_to_servers() has finished.
+    early. For the 'cloudflare' backend that's the Cloudflare API call
+    itself; the 'local' backend additionally pushes to dns31/32/33 and
+    restarts dnsmasq on each, same as any other record change.
 
     CSRF-exempt: CSRF tokens protect session-cookie-authenticated requests
     from being forged by another site in a victim's browser. This endpoint
@@ -4089,7 +4091,11 @@ def api_add_acme_challenge():
     if not success:
         return jsonify({'success': False, 'message': message}), 404
 
-    deploy_results = manager.deploy_to_servers()
+    # Only the 'local' backend actually changes zones.json -- pushing to
+    # dns31/32/33 and restarting dnsmasq on all three for a Cloudflare-
+    # backed challenge would just be a pointless DNS service blip on
+    # every single cert renewal, since nothing local changed at all.
+    deploy_results = manager.deploy_to_servers() if ACME_DNS_BACKEND == 'local' else None
     return jsonify({'success': True, 'message': message, 'deploy': deploy_results})
 
 @app.route('/api/acme-challenge', methods=['DELETE'])
@@ -4113,7 +4119,7 @@ def api_remove_acme_challenge():
     if not success:
         return jsonify({'success': False, 'message': message}), 404
 
-    deploy_results = manager.deploy_to_servers()
+    deploy_results = manager.deploy_to_servers() if ACME_DNS_BACKEND == 'local' else None
     return jsonify({'success': True, 'message': message, 'deploy': deploy_results})
 
 @app.route('/api/deploy', methods=['POST'])
