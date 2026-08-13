@@ -848,6 +848,38 @@
         </div>
 
         <div class="section">
+            <h2>Proxmox Firewall IPSet Tracking</h2>
+            <div class="alert alert-info">
+                Some Proxmox nodes need a subnet's CIDR present in a cluster-wide firewall ipset to avoid
+                ICMPv6 connection-tracking issues on that VLAN (discovered on the mgmt subnet). This mirrors
+                a subnet's live prefix into that ipset entry automatically whenever a prefix change is
+                detected — otherwise the entry silently goes stale after an ISP renumber. "Sync Now" creates
+                or repairs the entry immediately instead of waiting for a real prefix change (needed for
+                first-time setup, or after someone removes the entry by hand).
+            </div>
+            <div id="proxmox-ipset-tracking-status">
+                <p style="padding: 20px;">Loading ipset tracking...</p>
+            </div>
+            <h3 style="color: #333; margin: 20px 0 15px;">Track a Subnet</h3>
+            <form id="ipset-tracking-form" onsubmit="addIpsetTracking(event)">
+                <div class="form-group">
+                    <label for="ipt-subnet">Subnet</label>
+                    <select id="ipt-subnet" required></select>
+                </div>
+                <div class="form-group">
+                    <label for="ipt-ipset">Proxmox IPSet Name</label>
+                    <input type="text" id="ipt-ipset" placeholder="proxmox-cluster" required>
+                </div>
+                <div class="form-group">
+                    <label for="ipt-label">Label (shown in the ipset entry's comment)</label>
+                    <input type="text" id="ipt-label" placeholder="mgmt subnet (VLAN 7)">
+                </div>
+                <button type="submit" class="btn btn-secondary">Track Subnet</button>
+            </form>
+            <div id="ipset-tracking-add-result" style="margin-top: 15px;"></div>
+        </div>
+
+        <div class="section">
             <h2>Backup & Restore</h2>
 
             <div class="tab-group" style="margin-bottom: 20px;">
@@ -2494,6 +2526,91 @@
                 });
         }
 
+        function loadIpsetTracking() {
+            return fetch('/api/proxmox-ipset-tracking')
+                .then(response => response.json())
+                .then(data => {
+                    const tracking = data.proxmox_ipset_tracking || {};
+                    const names = Object.keys(tracking);
+                    const el = document.getElementById('proxmox-ipset-tracking-status');
+                    if (names.length === 0) {
+                        el.innerHTML = '<p style="padding: 20px;">No subnets tracked yet.</p>';
+                    } else {
+                        el.innerHTML = names.map(name => {
+                            const t = tracking[name];
+                            return `
+                                <div class="server-item" style="margin-bottom: 10px;">
+                                    <h4>${name}</h4>
+                                    <p><strong>IPSet:</strong> ${t.ipset}</p>
+                                    <p><strong>Current CIDR:</strong> ${t.cidr || 'not set yet'}</p>
+                                    <p><strong>Label:</strong> ${t.label || ''}</p>
+                                    <button class="btn btn-secondary btn-sm" onclick="syncIpsetTrackingNow('${name}')">Sync Now</button>
+                                    <div id="ipset-sync-result-${name}" style="margin-top: 8px;"></div>
+                                </div>`;
+                        }).join('');
+                    }
+
+                    const select = document.getElementById('ipt-subnet');
+                    if (select) {
+                        const previousValue = select.value;
+                        const subnetNames = Object.keys(cachedSubnets || {});
+                        select.innerHTML = subnetNames.map(n => `<option value="${n}">${n}</option>`).join('')
+                            || '<option value="">(no subnets registered yet)</option>';
+                        if (subnetNames.includes(previousValue)) {
+                            select.value = previousValue;
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading ipset tracking:', error);
+                    document.getElementById('proxmox-ipset-tracking-status').innerHTML =
+                        '<div class="alert alert-error">Error loading ipset tracking</div>';
+                });
+        }
+
+        function syncIpsetTrackingNow(name) {
+            const resultEl = document.getElementById(`ipset-sync-result-${name}`);
+            resultEl.innerHTML = '<p>Syncing...</p>';
+            fetch(`/api/proxmox-ipset-tracking/${encodeURIComponent(name)}/sync-now`, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    resultEl.innerHTML = `<div class="alert ${data.success ? 'alert-success' : 'alert-error'}">${data.message}</div>`;
+                    loadIpsetTracking();
+                })
+                .catch(error => {
+                    console.error('Error syncing ipset tracking:', error);
+                    resultEl.innerHTML = '<div class="alert alert-error">Error contacting server</div>';
+                });
+        }
+
+        function addIpsetTracking(event) {
+            event.preventDefault();
+            const payload = {
+                subnet: document.getElementById('ipt-subnet').value,
+                ipset: document.getElementById('ipt-ipset').value.trim(),
+                label: document.getElementById('ipt-label').value.trim() || null
+            };
+            fetch('/api/proxmox-ipset-tracking', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('ipset-tracking-add-result').innerHTML =
+                        `<div class="alert ${data.success ? 'alert-success' : 'alert-error'}">${data.message}</div>`;
+                    if (data.success) {
+                        document.getElementById('ipset-tracking-form').reset();
+                    }
+                    loadIpsetTracking();
+                })
+                .catch(error => {
+                    console.error('Error adding ipset tracking:', error);
+                    document.getElementById('ipset-tracking-add-result').innerHTML =
+                        '<div class="alert alert-error">Error contacting server</div>';
+                });
+        }
+
         function addGroupMember(name) {
             const domain = document.getElementById(`group-add-select-${name}`).value;
             const resultEl = document.getElementById(`group-member-result-${name}`);
@@ -2536,7 +2653,7 @@
         loadServersForSubnetForm();
         loadVlans();
         updateVlanFormVisibility();
-        loadSubnets().then(() => loadDynamicHosts()).then(() => loadUpdateGroups());
+        loadSubnets().then(() => loadDynamicHosts()).then(() => loadUpdateGroups()).then(() => loadIpsetTracking());
         loadZonesForDynamicForm();
         updateDynamicHostFormVisibility();
         loadDeviceCredentials();
@@ -2545,6 +2662,7 @@
         setInterval(loadSubnets, 30000);
         setInterval(loadVlans, 30000);
         setInterval(loadUpdateGroups, 30000);
+        setInterval(loadIpsetTracking, 30000);
     </script>
 </body>
 </html>

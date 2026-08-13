@@ -1629,16 +1629,204 @@ class ZoneManager:
             return
         _send_email(to_addr, f"dnsmasq-ui: Update group '{group_name}' FAILED, LOCKED (member: {domain})", body)
 
+    # Comment marker on ipset entries this code manages, so they're
+    # identifiable at a glance in the Proxmox UI/CLI and don't get
+    # mistaken for one of the many unrelated hand-maintained entries
+    # (Ceph storage/mgmt networks, NAS, backup server, etc.) sharing the
+    # same cluster-wide ipset — see update_proxmox_ipset_cidr.
+    _PROXMOX_IPSET_COMMENT_PREFIX = "dnsmasq-ui-managed: "
+
+    def get_proxmox_ipset_tracking(self):
+        """Subnets whose live prefix_v6 should be mirrored into a
+        Proxmox cluster-wide firewall IPSet CIDR entry (see
+        update_proxmox_ipset_cidr) — keyed by subnet name. Lazily
+        created as empty so older zones.json files don't need a
+        migration."""
+        return self.config.get('global', {}).setdefault('proxmox_ipset_tracking', {})
+
+    def set_proxmox_ipset_tracking(self, subnet_name, ipset, label=None):
+        """Start (or reconfigure) tracking a subnet's live prefix into
+        a Proxmox cluster IPSet CIDR entry. Doesn't push anything to
+        Proxmox immediately — 'cidr' is seeded from the subnet's
+        current known prefix_v6 (if any), so if the ipset already has
+        the right entry (the common case: a human set it up manually,
+        same as how pve04's original fix happened), this doesn't try to
+        create a duplicate — it just starts tracking from here, and
+        only actually adds/removes anything the next time
+        poll_subnets() detects that subnet's prefix has actually
+        changed."""
+        if subnet_name not in self.get_subnets():
+            return False, f"Unknown subnet '{subnet_name}'"
+        tracking = self.get_proxmox_ipset_tracking()
+        tracking[subnet_name] = {
+            'ipset': ipset,
+            'cidr': self.get_subnets()[subnet_name].get('prefix_v6'),
+            'label': label or subnet_name,
+        }
+        self.save_config()
+        return True, f"Now tracking subnet '{subnet_name}' into ipset '{ipset}'"
+
+    def sync_proxmox_ipset_tracking(self, subnet_name):
+        """Manually (re)sync a tracked subnet's ipset CIDR entry to its
+        current live prefix_v6 right now, instead of waiting for
+        poll_subnets() to detect an actual prefix change. Needed for
+        two cases update_proxmox_ipset_cidr's drift-triggered path
+        can't handle: first-time setup (create the entry without
+        waiting for a "change"), and recovering after a human manually
+        removed the entry — in both cases the tracked prefix hasn't
+        technically "changed", so this always checks the ipset's real
+        current contents rather than trusting the locally-recorded
+        'cidr', and (re)creates the entry if it's actually missing.
+
+        Returns (success, message).
+        """
+        tracking = self.get_proxmox_ipset_tracking().get(subnet_name)
+        if not tracking:
+            return False, f"Subnet '{subnet_name}' is not configured for ipset tracking"
+        current_prefix = self.get_subnets().get(subnet_name, {}).get('prefix_v6')
+        if not current_prefix:
+            return False, f"Subnet '{subnet_name}' has no live prefix_v6 to sync"
+
+        node = next(iter(PROXMOX_NODE_IPS), None)
+        if not node:
+            return False, "No Proxmox nodes configured (PROXMOX_NODES/PROXMOX_IPS)"
+        ipset = tracking['ipset']
+        ok, output = self._run_proxmox_ssh_command(
+            node, f"pvesh get /cluster/firewall/ipset/{shlex.quote(ipset)} --output-format json")
+        if not ok:
+            return False, f"Failed to read ipset '{ipset}': {output}"
+        try:
+            entries = json.loads(output)
+        except Exception as e:
+            return False, f"Failed to parse ipset '{ipset}' listing: {e}"
+
+        if any(e.get('cidr') == current_prefix for e in entries):
+            tracking['cidr'] = current_prefix
+            self.save_config()
+            return True, f"ipset '{ipset}' already has {current_prefix} — nothing to do"
+
+        old_cidr = tracking.get('cidr')
+        comment = f"{self._PROXMOX_IPSET_COMMENT_PREFIX}{tracking.get('label', subnet_name)}"
+        ok, output = self._run_proxmox_ssh_command(
+            node, f"pvesh create /cluster/firewall/ipset/{shlex.quote(ipset)} "
+                  f"--cidr {shlex.quote(current_prefix)} --comment {shlex.quote(comment)}")
+        if not ok:
+            return False, f"Failed to add ipset entry {current_prefix}: {output}"
+
+        if old_cidr and old_cidr != current_prefix and any(e.get('cidr') == old_cidr for e in entries):
+            old_cidr_encoded = urllib.parse.quote(old_cidr, safe='')
+            ok, output = self._run_proxmox_ssh_command(
+                node, f"pvesh delete /cluster/firewall/ipset/{shlex.quote(ipset)}/{old_cidr_encoded}")
+            if not ok:
+                tracking['cidr'] = current_prefix
+                self.save_config()
+                return False, (f"Added {current_prefix} but failed to remove stale old entry {old_cidr} "
+                                f"(both now present, safe but should be cleaned up manually): {output}")
+
+        tracking['cidr'] = current_prefix
+        self.save_config()
+        return True, f"ipset '{ipset}' now has {current_prefix}"
+
+    def update_proxmox_ipset_cidr(self, ipset, old_cidr, new_cidr, label):
+        """Move a CIDR entry in a cluster-wide Proxmox firewall IPSet
+        from old_cidr to new_cidr — keeps a subnet-tracking ipset entry
+        (e.g. the ICMPv6 ctstate-INVALID workaround discovered for the
+        mgmt subnet, see project memory) correct across an ISP prefix
+        renumber, since an ipset entry doesn't update on its own the
+        way VLAN interface addresses do via the Group Update Plan.
+
+        Cluster-level API (not per-node) — one call, applies everywhere
+        in the cluster via corosync sync, same as the original manual
+        fix. Adds the new CIDR BEFORE removing the old one, so there's
+        never a window where neither is present. Only ever touches
+        CIDR strings that exactly match old_cidr/new_cidr, tagged with
+        _PROXMOX_IPSET_COMMENT_PREFIX — this ipset also holds unrelated,
+        hand-maintained entries that must never be touched.
+
+        Returns (success, message).
+        """
+        if old_cidr == new_cidr:
+            return True, "No change (old and new CIDR are identical)"
+
+        node = next(iter(PROXMOX_NODE_IPS), None)
+        if not node:
+            return False, "No Proxmox nodes configured (PROXMOX_NODES/PROXMOX_IPS)"
+
+        comment = f"{self._PROXMOX_IPSET_COMMENT_PREFIX}{label}"
+        create_cmd = (f"pvesh create /cluster/firewall/ipset/{shlex.quote(ipset)} "
+                       f"--cidr {shlex.quote(new_cidr)} --comment {shlex.quote(comment)}")
+        ok, output = self._run_proxmox_ssh_command(node, create_cmd)
+        if not ok:
+            return False, f"Failed to add new ipset entry {new_cidr}: {output}"
+
+        try:
+            ok, output = self._run_proxmox_ssh_command(
+                node, f"pvesh get /cluster/firewall/ipset/{shlex.quote(ipset)} --output-format json")
+            entries = json.loads(output) if ok else []
+        except Exception as e:
+            return False, f"Added {new_cidr} but couldn't verify it landed (old entry {old_cidr} left in place, safe): {e}"
+        if not any(e.get('cidr') == new_cidr for e in entries):
+            return False, f"Added {new_cidr} but it isn't showing up in the ipset (old entry {old_cidr} left in place, safe)"
+
+        if not old_cidr or not any(e.get('cidr') == old_cidr for e in entries):
+            return True, f"ipset '{ipset}' now has {new_cidr} (no prior {old_cidr!r} entry to remove)"
+
+        old_cidr_encoded = urllib.parse.quote(old_cidr, safe='')
+        ok, output = self._run_proxmox_ssh_command(
+            node, f"pvesh delete /cluster/firewall/ipset/{shlex.quote(ipset)}/{old_cidr_encoded}")
+        if not ok:
+            return False, (f"Added {new_cidr} but failed to remove old entry {old_cidr} — both are now "
+                            f"present (safe, but the stale one should be cleaned up manually): {output}")
+
+        return True, f"ipset '{ipset}' updated: {old_cidr} -> {new_cidr}"
+
+    def _notify_proxmox_ipset_update(self, subnet_name, old_cidr, new_cidr, success, message):
+        auth_config = _load_auth() or {}
+        to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+        status = 'succeeded' if success else 'FAILED'
+        body = (
+            f"Subnet '{subnet_name}''s live prefix changed, so dnsmasq-ui tried to update the "
+            f"matching Proxmox cluster firewall ipset entry.\n\n"
+            f"{old_cidr} -> {new_cidr}\nResult: {status}\nDetail: {message}\n\n"
+            + ("" if success else
+               "This does not block DNS tracking or the Group Update Plan's own interface-address "
+               "pushes (which don't depend on this ipset) — but the ICMPv6/conntrack workaround this "
+               "entry provides may be stale until fixed manually.\n\n") +
+            f"Dashboard: {DASHBOARD_URL}/config"
+        )
+        if not to_addr:
+            logger.error(f"Proxmox ipset update for subnet '{subnet_name}' {status}: {message} "
+                         "— no notification email configured (enable email 2FA to set one)")
+            return
+        _send_email(to_addr, f"dnsmasq-ui: Proxmox ipset update {status} (subnet: {subnet_name})", body)
+
     def _propagate_subnet_prefix_change(self, subnet_name, old_prefix, new_prefix):
         """When poll_subnets() finds a subnet's live prefix has actually
-        changed (not just been detected for the first time), compute
-        each affected update-group member's new target address and run
-        that group through its Group Update Plan (run_update_group).
-        This is only one caller of run_update_group — a future
-        non-subnet-triggered source (e.g. the still-on-hold opnsense
-        DHCPv6/RA drift work) would compute its own targets and call it
-        directly instead of going through here."""
+        changed (not just been detected for the first time), first
+        update any tracked Proxmox cluster ipset CIDR entry for this
+        subnet (see update_proxmox_ipset_cidr) — deliberately BEFORE
+        pushing any interface address changes below, so the firewall/
+        conntrack path for the new addresses is already correct by the
+        time they're validated, not fixed up after the fact. Then
+        compute each affected update-group member's new target address
+        and run that group through its Group Update Plan
+        (run_update_group). run_update_group has other callers too — a
+        future non-subnet-triggered source (e.g. the still-on-hold
+        opnsense DHCPv6/RA drift work) would compute its own targets and
+        call it directly instead of going through here."""
         logger.warning(f"Subnet '{subnet_name}' prefix changed: {old_prefix} -> {new_prefix}")
+
+        ipset_tracking = self.get_proxmox_ipset_tracking().get(subnet_name)
+        if ipset_tracking:
+            old_cidr = ipset_tracking.get('cidr') or old_prefix
+            ok, msg = self.update_proxmox_ipset_cidr(
+                ipset_tracking['ipset'], old_cidr, new_prefix, ipset_tracking.get('label', subnet_name))
+            logger.warning(f"Proxmox ipset tracking for subnet '{subnet_name}': {'OK' if ok else 'FAILED'} — {msg}")
+            if ok:
+                ipset_tracking['cidr'] = new_prefix
+                self.save_config()
+            self._notify_proxmox_ipset_update(subnet_name, old_cidr, new_prefix, ok, msg)
+
         for group_name, group in self.get_update_groups().items():
             member_targets = {}
             for domain in group.get('members', []):
@@ -3651,6 +3839,30 @@ def api_update_groups_sync_now(group_name):
     waiting for a detected subnet prefix change."""
     all_converged, results = manager.sync_update_group(group_name)
     return jsonify({'success': all_converged, 'results': results})
+
+@app.route('/api/proxmox-ipset-tracking', methods=['GET'])
+def api_proxmox_ipset_tracking_list():
+    """API: Subnets currently tracked into a Proxmox cluster ipset CIDR
+    entry, kept in sync automatically on a detected prefix change."""
+    return jsonify({'proxmox_ipset_tracking': manager.get_proxmox_ipset_tracking()})
+
+@app.route('/api/proxmox-ipset-tracking', methods=['POST'])
+def api_proxmox_ipset_tracking_set():
+    """API: Start (or reconfigure) tracking a subnet's live prefix into
+    a Proxmox cluster ipset CIDR entry."""
+    data = request.json
+    success, message = manager.set_proxmox_ipset_tracking(
+        data.get('subnet'), data.get('ipset'), data.get('label'))
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/api/proxmox-ipset-tracking/<subnet_name>/sync-now', methods=['POST'])
+def api_proxmox_ipset_tracking_sync_now(subnet_name):
+    """API: Manually (re)sync a tracked subnet's ipset CIDR entry to
+    its current live prefix right now, instead of waiting for a
+    detected prefix change — creates the entry on first setup, or
+    recreates it if a human removed it by hand."""
+    success, message = manager.sync_proxmox_ipset_tracking(subnet_name)
+    return jsonify({'success': success, 'message': message})
 
 @app.route('/api/subnets', methods=['GET'])
 def api_subnets_list():
