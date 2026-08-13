@@ -1976,9 +1976,18 @@ class ZoneManager:
         if actual is None:
             return False, configured, None
         try:
-            configured_net = ipaddress.ip_interface(configured).network
+            # keepalive_vip6 is always stored as a bare address (no
+            # prefix) — see ansible/dnsmasq-setup.yml, which explicitly
+            # appends /64 itself when building keepalived.conf. Without
+            # forcing /64 here too, ip_interface(configured).network
+            # silently defaults to /128 (a single-address "network"),
+            # which can never equal actual's /64 — so drift was always
+            # reported as True, confirmed live: every poll logged a
+            # false-positive drift error, and the very first poll after
+            # each process start emailed a spurious drift notice.
+            configured_net = ipaddress.ip_network(f"{configured}/64", strict=False)
         except ValueError:
-            configured_net = ipaddress.ip_network(configured, strict=False)
+            return False, configured, str(actual)
         drifted = configured_net != actual
         return drifted, configured, str(actual)
 
