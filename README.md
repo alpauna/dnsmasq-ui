@@ -548,16 +548,13 @@ that behavior to every record:
   A tracked host's whole point is that its address changes over time —
   if only the forward A/AAAA record were maintained, reverse DNS would
   silently go stale (or point at the wrong host) the moment a device's
-  address changed. `poll_dynamic_hosts()` is the single place an address
-  change ever gets applied (manual "Poll Now", the background timer, and
-  a subnet prefix change all funnel through it), so that's the one place
-  PTR maintenance needed to hook in: on a detected change it removes the
-  PTR at the *old* address and creates one at the *new* address, in the
-  same zone as the forward record. A brand-new entry (no prior address)
-  just gets the new PTR created, nothing to remove. This only covers
-  `dynamic_hosts` entries — a manually-added A/AAAA record via the Zone
-  Management page does not currently get an automatic PTR; add one
-  yourself if you want reverse DNS for it too.
+  address changed. This isn't special-cased for `dynamic_hosts` — it's a
+  property of `add_record()`/`update_record()`/`delete_record()`
+  themselves (see [Supported Record Types](#supported-record-types)), so
+  `poll_dynamic_hosts()` gets it for free through the same two calls it
+  already made to apply a detected change, regardless of what triggered
+  that change (manual "Poll Now", the background timer, or a subnet
+  prefix change).
 - Manage tracked hosts from the **Configuration** page in the dashboard, or
   via the [API](#dynamic-dns-tracking-1) directly.
 
@@ -1819,6 +1816,41 @@ curl http://localhost:5000/api/wireguard/status
   reverse_pointer` for a range of IPv4/IPv6 cases (including `::`,
   leading zeros, all-zero groups) before being written.
 
+**Every A/AAAA record gets a matching PTR record automatically, by
+default — this isn't limited to [Dynamic DNS
+Tracking](#dynamic-dns-tracking-dynamic_hosts).** `add_record()` creates
+one, `update_record()` moves it when the address changes (removing the
+old PTR, creating the new one), and `delete_record()` removes it —
+`ZoneManager._sync_ptr_record()` is the single method all three call,
+so this is one behavior, not three separately-maintained ones. The PTR
+lives in the same zone as the forward record; an old/new address that
+doesn't parse as a real IP (bad input, a failed detection upstream) is
+treated as nothing-to-do for that side rather than raised. This applies
+to `A`/`AAAA` only — adding/editing/deleting any other record type never
+touches PTR records, and a PTR record itself is exempt from triggering
+more PTR logic (no recursion).
+
+**Opting a specific record out**: the Add New Record form shows a
+**"Don't create an associated PTR record for this entry"** checkbox
+(unchecked by default) when A or AAAA is selected — e.g. for an address
+this app isn't the one who should own reverse DNS for. Passed through as
+`add_record(..., skip_ptr=True)`/`update_record(..., skip_ptr=True)`;
+`delete_record()` has no such option — an explicit delete always cleans
+up any PTR record that exists, since leaving one orphaned behind would
+be wrong, not conservative (unlike `dynamic_hosts` removal, which
+deliberately leaves the last-known forward record in place rather than
+deleting it — see above). The opt-out isn't persisted on the record
+itself, so a later edit that doesn't check the box again will re-sync
+the PTR as normal.
+
+**Backfilling existing records**: `ZoneManager.backfill_ptr_records()`
+walks every zone's A/AAAA records and ensures each has a matching PTR,
+for records that predate this feature (or were added with `skip_ptr`
+and should now get one after all). Safe to re-run at any time — it's
+built on the same replace-not-duplicate logic as everything else here.
+No dedicated UI button for it currently; it's a `ZoneManager` method
+callable directly (e.g. via a one-off script against a live instance).
+
 ## Web UI
 
 ### Dashboard
@@ -1842,8 +1874,12 @@ curl http://localhost:5000/api/wireguard/status
   selected and fills in the complete, correctly-formatted value, a
   **PTR Helper** appears when PTR is selected — enter a plain IP address
   and it computes the correct `in-addr.arpa`/`ip6.arpa` reverse-lookup
-  name into the Domain field, and a **TTL in seconds (optional)** field
-  appears when CNAME is selected
+  name into the Domain field, a **TTL in seconds (optional)** field
+  appears when CNAME is selected, and a **"Don't create an associated
+  PTR record for this entry"** checkbox (unchecked by default) appears
+  when A or AAAA is selected — every A/AAAA record gets a matching PTR
+  record automatically otherwise, see [Supported Record
+  Types](#supported-record-types)
 - Edit and delete existing records
 - Inline record editing with save functionality
 - Deploy changes across all servers with one click
@@ -2630,6 +2666,7 @@ MIT
 - [x] Group Update Plans - pluggable script-based HA group updates (Proxmox VE VLAN presence first), self-reverting safety net, serialized per-member, hard-stop-and-lock per group on failure
 - [x] Proxmox firewall ipset tracking - keeps a cluster ipset CIDR entry in sync with a subnet's live prefix, closing the renumber-fragility gap left by the mgmt-VLAN `ctstate INVALID` fix
 - [x] ACME DNS-01 challenge support - revocable per-key bearer tokens, acme.sh/certbot hook scripts, backend-switchable between Cloudflare's API (current authoritative DNS) and this app's own zones (once that migrates)
+- [x] MX/SRV/CAA/PTR record types, CNAME + global TTL support, and automatic PTR maintenance for every A/AAAA record (add/update/delete, plus Dynamic DNS Tracking) with a per-record opt-out and a one-time backfill for pre-existing records
 
 ### Planned 📋
 - [ ] Zone file import/export

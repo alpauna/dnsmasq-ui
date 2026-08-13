@@ -403,6 +403,12 @@
                         <label for="cname-ttl">TTL in seconds (optional)</label>
                         <input type="number" id="cname-ttl" min="1" placeholder="default">
                     </div>
+                    <div class="form-group" id="skip-ptr-group" style="display: none;">
+                        <label style="display: flex; align-items: center; gap: 6px; font-weight: normal;">
+                            <input type="checkbox" id="skip-ptr" style="width: auto;">
+                            Don't create an associated PTR record for this entry
+                        </label>
+                    </div>
                     <div class="form-group" id="ptr-helper-group" style="display: none;">
                         <label for="ptr-ip-helper">PTR Helper: IP Address</label>
                         <div style="display: flex; gap: 8px;">
@@ -557,6 +563,14 @@
                 cnameTtlGroup.style.display = 'none';
                 document.getElementById('cname-ttl').value = '';
             }
+
+            const skipPtrGroup = document.getElementById('skip-ptr-group');
+            if (type === 'A' || type === 'AAAA') {
+                skipPtrGroup.style.display = '';
+            } else {
+                skipPtrGroup.style.display = 'none';
+                document.getElementById('skip-ptr').checked = false;
+            }
         }
 
         // Ported 1:1 from a Python implementation checked against
@@ -691,6 +705,7 @@
                 return;
             }
             const value = buildSubmitValue(type, rawValue);
+            const skipPtr = (type === 'A' || type === 'AAAA') && document.getElementById('skip-ptr').checked;
 
             fetch(`/api/zones/${zoneName}/records`, {
                 method: 'POST',
@@ -700,7 +715,8 @@
                 body: JSON.stringify({
                     domain: domain,
                     type: type,
-                    value: value
+                    value: value,
+                    skip_ptr: skipPtr
                 })
             })
             .then(response => response.json())
@@ -711,6 +727,7 @@
                     document.getElementById('domain').value = '';
                     document.getElementById('record-value').value = '';
                     document.getElementById('cname-ttl').value = '';
+                    document.getElementById('skip-ptr').checked = false;
                     setTimeout(() => location.reload(), 1000);
                 } else {
                     statusDiv.innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
@@ -782,6 +799,8 @@
                     return;
                 }
 
+                const skipPtr = (newType === 'A' || newType === 'AAAA') && document.getElementById('skip-ptr').checked;
+
                 fetch(`/api/zones/${zoneName}/records/${encodeURIComponent(domain)}/${type}`, {
                     method: 'DELETE'
                 })
@@ -794,7 +813,8 @@
                         body: JSON.stringify({
                             domain: document.getElementById('domain').value.trim(),
                             type: newType,
-                            value: newValue
+                            value: newValue,
+                            skip_ptr: skipPtr
                         })
                     });
                 })

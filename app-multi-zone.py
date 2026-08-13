@@ -763,8 +763,12 @@ class ZoneManager:
         self.save_config()
         return True, "Zone deleted"
 
-    def add_record(self, zone_name, domain, record_type, value):
-        """Add record to zone."""
+    def add_record(self, zone_name, domain, record_type, value, skip_ptr=False):
+        """Add record to zone. Adding an A/AAAA record also creates its
+        matching PTR record by default -- see _sync_ptr_record. Pass
+        skip_ptr=True to opt a specific record out (e.g. an address this
+        app isn't the one who should own reverse DNS for). Every other
+        type (including PTR itself) is unaffected regardless."""
         zone = self.get_zone(zone_name)
         if not zone:
             return False, "Zone not found"
@@ -775,28 +779,46 @@ class ZoneManager:
             'value': value
         }
         zone['records'].append(record)
+        if record_type in ('A', 'AAAA') and not skip_ptr:
+            self._sync_ptr_record(zone, domain, None, value)
         self.save_config()
         return True, "Record added"
 
-    def update_record(self, zone_name, domain, record_type, new_value):
-        """Update record in zone."""
+    def update_record(self, zone_name, domain, record_type, new_value, skip_ptr=False):
+        """Update record in zone. Changing an A/AAAA record's value moves
+        its PTR record to match -- see _sync_ptr_record. skip_ptr=True
+        leaves any existing PTR record for the old value untouched
+        instead of removing it."""
         zone = self.get_zone(zone_name)
         if not zone:
             return False, "Zone not found"
 
         for record in zone['records']:
             if record['domain'] == domain and record['type'] == record_type:
+                old_value = record['value']
                 record['value'] = new_value
+                if record_type in ('A', 'AAAA') and not skip_ptr:
+                    self._sync_ptr_record(zone, domain, old_value, new_value)
                 self.save_config()
                 return True, "Record updated"
 
         return False, "Record not found"
 
     def delete_record(self, zone_name, domain, record_type):
-        """Delete record from zone."""
+        """Delete record from zone. Deleting an A/AAAA record also removes
+        its PTR record(s) -- see _sync_ptr_record. Unlike dynamic_hosts
+        (where "stop tracking" deliberately leaves the last-known forward
+        record in place), an explicit delete here is a real deletion, so
+        leaving an orphaned PTR behind would be wrong, not conservative."""
         zone = self.get_zone(zone_name)
         if not zone:
             return False, "Zone not found"
+
+        if record_type in ('A', 'AAAA'):
+            old_values = [r['value'] for r in zone['records']
+                          if r['domain'] == domain and r['type'] == record_type]
+            for old_value in old_values:
+                self._sync_ptr_record(zone, domain, old_value, None)
 
         zone['records'] = [r for r in zone['records']
                           if not (r['domain'] == domain and r['type'] == record_type)]
@@ -3300,11 +3322,13 @@ expect eof
             if current == existing:
                 results[domain] = {'changed': False, 'value': current}
             else:
+                # add_record()/update_record() sync the PTR record
+                # themselves now (same A/AAAA-only logic this used to
+                # call explicitly here) -- no separate call needed.
                 if existing is None:
                     self.add_record(entry['zone'], domain, record_type, current)
                 else:
                     self.update_record(entry['zone'], domain, record_type, current)
-                self._sync_ptr_record(zone, domain, existing, current)
                 entry['last_updated'] = datetime.now().isoformat()
                 results[domain] = {'changed': True, 'old': existing, 'new': current}
                 changed_any = True
@@ -3318,22 +3342,24 @@ expect eof
         return {'changes': results, 'deployed': changed_any}
 
     def _sync_ptr_record(self, zone, forward_domain, old_address, new_address):
-        """Keep a tracked host's PTR record in sync with its forward
-        A/AAAA record -- called from poll_dynamic_hosts() every time it
-        detects an address change, so reverse DNS doesn't silently go
-        stale the way it would if only the forward record were kept
-        current. Removes the PTR at the old address (if any -- None on a
-        brand-new entry) and (re)creates it at the new one. Mutates
-        zone['records'] in place and does not call save_config() itself;
-        poll_dynamic_hosts() already does one unconditional save_config()
-        per poll cycle (plus add_record()/update_record()'s own), so this
-        rides along with those rather than costing its own peer-sync SSH
-        round trip on top.
+        """Keep an A/AAAA record's PTR record in sync with it. Called from
+        add_record()/update_record()/delete_record() (any A/AAAA change,
+        including manual edits via Zone Management) and from
+        poll_dynamic_hosts() indirectly, through those same two methods --
+        so this is the one place reverse DNS gets maintained regardless
+        of what triggered the forward-record change. Removes the PTR at
+        the old address (if any -- None on a brand-new record or a
+        deletion with nothing to add) and (re)creates it at the new one
+        (None on a deletion, nothing to add). Mutates zone['records'] in
+        place and does not call save_config() itself; the caller already
+        does its own save right after, so this rides along with that
+        instead of costing a second peer-sync SSH round trip.
 
         old_address/new_address aren't guaranteed to be real IPs -- e.g.
-        a failed detection upstream -- so a value that doesn't parse is
-        treated as "nothing to do" for that side rather than raised, same
-        as the other record types' malformed-input handling elsewhere in
+        a failed dynamic_hosts detection upstream, or arbitrary API input
+        -- so a value that doesn't parse is treated as "nothing to do"
+        for that side rather than raised, same as the other record
+        types' malformed-input handling elsewhere in
         generate_dnsmasq_config()."""
         if old_address:
             try:
@@ -3357,6 +3383,23 @@ expect eof
                                 if not (r['domain'] == new_ptr_name and r['type'] == 'PTR'
                                         and r['value'] == forward_domain)]
             zone['records'].append({'domain': new_ptr_name, 'type': 'PTR', 'value': forward_domain})
+
+    def backfill_ptr_records(self):
+        """One-time reconciliation: ensure every existing A/AAAA record
+        across every zone has a matching PTR record. Only needed for
+        records that predate PTR auto-sync (add_record()/update_record()
+        already keep new/changed ones current going forward) -- safe to
+        re-run at any time regardless, since _sync_ptr_record() replaces
+        rather than duplicates. Returns the number of A/AAAA records
+        processed."""
+        count = 0
+        for zone in self.get_zones():
+            for record in list(zone['records']):
+                if record['type'] in ('A', 'AAAA'):
+                    self._sync_ptr_record(zone, record['domain'], None, record['value'])
+                    count += 1
+        self.save_config()
+        return count
 
     def get_ssh_key_info(self):
         """Get current SSH key information."""
@@ -4132,7 +4175,8 @@ def api_add_record(zone_name):
         zone_name,
         data.get('domain'),
         data.get('type'),
-        data.get('value')
+        data.get('value'),
+        skip_ptr=bool(data.get('skip_ptr', False))
     )
     return jsonify({'success': success, 'message': message})
 
