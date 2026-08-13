@@ -1,0 +1,28 @@
+// Managed by ansible/bind9-setup.yml -- structural options only. Zone
+// content itself always comes from app-multi-zone.py's generator, never
+// from this playbook (see the "static-content landmine" this deliberately
+// avoids, documented in ansible/dnsmasq-setup.yml's own history).
+options {
+	directory "/var/cache/bind";
+
+	forwarders {
+{% for dns in upstream_dns %}
+		{{ dns }};
+{% endfor %}
+	};
+
+	dnssec-validation auto;
+
+	// any/any matches dnsmasq's actual current behavior (wildcard bind on
+	// 0.0.0.0/::, confirmed live via `ss -tulnp` against the real
+	// servers) -- not a widened posture. This also means a WireGuard
+	// tunnel IP is automatically covered with no config change needed
+	// when wg0 comes up, unlike dnsmasq's current setup which needs an
+	// explicit interface=wg0/listen-address stanza
+	// (deploy_wg_dnsmasq_config() in app-multi-zone.py). The actual
+	// access boundary is allow-recursion/allow-query below, not this.
+	listen-on { any; };
+	listen-on-v6 { any; };
+	allow-recursion { {{ allowed_query_networks | join('; ') }}; };
+	allow-query { any; };
+};

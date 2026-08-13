@@ -1,0 +1,238 @@
+---
+# Provisions BIND9 on the DNS servers ahead of the dnsmasq -> BIND9
+# migration (DNSSEC zone-signing support, which dnsmasq lacks -- see
+# README's ACME DNS-01 Challenges section and the migration plan for the
+# full rationale).
+#
+# THIS PLAYBOOK ONLY STAGES BIND9 -- IT DOES NOT CUT OVER.
+# named is installed, configured, and immediately masked so it can never
+# compete with the live dnsmasq service for port 53 (see the incident
+# note below). keepalived is left completely untouched, still tracking
+# dnsmasq. The actual cutover (stop dnsmasq, unmask+start named, switch
+# keepalived to track CHECK_NAMED) is a separate, deliberate per-node
+# sequence, not automated here -- see the migration plan's Phase 3.
+#
+# Re-running this playbook against an already-provisioned node is safe:
+# named.conf.options/named.conf.local are always regenerated (structural
+# config only), but zone file *content* is only ever created if it
+# doesn't already exist (a minimal SOA+NS placeholder) -- real zone data
+# always comes from app-multi-zone.py's generator/deploy path, never from
+# here. This deliberately avoids the static-content-landmine pattern
+# that exists in dnsmasq-setup.yml (a fully hardcoded record snapshot
+# baked into the playbook, disconnected from the app's real pipeline --
+# see that file's own history/comments).
+
+- name: Provision BIND9 (staged, not yet active) on DNS servers
+  hosts: dns_servers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    bind_zone_dir: /etc/bind/zones
+    upstream_dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    # Matches dnsmasq's current implicit "trusted LAN only" query posture.
+    allowed_query_networks:
+      - 192.168.0.0/23
+      - 192.168.7.0/24
+      - 127.0.0.1
+      - "::1"
+
+    forward_zones:
+      - ad.alshowto.com
+      - cld.alshowto.com
+      - internal.alshowto.com
+      - mgmt.alshowto.com
+    mgmt_zone: mgmt.alshowto.com
+
+    # AXFR relationship for the DNSSEC-signed zone only (see the plan's
+    # DNSSEC-HA note for why this can't be "3 independent primaries" the
+    # way the other zones are). Plain LAN IPs, not the WireGuard tunnel
+    # IPs recorded in zones.json -- that mesh isn't actually deployed
+    # (confirmed live: no wg0 interface, wg-tools not even installed).
+    mgmt_primary_ip: 192.168.0.231
+    mgmt_secondary_ips:
+      - 192.168.0.232
+      - 192.168.0.233
+
+    # Verified precisely with Python's ipaddress module against the real
+    # subnets -- 192.168.0.0/23 is NOT one octet-aligned reverse zone,
+    # it's two (0.168.192 and 1.168.192). No RFC 2317 classless-
+    # delegation tricks needed anywhere; every split here lands on an
+    # ordinary octet/nibble boundary.
+    reverse_zones:
+      - 0.168.192.in-addr.arpa
+      - 1.168.192.in-addr.arpa
+      - 7.168.192.in-addr.arpa
+      - 0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa
+      - 0.0.1.c.9.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa
+
+  tasks:
+    - name: Install BIND9 and dependencies
+      apt:
+        name:
+          - bind9
+          - bind9utils
+          - bind9-dnsutils
+        state: present
+        update_cache: yes
+
+    - name: Immediately stop and mask named
+      systemd:
+        name: named
+        state: stopped
+        masked: yes
+      # CRITICAL, do not remove: installing the bind9 package on Debian
+      # auto-starts AND auto-enables named via its postinst script. Hit
+      # this live against dns01 during Phase 0 verification -- named
+      # bound to specific addresses (including the production keepalived
+      # VIP) while dnsmasq held the 0.0.0.0/:: wildcard bind, and Linux
+      # prefers the more-specific match for incoming UDP, so named
+      # started actually answering some queries with its empty default
+      # config (confirmed: 127.0.0.1 lookups returned a wrong answer)
+      # despite dnsmasq still running. masked (not just stopped) so a
+      # later `apt upgrade` or accidental `systemctl start named` can't
+      # silently re-trigger this before the real Phase 3 cutover for
+      # this node.
+
+    - name: Create BIND zone directory
+      file:
+        path: "{{ bind_zone_dir }}"
+        state: directory
+        owner: bind
+        group: bind
+        mode: '0755'
+
+    - name: Deploy named.conf.options
+      template:
+        src: templates/named.conf.options.j2
+        dest: /etc/bind/named.conf.options
+        owner: root
+        group: bind
+        mode: '0644'
+      notify: named-checkconf validation
+
+    - name: Deploy named.conf.local
+      template:
+        src: templates/named.conf.local.j2
+        dest: /etc/bind/named.conf.local
+        owner: root
+        group: bind
+        mode: '0644'
+        # is_mgmt_signing_primary depends on which host this is --
+        # computed per-host, not a static var (see below)
+      vars:
+        is_mgmt_signing_primary: "{{ inventory_hostname == 'dns01' }}"
+      notify: named-checkconf validation
+
+    - name: Create minimal placeholder for each forward zone (only if missing)
+      copy:
+        content: |
+          $TTL 3600
+          @	IN	SOA	dns01.{{ item }}. admin.alshowto.com. (
+          			{{ ansible_date_time.date | regex_replace('-', '') }}00	; serial
+          			3600		; refresh
+          			1800		; retry
+          			604800		; expire
+          			3600 )		; minimum
+          	IN	NS	dns01.ad.alshowto.com.
+          	IN	NS	dns02.ad.alshowto.com.
+          	IN	NS	dns03.ad.alshowto.com.
+        dest: "{{ bind_zone_dir }}/db.{{ item }}"
+        owner: bind
+        group: bind
+        mode: '0644'
+        force: no
+      loop: "{{ forward_zones }}"
+      when: item != mgmt_zone or inventory_hostname == 'dns01'
+      # mgmt.alshowto.com's placeholder is only created on dns01 (the
+      # primary) -- dns02/03 get it from AXFR once they're configured as
+      # secondaries and dns01 has real signed content, not from a
+      # locally-created placeholder that would conflict with `type
+      # secondary`'s own file management.
+
+    - name: Create minimal placeholder for each reverse zone (only if missing)
+      copy:
+        content: |
+          $TTL 3600
+          @	IN	SOA	dns01.ad.alshowto.com. admin.alshowto.com. (
+          			{{ ansible_date_time.date | regex_replace('-', '') }}00	; serial
+          			3600		; refresh
+          			1800		; retry
+          			604800		; expire
+          			3600 )		; minimum
+          	IN	NS	dns01.ad.alshowto.com.
+          	IN	NS	dns02.ad.alshowto.com.
+          	IN	NS	dns03.ad.alshowto.com.
+        dest: "{{ bind_zone_dir }}/db.{{ item }}"
+        owner: bind
+        group: bind
+        mode: '0644'
+        force: no
+      loop: "{{ reverse_zones }}"
+
+    - name: Validate named.conf (hard gate, not just a notify -- fail the play if broken)
+      command: named-checkconf
+      changed_when: false
+
+    - name: Create BIND9 monitoring script (file only -- NOT scheduled via cron yet)
+      copy:
+        content: |
+          #!/bin/bash
+          # BIND9 Health Check Script -- mirrors dnsmasq-monitor.sh's shape.
+          # NOT yet added to cron by this playbook -- see bind9-setup.yml:
+          # scheduling this before named is actually the live service would
+          # just generate noise/false "offline" entries while named is
+          # deliberately masked during the provisioning/staging period.
+          # Phase 3's per-node cutover step adds the cron job once this
+          # node's named is actually live.
+
+          LOG_FILE="/var/log/bind9-monitor.log"
+          STATUS_FILE="/var/run/bind9-status"
+
+          check_named() {
+              if systemctl is-active --quiet named; then
+                  echo "online" > $STATUS_FILE
+                  return 0
+              else
+                  echo "offline" > $STATUS_FILE
+                  return 1
+              fi
+          }
+
+          check_dns() {
+              dig @127.0.0.1 +short walmart.com > /dev/null 2>&1
+              return $?
+          }
+
+          log_status() {
+              TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+              HOSTNAME=$(hostname)
+              STATUS=$(cat $STATUS_FILE)
+              echo "[$TIMESTAMP] $HOSTNAME - $STATUS" >> $LOG_FILE
+          }
+
+          check_named && check_dns && STATUS="healthy" || STATUS="degraded"
+          log_status
+        dest: /usr/local/bin/bind9-monitor.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Confirm dnsmasq is still the only thing on port 53 (safety check, not a handler)
+      shell: "ss -tulnp | grep ':53 ' | grep -v dnsmasq || true"
+      register: port53_check
+      changed_when: false
+      failed_when: port53_check.stdout != ""
+
+    - name: Confirm named is masked and inactive
+      command: systemctl is-active named
+      register: named_active_check
+      changed_when: false
+      failed_when: named_active_check.stdout == "active"
+
+  handlers:
+    - name: named-checkconf validation
+      command: named-checkconf
+      changed_when: false

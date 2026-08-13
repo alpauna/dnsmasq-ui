@@ -1,0 +1,55 @@
+// Managed by ansible/bind9-setup.yml -- zone STANZAS only (type, file
+// path, dnssec-policy, transfer ACLs). Zone file CONTENT always comes
+// from app-multi-zone.py's generator/deploy path, never from this
+// playbook -- see the "static-content landmine" note in
+// ansible/dnsmasq-setup.yml's history, deliberately not repeated here.
+// Adding a new zone means adding it to this template's `zones` var and
+// re-running the playbook -- app-multi-zone.py doesn't create zone
+// stanzas on its own, only record content within zones already declared
+// here.
+
+// Only mgmt.alshowto.com uses this today -- see the DNSSEC-HA note in
+// the migration plan for why signing only happens on one real primary
+// (this node) with dns02/03 as AXFR secondaries, not independently on
+// all three nodes.
+dnssec-policy "mgmt-policy" {
+	keys {
+		ksk key-directory lifetime unlimited algorithm ecdsap256sha256;
+		zsk key-directory lifetime 90d algorithm ecdsap256sha256;
+	};
+	dnskey-ttl 3600;
+	max-zone-ttl 86400;
+	publish-safety 1h;
+	retire-safety 1h;
+	signatures-refresh 5d;
+	signatures-validity 14d;
+};
+
+{% for zone in forward_zones %}
+zone "{{ zone }}" {
+{% if zone == mgmt_zone and is_mgmt_signing_primary %}
+	type primary;
+	file "{{ bind_zone_dir }}/db.{{ zone }}";
+	dnssec-policy "mgmt-policy";
+	inline-signing yes;
+	serial-update-method unixtime;
+	allow-transfer { {{ mgmt_secondary_ips | join('; ') }}; };
+	also-notify { {{ mgmt_secondary_ips | join('; ') }}; };
+{% elif zone == mgmt_zone %}
+	type secondary;
+	file "{{ bind_zone_dir }}/db.{{ zone }}";
+	primaries { {{ mgmt_primary_ip }}; };
+{% else %}
+	type primary;
+	file "{{ bind_zone_dir }}/db.{{ zone }}";
+{% endif %}
+};
+
+{% endfor %}
+{% for rzone in reverse_zones %}
+zone "{{ rzone }}" {
+	type primary;
+	file "{{ bind_zone_dir }}/db.{{ rzone }}";
+};
+
+{% endfor %}
