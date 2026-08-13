@@ -51,6 +51,12 @@ logger = logging.getLogger(__name__)
 # Configuration
 ZONES_FILE = os.getenv('ZONES_CONFIG', 'zones.json')
 DNSMASQ_RECORDS_FILE = os.getenv('DNSMASQ_RECORDS_FILE', '/etc/dnsmasq.d/local-records.conf')
+# Migration in progress (see ansible/bind9-setup.yml and the migration
+# plan): servers move from dnsmasq to BIND9 one at a time, tracked per
+# server via servers[name].dns_backend in zones.json rather than a single
+# global switch, since there's a real window with both backends live
+# across dns01/02/03 simultaneously.
+BIND_ZONE_DIR = os.getenv('BIND_ZONE_DIR', '/etc/bind/zones')
 SSH_KEY = os.getenv('SSH_KEY', os.path.expanduser('~/.ssh/id_rsa'))
 SSH_USER = os.getenv('SSH_USER', 'debian')
 # Resolved as an absolute path rather than relying on PATH — the systemd
@@ -649,6 +655,39 @@ _PASSWORD_TRANSFORMS = {
     'linksys_md5': _linksys_md5_password_transform,
 }
 
+# BIND9 migration (see ansible/bind9-setup.yml and the migration plan):
+# these must match that playbook's `reverse_zones`/`mgmt_zone` vars
+# exactly, and the same caveat applies -- verified precisely with
+# Python's ipaddress module against the real subnets, not assumed.
+# 192.168.0.0/23 (LAN) is two separate /24 reverse zones, not one.
+_BIND_REVERSE_ZONES = [
+    '0.168.192.in-addr.arpa',
+    '1.168.192.in-addr.arpa',
+    '7.168.192.in-addr.arpa',
+    '0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa',
+    '0.0.1.c.9.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa',
+]
+_BIND_MGMT_ZONE = 'mgmt.alshowto.com'
+_BIND_MGMT_SIGNING_PRIMARY = 'dns01'
+
+def _bind_absolute(name):
+    """BIND zone-file names must be absolute (trailing dot) to avoid
+    being silently qualified against $ORIGIN -- this app's stored
+    values (hostnames, targets, contacts) never carry one on their own."""
+    return name if name.endswith('.') else name + '.'
+
+def _bind_owner(domain, zone_name):
+    """The owner-name column for one record line -- always explicit,
+    never blank. See generate_bind_zone_file's docstring: a blank/
+    omitted owner in a BIND zone file inherits the PREVIOUS record's
+    owner, not the zone apex, confirmed empirically in Phase 0 testing
+    (two test records silently landed on the wrong name)."""
+    if domain == zone_name:
+        return '@'
+    if domain.endswith('.' + zone_name):
+        return domain[:-(len(zone_name) + 1)]
+    return _bind_absolute(domain)
+
 class ZoneManager:
     """Manages DNS zones and records."""
 
@@ -1027,23 +1066,224 @@ class ZoneManager:
 
         return config
 
+    def generate_bind_zone_file(self, zone):
+        """Generate a BIND zone file for one forward zone. Reuses the
+        exact same MX/SRV/CAA/CNAME value-splitting logic as
+        generate_dnsmasq_config(), retargeted to BIND's native zone-file
+        syntax -- two things differ from a naive reformat, both found
+        empirically in Phase 0 sandbox testing against the real BIND9
+        binary (see the migration plan):
+
+        1. SRV's stored field order is dnsmasq's own convention
+           ('<target> <port> <priority> <weight>'), but BIND's native
+           SRV text order is 'priority weight port target' -- this
+           REORDERS, not just reformats, or it would silently produce a
+           wrong-but-syntactically-valid record.
+        2. Every record gets an explicit owner name ('@' for the zone
+           apex) via _bind_owner() -- a blank/omitted owner in a BIND
+           zone file inherits the PREVIOUS record's owner, not the zone
+           apex (confirmed by two test records silently landing on the
+           wrong name when left blank), so this app never omits one for
+           brevity.
+
+        PTR records are skipped here entirely -- they don't belong in a
+        forward zone at all, see generate_bind_reverse_zone_files()."""
+        zone_name = zone['name']
+        soa = zone.get('soa') or {}
+        ns_hostnames = self.config.get('global', {}).get('ns_hostnames', [])
+        primary_ns = soa.get('ns') or (ns_hostnames[0] if ns_hostnames else f'ns1.{zone_name}')
+        contact = soa.get('contact', 'admin.alshowto.com')
+        if '@' in contact:
+            contact = contact.replace('@', '.', 1)
+        ttl = soa.get('ttl', 3600)
+
+        lines = [
+            f"$TTL {ttl}",
+            f"@\tIN\tSOA\t{_bind_absolute(primary_ns)} {_bind_absolute(contact)} (",
+            f"\t\t\t{soa.get('serial') or int(datetime.now().timestamp())}\t; serial",
+            f"\t\t\t{soa.get('refresh', 3600)}\t\t; refresh",
+            f"\t\t\t{soa.get('retry', 1800)}\t\t; retry",
+            f"\t\t\t{soa.get('expire', 604800)}\t\t; expire",
+            f"\t\t\t{ttl} )\t\t; minimum",
+            "",
+        ]
+        for ns in ns_hostnames:
+            lines.append(f"\tIN\tNS\t{_bind_absolute(ns)}")
+        lines.append("")
+
+        for record in zone.get('records', []):
+            domain = record['domain']
+            record_type = record['type']
+            value = record['value']
+            if record_type == 'PTR':
+                continue
+            owner = _bind_owner(domain, zone_name)
+
+            if record_type == 'CNAME':
+                parts = value.split()
+                if len(parts) == 1:
+                    lines.append(f"{owner}\tIN\tCNAME\t{_bind_absolute(parts[0])}")
+                elif len(parts) == 2 and parts[1].isdigit():
+                    lines.append(f"{owner}\t{parts[1]}\tIN\tCNAME\t{_bind_absolute(parts[0])}")
+                else:
+                    lines.append(f"; Skipped malformed CNAME record for {domain}: '{value}' (expected 'target' or 'target <ttl>')")
+            elif record_type == 'TXT':
+                lines.append(f'{owner}\tIN\tTXT\t"{value}"')
+            elif record_type == 'MX':
+                parts = value.split(None, 1)
+                if len(parts) == 2 and parts[0].isdigit():
+                    preference, hostname = parts
+                    lines.append(f"{owner}\tIN\tMX\t{preference} {_bind_absolute(hostname)}")
+                else:
+                    lines.append(f"; Skipped malformed MX record for {domain}: '{value}' (expected '<preference> <hostname>')")
+            elif record_type == 'SRV':
+                parts = value.split()
+                if len(parts) == 4 and all(p.isdigit() for p in parts[1:]):
+                    target, port, priority, weight = parts
+                    lines.append(f"{owner}\tIN\tSRV\t{priority} {weight} {port} {_bind_absolute(target)}")
+                else:
+                    lines.append(f"; Skipped malformed SRV record for {domain}: '{value}' (expected '<target> <port> <priority> <weight>')")
+            elif record_type == 'CAA':
+                parts = value.split(None, 2)
+                if len(parts) == 3 and parts[0].isdigit():
+                    flags, tag, caa_value = parts
+                    lines.append(f'{owner}\tIN\tCAA\t{flags} {tag} "{caa_value}"')
+                else:
+                    lines.append(f"; Skipped malformed CAA record for {domain}: '{value}' (expected '<flags> <tag> <value>')")
+            elif record_type in ('A', 'AAAA'):
+                lines.append(f"{owner}\tIN\t{record_type}\t{value}")
+            else:
+                lines.append(f"; Skipped unknown record type '{record_type}' for {domain}")
+
+        return "\n".join(lines) + "\n"
+
+    def generate_bind_reverse_zone_files(self):
+        """Bucket every PTR record across all zones into its correct
+        BIND reverse zone file, keyed by _BIND_REVERSE_ZONES (must match
+        ansible/bind9-setup.yml's `reverse_zones` var exactly). Returns
+        {reverse_zone_name: file_content}. Correctness beyond "loads
+        without error" doesn't matter here -- no reverse zone is
+        publicly delegated (the ISP owns real reverse authority for
+        these address blocks) -- so a shared default SOA is fine rather
+        than needing one per reverse zone in zones.json."""
+        ns_hostnames = self.config.get('global', {}).get('ns_hostnames', [])
+        primary_ns = ns_hostnames[0] if ns_hostnames else 'ns1.invalid'
+        buckets = {z: [] for z in _BIND_REVERSE_ZONES}
+
+        for zone in self.get_zones():
+            for record in zone.get('records', []):
+                if record['type'] != 'PTR':
+                    continue
+                domain = record['domain']
+                match = next((z for z in _BIND_REVERSE_ZONES
+                              if domain == z or domain.endswith('.' + z)), None)
+                if not match:
+                    continue
+                owner = _bind_owner(domain, match)
+                buckets[match].append(f"{owner}\tIN\tPTR\t{_bind_absolute(record['value'])}")
+
+        files = {}
+        for rzone, ptr_lines in buckets.items():
+            lines = [
+                "$TTL 3600",
+                f"@\tIN\tSOA\t{_bind_absolute(primary_ns)} admin.alshowto.com. (",
+                f"\t\t\t{int(datetime.now().timestamp())}\t; serial",
+                "\t\t\t3600\t\t; refresh",
+                "\t\t\t1800\t\t; retry",
+                "\t\t\t604800\t\t; expire",
+                "\t\t\t3600 )\t\t; minimum",
+                "",
+            ]
+            for ns in ns_hostnames:
+                lines.append(f"\tIN\tNS\t{_bind_absolute(ns)}")
+            lines.append("")
+            lines.extend(ptr_lines)
+            files[rzone] = "\n".join(lines) + "\n"
+        return files
+
     def deploy_to_servers(self):
-        """Deploy configuration to all enabled servers."""
+        """Deploy configuration to all enabled servers. Backend-aware
+        per server (servers[name].dns_backend, 'dnsmasq' default or
+        'bind9') -- the BIND9 migration cuts servers over one at a time
+        (see the migration plan's Phase 3), so there's a real window
+        where some servers are still on dnsmasq and others have already
+        moved, each needing a completely different push mechanism and
+        config format. Don't "simplify" this to a single backend without
+        first confirming every server has actually finished migrating
+        (check for any remaining dns_backend == 'dnsmasq' entries)."""
         servers = self.config.get('servers', {})
-        dnsmasq_config = self.generate_dnsmasq_config()
         results = {}
+
+        dnsmasq_needed = any(
+            s.get('enabled', True) and s.get('dns_backend', 'dnsmasq') == 'dnsmasq'
+            for s in servers.values()
+        )
+        dnsmasq_config = self.generate_dnsmasq_config() if dnsmasq_needed else None
+
+        bind_needed = any(
+            s.get('enabled', True) and s.get('dns_backend', 'dnsmasq') == 'bind9'
+            for s in servers.values()
+        )
+        bind_reverse_files = self.generate_bind_reverse_zone_files() if bind_needed else None
 
         for server_name, server_info in servers.items():
             if not server_info.get('enabled', True):
                 continue
 
-            success, message = self._ssh_update(
-                server_info['ip'],
-                dnsmasq_config
-            )
-            results[server_name] = {'success': success, 'message': message}
+            if server_info.get('dns_backend', 'dnsmasq') == 'bind9':
+                results[server_name] = self._deploy_bind_zones(server_name, server_info['ip'], bind_reverse_files)
+            else:
+                success, message = self._ssh_update(server_info['ip'], dnsmasq_config)
+                results[server_name] = {'success': success, 'message': message}
 
         return results
+
+    def _deploy_bind_zones(self, server_name, server_ip, reverse_files):
+        """Push every zone this server should have to it: forward zones
+        (all of them, except mgmt.alshowto.com if this server isn't the
+        designated signing primary -- it gets that one via BIND's own
+        AXFR instead, once NOTIFYed by the primary) plus every reverse
+        zone. Each zone is checked with named-checkzone before rndc
+        reload -- a bad record aborts just that zone's reload, not the
+        whole server's deploy."""
+        zone_results = {}
+        for zone in self.get_zones():
+            if zone['name'] == _BIND_MGMT_ZONE and server_name != _BIND_MGMT_SIGNING_PRIMARY:
+                continue
+            content = self.generate_bind_zone_file(zone)
+            zone_results[zone['name']] = self._deploy_bind_zone(server_ip, zone['name'], content)
+
+        for rzone_name, content in reverse_files.items():
+            zone_results[rzone_name] = self._deploy_bind_zone(server_ip, rzone_name, content)
+
+        failures = {z: r['message'] for z, r in zone_results.items() if not r['success']}
+        if failures:
+            return {'success': False, 'message': '; '.join(f"{z}: {msg}" for z, msg in failures.items())}
+        return {'success': True, 'message': f"{len(zone_results)} zone(s) updated and reloaded"}
+
+    def _deploy_bind_zone(self, server_ip, zone_name, content):
+        """Push one zone file to one server: SFTP the content,
+        named-checkzone remotely (abort without reloading if it fails --
+        a bad record must never take down a zone that was previously
+        loading fine), then rndc reload just that zone -- unlike
+        dnsmasq, BIND can reload a single zone's data without a full
+        restart (see the migration plan's Phase 0 finding on rndc
+        reconfig vs. reload vs. restart)."""
+        remote_path = f"{BIND_ZONE_DIR}/db.{zone_name}"
+        try:
+            self._write_remote_root_file(server_ip, content, remote_path, mode='644', owner='bind', group='bind')
+        except Exception as e:
+            return {'success': False, 'message': f"upload failed: {e}"}
+
+        ok, output = self._run_remote_root_command(server_ip, f"named-checkzone {zone_name} {remote_path}")
+        if not ok:
+            return {'success': False, 'message': f"named-checkzone failed, not reloaded: {output}"}
+
+        ok, output = self._run_remote_root_command(server_ip, f"rndc reload {zone_name}")
+        if not ok:
+            return {'success': False, 'message': f"rndc reload failed: {output}"}
+
+        return {'success': True, 'message': 'updated and reloaded'}
 
     def _ssh_update(self, server_ip, config_content):
         """Update dnsmasq config via SSH."""
@@ -1134,13 +1374,21 @@ class ZoneManager:
             return []
 
     def check_server_status(self, server_ip):
-        """Check if dnsmasq is running on server."""
+        """Check if this server's DNS service (dnsmasq or named,
+        whichever it's actually running -- see the BIND9 migration's
+        per-server dns_backend) is up."""
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
-            # Use pgrep instead of systemctl for Docker/non-systemd containers
-            stdin, stdout, stderr = ssh.exec_command("pgrep -x dnsmasq > /dev/null && echo active || echo inactive")
+            # Checks for either process rather than looking up this IP's
+            # dns_backend first -- simpler, and correct regardless of
+            # migration state (a node should only ever have one of the
+            # two actually running, given bind9-setup.yml masks named
+            # until that node's real Phase 3 cutover).
+            stdin, stdout, stderr = ssh.exec_command(
+                "(pgrep -x dnsmasq > /dev/null || pgrep -x named > /dev/null) && echo active || echo inactive"
+            )
             output = stdout.read().decode()
             ssh.close()
             return 'active' in output.lower()
@@ -1258,8 +1506,9 @@ class ZoneManager:
 
     _VLAN_NAME_RE = re.compile(r'^[a-z][a-z0-9_-]{0,30}$')
 
-    def _write_remote_root_file(self, server_ip, content, remote_path, mode='600'):
-        """Write a file to a root-owned path on a remote server.
+    def _write_remote_root_file(self, server_ip, content, remote_path, mode='600', owner='root', group='root'):
+        """Write a file to a root-owned (by default) path on a remote
+        server.
 
         Goes over SFTP to a temp path first, then a short, fixed-shape
         `sudo mv` — rather than embedding arbitrary content in a shell
@@ -1269,6 +1518,12 @@ class ZoneManager:
         containing shell metacharacters). VLAN netplan content can include
         admin-supplied static addresses, so it goes through SFTP instead,
         where quoting doesn't apply at all.
+
+        owner/group default to root:root but can be overridden -- BIND
+        zone files are written as bind:bind (matching the directory
+        ownership ansible/bind9-setup.yml already sets up), since BIND's
+        inline-signing writes its own companion .signed/.jnl files into
+        the same directory and expects to own what's there.
         """
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1280,7 +1535,7 @@ class ZoneManager:
                 f.write(content)
             sftp.close()
             cmd = (
-                f"sudo install -o root -g root -m {mode} {tmp_path} {remote_path} && "
+                f"sudo install -o {owner} -g {group} -m {mode} {tmp_path} {remote_path} && "
                 f"rm -f {tmp_path}"
             )
             stdin, stdout, stderr = ssh.exec_command(cmd)

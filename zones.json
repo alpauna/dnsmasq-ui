@@ -138,6 +138,71 @@
           "domain": "dns.ad.alshowto.com",
           "type": "AAAA",
           "value": "2605:4a80:b004:b120::230"
+        },
+        {
+          "domain": "c.7.1.4.7.2.e.f.f.f.6.e.6.a.e.5.0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "10g-sw01.ad.alshowto.com"
+        },
+        {
+          "domain": "7.a.7.c.f.8.e.f.f.f.7.9.f.a.6.5.0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "10g-sw02.ad.alshowto.com"
+        },
+        {
+          "domain": "231.0.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "dns01.ad.alshowto.com"
+        },
+        {
+          "domain": "232.0.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "dns02.ad.alshowto.com"
+        },
+        {
+          "domain": "233.0.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "dns03.ad.alshowto.com"
+        },
+        {
+          "domain": "70.0.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "mfc-printer.ad.alshowto.com"
+        },
+        {
+          "domain": "250.0.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "c.e.c.4.7.d.e.f.f.f.1.1.4.2.e.b.0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "middle-01.ad.alshowto.com"
+        },
+        {
+          "domain": "5.5.8.7.b.0.e.f.f.f.1.1.4.2.e.b.0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "dns01.ad.alshowto.com"
+        },
+        {
+          "domain": "d.4.9.4.6.4.e.f.f.f.1.1.4.2.e.b.0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "dns02.ad.alshowto.com"
+        },
+        {
+          "domain": "c.3.8.e.c.5.e.f.f.f.1.1.4.2.e.b.0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "dns03.ad.alshowto.com"
+        },
+        {
+          "domain": "230.0.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "dns.ad.alshowto.com"
+        },
+        {
+          "domain": "0.3.2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "dns.ad.alshowto.com"
         }
       ]
     },
@@ -151,13 +216,31 @@
           "type": "CNAME",
           "value": "middle-01.ad.alshowto.com"
         }
-      ]
+      ],
+      "soa": {
+        "ns": "dns01.ad.alshowto.com",
+        "contact": "admin.alshowto.com",
+        "serial": 2026031400,
+        "refresh": 3600,
+        "retry": 1800,
+        "expire": 604800,
+        "ttl": 3600
+      }
     },
     {
       "name": "internal.alshowto.com",
       "description": "Internal services",
       "type": "local",
-      "records": []
+      "records": [],
+      "soa": {
+        "ns": "dns01.ad.alshowto.com",
+        "contact": "admin.alshowto.com",
+        "serial": 2026031400,
+        "refresh": 3600,
+        "retry": 1800,
+        "expire": 604800,
+        "ttl": 3600
+      }
     },
     {
       "name": "mgmt.alshowto.com",
@@ -198,8 +281,87 @@
           "domain": "pve3.mgmt.alshowto.com",
           "type": "AAAA",
           "value": "2605:4a80:b009:c100::13"
+        },
+        {
+          "domain": "pve01.mgmt.alshowto.com",
+          "type": "A",
+          "value": "192.168.7.11"
+        },
+        {
+          "domain": "pve04.mgmt.alshowto.com",
+          "type": "A",
+          "value": "192.168.7.14"
+        },
+        {
+          "domain": "pve06.mgmt.alshowto.com",
+          "type": "A",
+          "value": "192.168.7.16"
+        },
+        {
+          "domain": "pve3.mgmt.alshowto.com",
+          "type": "A",
+          "value": "192.168.7.13"
+        },
+        {
+          "domain": "6.3.9.4.2.0.e.f.f.f.a.1.9.6.2.8.0.0.1.c.9.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "wifi.mgmt.alshowto.com"
+        },
+        {
+          "domain": "21.7.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "wifi.mgmt.alshowto.com"
+        },
+        {
+          "domain": "1.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.c.9.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "pve01.mgmt.alshowto.com"
+        },
+        {
+          "domain": "4.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.c.9.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "pve04.mgmt.alshowto.com"
+        },
+        {
+          "domain": "6.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.c.9.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "pve06.mgmt.alshowto.com"
+        },
+        {
+          "domain": "3.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.c.9.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa",
+          "type": "PTR",
+          "value": "pve3.mgmt.alshowto.com"
+        },
+        {
+          "domain": "11.7.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "pve01.mgmt.alshowto.com"
+        },
+        {
+          "domain": "14.7.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "pve04.mgmt.alshowto.com"
+        },
+        {
+          "domain": "16.7.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "pve06.mgmt.alshowto.com"
+        },
+        {
+          "domain": "13.7.168.192.in-addr.arpa",
+          "type": "PTR",
+          "value": "pve3.mgmt.alshowto.com"
         }
-      ]
+      ],
+      "soa": {
+        "ns": "dns01.ad.alshowto.com",
+        "contact": "admin.alshowto.com",
+        "serial": 2026031400,
+        "refresh": 3600,
+        "retry": 1800,
+        "expire": 604800,
+        "ttl": 3600
+      }
     }
   ],
   "servers": {
@@ -223,7 +385,8 @@
           "ipv6_mode": "slaac",
           "ipv6_address": null
         }
-      ]
+      ],
+      "dns_backend": "dnsmasq"
     },
     "dns02": {
       "ip": "192.168.0.232",
@@ -245,7 +408,8 @@
           "ipv6_mode": "slaac",
           "ipv6_address": null
         }
-      ]
+      ],
+      "dns_backend": "dnsmasq"
     },
     "dns03": {
       "ip": "192.168.0.233",
@@ -267,7 +431,8 @@
           "ipv6_mode": "slaac",
           "ipv6_address": null
         }
-      ]
+      ],
+      "dns_backend": "dnsmasq"
     }
   },
   "global": {
@@ -322,7 +487,13 @@
         "cidr": "2605:4a80:b009:c100::/64",
         "label": "mgmt subnet (VLAN 7)"
       }
-    }
+    },
+    "acme_hook_keys": [],
+    "ns_hostnames": [
+      "dns01.ad.alshowto.com",
+      "dns02.ad.alshowto.com",
+      "dns03.ad.alshowto.com"
+    ]
   },
   "dynamic_hosts": [
     {
@@ -332,7 +503,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:d7:4c:ec",
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657088",
+      "last_checked": "2026-08-13T09:17:43.105373",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fed7:4cec",
       "last_updated": null
     },
@@ -343,7 +514,7 @@
       "subnet": "lan",
       "mac_address": "5c:a6:e6:27:41:7c",
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657165",
+      "last_checked": "2026-08-13T09:17:43.105445",
       "last_value": "2605:4a80:b004:b120:5ea6:e6ff:fe27:417c",
       "last_updated": "2026-08-11T18:35:38.201059"
     },
@@ -354,7 +525,7 @@
       "subnet": "mgmt",
       "mac_address": "80:69:1a:02:49:36",
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657208",
+      "last_checked": "2026-08-13T09:17:43.105483",
       "last_value": "2605:4a80:b009:c100:8269:1aff:fe02:4936",
       "last_updated": null
     },
@@ -365,7 +536,7 @@
       "subnet": "lan",
       "mac_address": "54:af:97:8f:c7:a7",
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657259",
+      "last_checked": "2026-08-13T09:17:43.105517",
       "last_value": "2605:4a80:b004:b120:56af:97ff:fe8f:c7a7",
       "last_updated": "2026-08-11T22:59:39.700407"
     },
@@ -376,7 +547,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:0b:78:55",
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657304",
+      "last_checked": "2026-08-13T09:17:43.105549",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fe0b:7855",
       "last_updated": null
     },
@@ -387,7 +558,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:46:49:4d",
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657339",
+      "last_checked": "2026-08-13T09:17:43.105584",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fe46:494d",
       "last_updated": null
     },
@@ -398,7 +569,7 @@
       "subnet": "lan",
       "mac_address": "bc:24:11:5c:e8:3c",
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657368",
+      "last_checked": "2026-08-13T09:17:43.105615",
       "last_value": "2605:4a80:b004:b120:be24:11ff:fe5c:e83c",
       "last_updated": null
     },
@@ -409,7 +580,7 @@
       "subnet": "mgmt",
       "ipv6_host": "::11",
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657402",
+      "last_checked": "2026-08-13T09:17:43.105684",
       "last_value": "2605:4a80:b009:c100::11",
       "last_updated": null,
       "proxmox_update": {
@@ -430,7 +601,7 @@
         "iface": "vlan7"
       },
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:21.657443",
+      "last_checked": "2026-08-13T09:17:43.105723",
       "last_value": "2605:4a80:b009:c100::14",
       "last_updated": "2026-08-13T00:52:22.000509"
     },
@@ -447,7 +618,7 @@
         "iface": "vlan7"
       },
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:22.000611",
+      "last_checked": "2026-08-13T09:17:43.105780",
       "last_value": "2605:4a80:b009:c100::16",
       "last_updated": "2026-08-13T00:52:22.281487"
     },
@@ -464,7 +635,7 @@
         "iface": "vlan7"
       },
       "enabled": true,
-      "last_checked": "2026-08-13T00:52:22.281573",
+      "last_checked": "2026-08-13T09:17:43.105827",
       "last_value": "2605:4a80:b009:c100::13",
       "last_updated": "2026-08-13T00:52:22.560549"
     }
