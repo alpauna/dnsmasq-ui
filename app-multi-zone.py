@@ -4058,12 +4058,21 @@ def api_revoke_acme_hook_key(key_id):
     return jsonify({'success': True, 'message': 'Key revoked'})
 
 @app.route('/api/acme-challenge', methods=['POST'])
+@csrf.exempt
 def api_add_acme_challenge():
     """API: create an ACME DNS-01 challenge TXT record and deploy it
     immediately -- both acme.sh's custom dnsapi hook and certbot's
     manual-auth-hook call this, then ask the CA to validate right away, so
     this blocks until the change is actually live rather than returning
-    before deploy_to_servers() has finished."""
+    before deploy_to_servers() has finished.
+
+    CSRF-exempt: CSRF tokens protect session-cookie-authenticated requests
+    from being forged by another site in a victim's browser. This endpoint
+    is bearer-token authenticated by unattended scripts with no browser or
+    session involved -- a CSRF token would just be one more secret the
+    hook scripts would need and gain nothing, since forging a cross-site
+    request still can't produce a valid Authorization header it doesn't
+    have."""
     auth_error = _require_acme_token()
     if auth_error:
         return auth_error
@@ -4084,8 +4093,10 @@ def api_add_acme_challenge():
     return jsonify({'success': True, 'message': message, 'deploy': deploy_results})
 
 @app.route('/api/acme-challenge', methods=['DELETE'])
+@csrf.exempt
 def api_remove_acme_challenge():
-    """API: remove one ACME challenge TXT value (cleanup hook)."""
+    """API: remove one ACME challenge TXT value (cleanup hook). See
+    api_add_acme_challenge for why this is CSRF-exempt."""
     auth_error = _require_acme_token()
     if auth_error:
         return auth_error
