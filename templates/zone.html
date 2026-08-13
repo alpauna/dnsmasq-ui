@@ -399,6 +399,10 @@
                             <option value="PTR">PTR (Reverse DNS)</option>
                         </select>
                     </div>
+                    <div class="form-group" id="cname-ttl-group" style="display: none;">
+                        <label for="cname-ttl">TTL in seconds (optional)</label>
+                        <input type="number" id="cname-ttl" min="1" placeholder="default">
+                    </div>
                     <div class="form-group" id="ptr-helper-group" style="display: none;">
                         <label for="ptr-ip-helper">PTR Helper: IP Address</label>
                         <div style="display: flex; gap: 8px;">
@@ -545,6 +549,14 @@
 
             const ptrHelperGroup = document.getElementById('ptr-helper-group');
             ptrHelperGroup.style.display = (type === 'PTR') ? '' : 'none';
+
+            const cnameTtlGroup = document.getElementById('cname-ttl-group');
+            if (type === 'CNAME') {
+                cnameTtlGroup.style.display = '';
+            } else {
+                cnameTtlGroup.style.display = 'none';
+                document.getElementById('cname-ttl').value = '';
+            }
         }
 
         // Ported 1:1 from a Python implementation checked against
@@ -646,17 +658,39 @@
             }
         }
 
+        // CNAME's optional TTL is a separate labeled field in the UI --
+        // clearer for an optional field than expecting "target 300" typed
+        // into one text box the way MX/SRV/CAA's always-required extra
+        // fields work -- but on the wire it's still just the same single
+        // space-separated `value` string documented in the README.
+        function splitCnameValue(value) {
+            const parts = value.trim().split(/\s+/);
+            if (parts.length === 2 && /^\d+$/.test(parts[1])) {
+                return { target: parts[0], ttl: parts[1] };
+            }
+            return { target: value.trim(), ttl: '' };
+        }
+
+        function buildSubmitValue(type, rawValue) {
+            if (type === 'CNAME') {
+                const ttl = document.getElementById('cname-ttl').value.trim();
+                return ttl ? `${rawValue} ${ttl}` : rawValue;
+            }
+            return rawValue;
+        }
+
         function addRecord(event) {
             event.preventDefault();
 
             const domain = document.getElementById('domain').value.trim();
             const type = document.getElementById('record-type').value;
-            const value = document.getElementById('record-value').value.trim();
+            const rawValue = document.getElementById('record-value').value.trim();
 
-            if (!domain || !value) {
+            if (!domain || !rawValue) {
                 alert('Domain and value are required');
                 return;
             }
+            const value = buildSubmitValue(type, rawValue);
 
             fetch(`/api/zones/${zoneName}/records`, {
                 method: 'POST',
@@ -676,6 +710,7 @@
                     statusDiv.innerHTML = '<div class="alert alert-success">Record added successfully!</div>';
                     document.getElementById('domain').value = '';
                     document.getElementById('record-value').value = '';
+                    document.getElementById('cname-ttl').value = '';
                     setTimeout(() => location.reload(), 1000);
                 } else {
                     statusDiv.innerHTML = `<div class="alert alert-error">Error: ${data.message}</div>`;
@@ -713,8 +748,15 @@
             // Populate the form with existing record data for editing
             document.getElementById('domain').value = domain;
             document.getElementById('record-type').value = type;
-            document.getElementById('record-value').value = value;
-            onRecordTypeChange();
+            if (type === 'CNAME') {
+                const split = splitCnameValue(value);
+                document.getElementById('record-value').value = split.target;
+                onRecordTypeChange();
+                document.getElementById('cname-ttl').value = split.ttl;
+            } else {
+                document.getElementById('record-value').value = value;
+                onRecordTypeChange();
+            }
 
             // Scroll to form
             document.querySelector('.add-record-form').scrollIntoView({ behavior: 'smooth' });
@@ -731,8 +773,9 @@
             // Replace form submission
             form.onsubmit = function(event) {
                 event.preventDefault();
-                const newValue = document.getElementById('record-value').value.trim();
+                const rawValue = document.getElementById('record-value').value.trim();
                 const newType = document.getElementById('record-type').value;
+                const newValue = buildSubmitValue(newType, rawValue);
 
                 if (newValue === value && newType === type) {
                     alert('No changes made');

@@ -485,7 +485,8 @@ The main configuration file that defines zones, servers, and global settings:
   "global": {
     "upstream_dns": ["1.1.1.1", "8.8.8.8"],
     "keepalive_vip": "192.168.0.230",
-    "keepalive_interval": 300
+    "keepalive_interval": 300,
+    "local_ttl": 300
   }
 }
 ```
@@ -493,8 +494,21 @@ The main configuration file that defines zones, servers, and global settings:
 **Key Sections:**
 - **zones**: Array of DNS zones with records
 - **servers**: Dictionary of DNS servers to manage
-- **global**: Global settings (upstream DNS, VIP, health check interval)
+- **global**: Global settings (upstream DNS, VIP, health check interval,
+  `local_ttl`)
 - **dynamic_hosts**: Hosts with dynamically-assigned addresses to keep in sync (see below)
+
+**`global.local_ttl`** (optional, seconds): dnsmasq answers every
+locally-sourced record (`address=`, `txt-record=`, `mx-host=`,
+`srv-host=`, `caa-record=`, `ptr-record=`, and any `cname=` with no
+per-record TTL of its own) with TTL 0 by default — "don't cache, ask
+again every time." None of those directives except `cname=` support a
+per-record TTL (see the CNAME entry in [Supported Record
+Types](#supported-record-types)), so this is the only lever for any of
+the others: it emits a single `local-ttl=<seconds>` line covering all of
+them uniformly. Unset (or `0`) keeps today's behavior; there's no
+dedicated UI control for it, same as `upstream_dns`/`keepalive_vip` —
+edit `zones.json` directly.
 
 ### Dynamic DNS Tracking (dynamic_hosts)
 
@@ -1733,7 +1747,19 @@ curl http://localhost:5000/api/wireguard/status
 
 - **A**: IPv4 address
 - **AAAA**: IPv6 address
-- **CNAME**: Canonical name (alias)
+- **CNAME**: Canonical name (alias). Optionally takes a TTL in seconds —
+  the Add New Record form shows a **TTL in seconds (optional)** field
+  when CNAME is selected. On the wire this is still just the single
+  `value` string (`"target"` or `"target <ttl>"`, e.g.
+  `"target.ad.alshowto.com 300"`) since the schema is `{domain, type,
+  value}` — same encoding pattern as MX/SRV/CAA, except this extra field
+  is optional rather than required, so a plain single-token value (every
+  CNAME record before TTL support existed) keeps working unchanged. This
+  is also, for now, the *only* record type with per-record TTL control —
+  dnsmasq's other simple-override directives (`address=`, `txt-record=`,
+  `mx-host=`, `srv-host=`, `caa-record=`, `ptr-record=`) don't support a
+  TTL field at all; see `local_ttl` below for the one lever that affects
+  those.
 - **TXT**: Arbitrary text (SPF, DKIM, DMARC, domain verification, etc.) —
   also what the [ACME DNS-01](#acme-dns-01-challenges-acme_hook_keys--acme_dns_backend)
   feature writes under the `local` backend; both paths share the same
@@ -1799,10 +1825,11 @@ curl http://localhost:5000/api/wireguard/status
   TXT is selected and pre-fills the conventional domain name plus a
   content example for each, a **CAA Preset** dropdown (Let's Encrypt
   issue/issuewild, Disallow all CAs, Custom) appears when CAA is
-  selected and fills in the complete, correctly-formatted value, and a
+  selected and fills in the complete, correctly-formatted value, a
   **PTR Helper** appears when PTR is selected — enter a plain IP address
   and it computes the correct `in-addr.arpa`/`ip6.arpa` reverse-lookup
-  name into the Domain field
+  name into the Domain field, and a **TTL in seconds (optional)** field
+  appears when CNAME is selected
 - Edit and delete existing records
 - Inline record editing with save functionality
 - Deploy changes across all servers with one click
@@ -1935,6 +1962,10 @@ address=/example.ad.alshowto.com/2604:7a00:ea40::100
 # CNAME records
 cname=www.ad.alshowto.com,example.ad.alshowto.com
 
+# CNAME records with an explicit TTL (stored value "example.ad.alshowto.com 300"
+# splits into target + TTL here; omitting the TTL looks like the line above)
+cname=www2.ad.alshowto.com,example.ad.alshowto.com,300
+
 # TXT records
 txt-record=example.ad.alshowto.com,v=spf1 -all
 
@@ -1957,6 +1988,10 @@ caa-record=ad.alshowto.com,0,issue,letsencrypt.org
 # PTR records (reverse DNS -- domain is already the reverse-lookup name,
 # no splitting needed)
 ptr-record=100.0.168.192.in-addr.arpa,example.ad.alshowto.com
+
+# Local TTL (from global.local_ttl -- affects every record type above
+# except CNAME's own optional per-record TTL, which takes precedence)
+local-ttl=300
 
 # Upstream DNS
 server=1.1.1.1

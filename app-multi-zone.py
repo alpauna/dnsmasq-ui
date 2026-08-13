@@ -924,7 +924,21 @@ class ZoneManager:
                 value = record['value']
 
                 if record_type == 'CNAME':
-                    config += f"cname={domain},{value}\n"
+                    # value is 'target' or 'target <ttl>' -- unlike MX/SRV/
+                    # CAA's always-required extra fields, TTL here is
+                    # optional (dnsmasq's cname= supports a trailing TTL,
+                    # most of the other directives this app generates
+                    # don't support per-record TTL at all). A single-token
+                    # value is exactly what every CNAME record already
+                    # looked like before TTL support existed, so this is
+                    # fully backward compatible with no migration needed.
+                    parts = value.split()
+                    if len(parts) == 1:
+                        config += f"cname={domain},{parts[0]}\n"
+                    elif len(parts) == 2 and parts[1].isdigit():
+                        config += f"cname={domain},{parts[0]},{parts[1]}\n"
+                    else:
+                        config += f"# Skipped malformed CNAME record for {domain}: '{value}' (expected 'target' or 'target <ttl>')\n"
                 elif record_type == 'TXT':
                     config += f"txt-record={domain},{value}\n"
                 elif record_type == 'MX':
@@ -972,6 +986,16 @@ class ZoneManager:
                 else:
                     config += f"address=/{domain}/{value}\n"
             config += "\n"
+
+        # Local TTL -- dnsmasq answers config-sourced records (address=,
+        # txt-record=, mx-host=, srv-host=, caa-record=, ptr-record=, and
+        # any cname= with no per-record TTL of its own) with TTL 0 by
+        # default, meaning "don't cache, ask again every time". None of
+        # those directives except cname= support a per-record TTL, so
+        # this global setting is the only lever for any of the others.
+        local_ttl = self.config.get('global', {}).get('local_ttl')
+        if local_ttl:
+            config += f"# Local TTL\nlocal-ttl={local_ttl}\n\n"
 
         # Add upstream DNS
         upstream = self.config.get('global', {}).get('upstream_dns', ['1.1.1.1', '8.8.8.8'])
