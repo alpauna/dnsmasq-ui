@@ -12,6 +12,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import json
 import os
 import subprocess
+import socket
 from pathlib import Path
 from datetime import datetime, timedelta
 import paramiko
@@ -59,7 +60,6 @@ SSH_BIN = next((p for p in ('/usr/bin/ssh', '/bin/ssh', '/usr/local/bin/ssh') if
 DOCKER_BIN = next((p for p in ('/usr/bin/docker', '/usr/local/bin/docker') if os.path.exists(p)), 'docker')
 SUDO_BIN = next((p for p in ('/usr/bin/sudo', '/bin/sudo') if os.path.exists(p)), 'sudo')
 IP_BIN = next((p for p in ('/usr/sbin/ip', '/sbin/ip', '/usr/bin/ip') if os.path.exists(p)), 'ip')
-PING_BIN = next((p for p in ('/usr/bin/ping', '/bin/ping') if os.path.exists(p)), 'ping')
 # The service account isn't in the docker group (avoids that standing,
 # effectively-root-equivalent grant); reuses the passwordless sudo access
 # already relied on elsewhere in this app for remote commands. -n fails
@@ -1096,24 +1096,34 @@ class ZoneManager:
         return self._run_proxmox_ssh_command(node, f"systemctl stop {shlex.quote(unit)}.timer")
 
     def _validate_proxmox_reachability(self, node, address6, timeout=10):
-        """Confirm a Proxmox node is actually reachable at a
+        """Confirm a Proxmox node is actually reachable/usable at a
         newly-applied IPv6 address — run from wherever dnsmasq-ui itself
         is, NOT via SSH into the node, since the point is proving the
         network path TO it still works, which an SSH session already
-        established from inside a prior step can't demonstrate. Both
-        checks must pass: ping6 to the specific new address (proves that
-        address is live and routed, not just that the node is up), and a
-        fresh SSH connect to the node's stable mgmt IP (proves the box
-        itself is still fully up, not e.g. mid-reboot from a botched
-        network reload)."""
+        established from inside a prior step can't demonstrate.
+
+        Originally used ping6 here, which turned out to be the wrong
+        signal on this network: confirmed live against both pve04 and
+        pve06 that ICMPv6 echo gets dropped by conntrack (ctstate
+        INVALID) for freshly-applied addresses specifically, even
+        though the address is fully working for real traffic the
+        whole time — proven directly when the user successfully loaded
+        the Proxmox web UI at the exact address ping6 called
+        unreachable, and confirmed independently with a plain TCP
+        connect to the same address/port succeeding on the first try.
+        So this checks the thing that actually matters instead: a TCP
+        connect to the Proxmox API/UI port (8006) on the new address
+        itself — a real functional test of "is this address usable",
+        immune to whatever is eating ICMP echo here. A fresh SSH
+        connect to the node's stable mgmt IP is still checked too
+        (proves the box itself is fully up, not e.g. mid-reboot from a
+        botched network reload) — just no longer via ping.
+        """
         try:
-            ping = subprocess.run(
-                [PING_BIN, '-6', '-c', '3', '-W', str(timeout), address6],
-                capture_output=True, timeout=timeout + 5)
+            with socket.create_connection((address6, 8006), timeout=timeout):
+                pass
         except Exception as e:
-            return False, f"ping6 to {address6} failed to run: {e}"
-        if ping.returncode != 0:
-            return False, f"ping6 to {address6} got no response"
+            return False, f"TCP connect to [{address6}]:8006 (Proxmox UI/API) failed: {e}"
 
         host = PROXMOX_NODE_IPS.get(node)
         try:
@@ -1124,7 +1134,7 @@ class ZoneManager:
         except Exception as e:
             return False, f"SSH connect to {node} ({host}) failed after applying: {e}"
 
-        return True, f"{address6} reachable, SSH to {node} OK"
+        return True, f"[{address6}]:8006 reachable, SSH to {node} OK"
 
     def update_proxmox_interface_v6(self, node, iface, address6, apply=True):
         """Push a new static IPv6 address onto a Proxmox VE node's own
