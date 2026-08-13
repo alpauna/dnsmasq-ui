@@ -664,6 +664,7 @@ _BIND_REVERSE_ZONES = [
     '0.168.192.in-addr.arpa',
     '1.168.192.in-addr.arpa',
     '7.168.192.in-addr.arpa',
+    '8.168.192.in-addr.arpa',  # 192.168.8.0/24, the iot VLAN
     '0.2.1.b.4.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa',
     '0.0.1.c.9.0.0.b.0.8.a.4.5.0.6.2.ip6.arpa',
 ]
@@ -697,6 +698,15 @@ class ZoneManager:
         self._vault_key = None  # in-memory only; never persisted to disk
         self._vault_lock_notified = False  # avoid re-emailing every poll cycle for the same lock
         self._v6_vip_drift_notified = False  # avoid re-emailing every poll cycle for the same drift
+        # In-memory high-water mark for mgmt.alshowto.com's raw serial --
+        # see generate_bind_zone_file. A live SOA query alone races when
+        # deploys happen back-to-back (e.g. acme.sh adding two challenge
+        # TXT values a few seconds apart): the second deploy's query can
+        # observe stale state from before the first deploy's freeze/thaw
+        # has settled, so it doesn't know to bump past the first deploy's
+        # own new serial. This process's own last-generated value doesn't
+        # have that timing dependency.
+        self._mgmt_last_serial = None
 
     def _load_config(self):
         """Load zones and servers configuration."""
@@ -1066,6 +1076,23 @@ class ZoneManager:
 
         return config
 
+    def _get_live_zone_serial(self, zone_name):
+        """Query dns01 (the mgmt.alshowto.com signing primary) directly
+        for a zone's currently-loaded SOA serial. Best-effort: returns
+        None on any failure (dig missing, network issue, zone not
+        loaded yet on a fresh provision) so callers fall back to their
+        own serial scheme rather than blocking a deploy on this."""
+        try:
+            primary_ip = self.config['servers'][_BIND_MGMT_SIGNING_PRIMARY]['ip']
+            result = subprocess.run(
+                ['dig', '+short', '+time=3', '+tries=1', 'SOA', zone_name, f'@{primary_ip}'],
+                capture_output=True, text=True, timeout=5
+            )
+            fields = result.stdout.split()
+            return int(fields[2]) if len(fields) >= 3 else None
+        except Exception:
+            return None
+
     def generate_bind_zone_file(self, zone):
         """Generate a BIND zone file for one forward zone. Reuses the
         exact same MX/SRV/CAA/CNAME value-splitting logic as
@@ -1106,15 +1133,36 @@ class ZoneManager:
         # ~2.03 billion) is already larger than any real Unix timestamp
         # will be until year 2033, so a real timestamp (~1.8 billion in
         # 2026) reads as "backward" under RFC 1982 comparison and gets
-        # rejected forever. Confirmed live via named's journal
-        # ("ixfr-from-differences: new serial ... out of range") for
-        # both attempts. Fix: keep the SAME YYYYMMDDnn family the
+        # rejected forever. Fix: keep the SAME YYYYMMDDnn family the
         # placeholder used, with a same-day 15-minute-resolution counter
         # (00-95) so it both stays ahead of that baseline and keeps
         # increasing across repeated same-day deploys.
+        #
+        # That alone still isn't sufficient, though (confirmed live,
+        # 2026-08-13): serial-update-method unixtime governs the
+        # *signed* side, but silently falls back to plain incrementing
+        # whenever the raw serial doesn't look like a real timestamp --
+        # which is every deploy here, by design, per the note above.
+        # That means the signed side's serial can advance on its own
+        # from automatic re-signing/key-rollover activity alone, with
+        # no deploy involved -- a fixed formula computed from wall-clock
+        # time alone can silently fall behind and get rejected
+        # ("ixfr-from-differences: new serial ... out of range",
+        # logged but NOT surfaced as an rndc error -- `rndc thaw`
+        # reports success while the load fails asynchronously, so this
+        # was invisible to deploy_to_servers()'s caller. First caught it
+        # breaking ACME challenge propagation for mgmt.alshowto.com).
+        # Only asking BIND what it currently has can reliably stay
+        # ahead of that, so this queries the live serial and takes
+        # whichever of the two is larger.
         if zone_name == _BIND_MGMT_ZONE:
             now = datetime.now()
             serial = int(now.strftime('%Y%m%d')) * 100 + (now.hour * 4 + now.minute // 15)
+            live_serial = self._get_live_zone_serial(zone_name)
+            floor = max(live_serial or 0, self._mgmt_last_serial or 0)
+            if floor >= serial:
+                serial = floor + 1
+            self._mgmt_last_serial = serial
         else:
             serial = soa.get('serial') or int(datetime.now().timestamp())
 
@@ -1272,7 +1320,15 @@ class ZoneManager:
             if zone['name'] == _BIND_MGMT_ZONE and server_name != _BIND_MGMT_SIGNING_PRIMARY:
                 continue
             content = self.generate_bind_zone_file(zone)
-            zone_results[zone['name']] = self._deploy_bind_zone(server_ip, zone['name'], content)
+            if zone['name'] == _BIND_MGMT_ZONE:
+                # Only reached on the signing primary (see the skip
+                # above) -- see _deploy_bind_zone's docstring for why
+                # this zone specifically needs a view qualifier and
+                # freeze/thaw instead of a plain reload.
+                zone_results[zone['name']] = self._deploy_bind_zone(
+                    server_ip, zone['name'], content, view='public', dynamic=True)
+            else:
+                zone_results[zone['name']] = self._deploy_bind_zone(server_ip, zone['name'], content)
 
         for rzone_name, content in reverse_files.items():
             zone_results[rzone_name] = self._deploy_bind_zone(server_ip, rzone_name, content)
@@ -1282,14 +1338,28 @@ class ZoneManager:
             return {'success': False, 'message': '; '.join(f"{z}: {msg}" for z, msg in failures.items())}
         return {'success': True, 'message': f"{len(zone_results)} zone(s) updated and reloaded"}
 
-    def _deploy_bind_zone(self, server_ip, zone_name, content):
+    def _deploy_bind_zone(self, server_ip, zone_name, content, view=None, dynamic=False):
         """Push one zone file to one server: SFTP the content,
         named-checkzone remotely (abort without reloading if it fails --
         a bad record must never take down a zone that was previously
         loading fine), then rndc reload just that zone -- unlike
         dnsmasq, BIND can reload a single zone's data without a full
         restart (see the migration plan's Phase 0 finding on rndc
-        reconfig vs. reload vs. restart)."""
+        reconfig vs. reload vs. restart).
+
+        view/dynamic exist for mgmt.alshowto.com on the signing primary
+        only (see the caller): that zone lives in two named views there
+        ("public", the real definition, and "internal", an in-view
+        reference -- see the split-horizon comment in named.conf.local),
+        so a bare `rndc reload <zone>` is ambiguous and fails outright.
+        It's also a "dynamic" zone (has update-policy, for RFC2136 ACME
+        renewals) -- BIND refuses a plain reload there too, since it
+        could silently discard legitimate updates that only exist in the
+        zone's journal. Confirmed live (2026-08-13): a wildcard-record
+        deploy to this zone silently failed this exact way until this
+        was added -- the file uploaded fine, checkzone passed, only the
+        reload step errored, so it's easy to miss in a quick glance at
+        deploy_to_servers()'s success/failure summary."""
         remote_path = f"{BIND_ZONE_DIR}/db.{zone_name}"
         try:
             self._write_remote_root_file(server_ip, content, remote_path, mode='644', owner='bind', group='bind')
@@ -1300,9 +1370,18 @@ class ZoneManager:
         if not ok:
             return {'success': False, 'message': f"named-checkzone failed, not reloaded: {output}"}
 
-        ok, output = self._run_remote_root_command(server_ip, f"rndc reload {zone_name}")
-        if not ok:
-            return {'success': False, 'message': f"rndc reload failed: {output}"}
+        view_suffix = f" in {view}" if view else ""
+        if dynamic:
+            ok, output = self._run_remote_root_command(server_ip, f"rndc freeze {zone_name}{view_suffix}")
+            if not ok:
+                return {'success': False, 'message': f"rndc freeze failed: {output}"}
+            ok, output = self._run_remote_root_command(server_ip, f"rndc thaw {zone_name}{view_suffix}")
+            if not ok:
+                return {'success': False, 'message': f"rndc thaw failed: {output}"}
+        else:
+            ok, output = self._run_remote_root_command(server_ip, f"rndc reload {zone_name}{view_suffix}")
+            if not ok:
+                return {'success': False, 'message': f"rndc reload failed: {output}"}
 
         return {'success': True, 'message': 'updated and reloaded'}
 

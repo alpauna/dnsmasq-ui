@@ -25,6 +25,86 @@ dnssec-policy "mgmt-policy" {
 	signatures-validity 14d;
 };
 
+{% if mgmt_public_ip %}
+// Split-horizon views, added 2026-08-13 after discovering that a
+// source-IP allow-query ACL cannot scope Pangolin's public-facing DNS
+// resource: Pangolin's site/newt relay agent runs INSIDE the mgmt VLAN
+// and makes the final hop to BIND from its own LAN address (confirmed
+// live via tcpdump: a query relayed from the real internet arrived at
+// BIND from 192.168.7.110, indistinguishable by source IP from genuine
+// LAN traffic). Splitting by DESTINATION address instead:
+// {{ mgmt_public_ip }} is a second, dedicated address on this node
+// (see mgmt_public_ips in bind9-setup.yml, and the corresponding
+// netplan addition on eth0.7 -- NOT managed by this playbook, see that
+// file's own history) used only as Pangolin's target for the
+// mgmt.alshowto.com raw TCP/UDP:53 resource -- only mgmt.alshowto.com
+// is servable there, and only non-recursively (authoritative-only, so
+// this can never become an open resolver for internet clients). Every
+// other address (including this node's normal mgmt-VLAN address) falls
+// through to the "internal" view below, unchanged from before views
+// existed.
+view "public" {
+	match-destinations { {{ mgmt_public_ip }}; };
+	allow-recursion { none; };
+	allow-query { any; };
+
+	zone "{{ mgmt_zone }}" {
+{% if is_mgmt_signing_primary %}
+		type primary;
+		file "{{ bind_zone_dir }}/db.{{ mgmt_zone }}";
+		dnssec-policy "mgmt-policy";
+		inline-signing yes;
+		serial-update-method unixtime;
+		allow-transfer { {{ mgmt_secondary_ips | join('; ') }}; };
+		also-notify { {{ mgmt_secondary_ips | join('; ') }}; };
+{% else %}
+		type secondary;
+		file "{{ bind_zone_dir }}/db.{{ mgmt_zone }}";
+		primaries { {{ mgmt_primary_ip }}; };
+{% endif %}
+	};
+};
+
+view "internal" {
+	match-destinations { any; };
+	allow-query { {{ allowed_query_networks | join('; ') }}; };
+
+{% for zone in forward_zones %}
+{% if zone != mgmt_zone %}
+	zone "{{ zone }}" {
+		type primary;
+		file "{{ bind_zone_dir }}/db.{{ zone }}";
+	};
+
+{% endif %}
+{% endfor %}
+	// Same zone data as the "public" view's real definition above --
+	// in-view shares it without a second independent AXFR-managed
+	// copy. LAN clients querying this node's normal address still get
+	// mgmt.alshowto.com, governed by THIS view's own allow-query (LAN
+	// only), not the public view's.
+	zone "{{ mgmt_zone }}" {
+		in-view public;
+	};
+
+{% for rzone in reverse_zones %}
+	zone "{{ rzone }}" {
+		type primary;
+		file "{{ bind_zone_dir }}/db.{{ rzone }}";
+	};
+
+{% endfor %}
+	// Moved in from named.conf's top-level include -- BIND requires
+	// every zone (root hints included) to live inside a view once any
+	// view is defined. See the "Remove root-hints from the top-level
+	// include" task in bind9-setup.yml, which removes the now-
+	// conflicting top-level include for hosts that reach this branch.
+	zone "." {
+		type hint;
+		file "/usr/share/dns/root.hints";
+	};
+};
+{% else %}
 {% for zone in forward_zones %}
 zone "{{ zone }}" {
 {% if zone == mgmt_zone and is_mgmt_signing_primary %}
@@ -53,3 +133,4 @@ zone "{{ rzone }}" {
 };
 
 {% endfor %}
+{% endif %}

@@ -24,5 +24,15 @@ options {
 	listen-on { any; };
 	listen-on-v6 { any; };
 	allow-recursion { {{ allowed_query_networks | join('; ') }}; };
-	allow-query { any; };
+	// LAN-only by default -- mgmt.alshowto.com is the one zone meant to
+	// be publicly reachable (NS-delegated via Pangolin's raw TCP/UDP:53
+	// passthrough, which can't filter by hostname/zone, only by port),
+	// so it gets an explicit allow-query{any} override in its own zone
+	// stanza in named.conf.local.j2. Without this default, that same
+	// public reachability would expose every zone this process serves
+	// -- ad/cld/internal.alshowto.com and all 5 reverse zones -- not
+	// just the one meant to be public. Confirmed live (2026-08-13):
+	// internal.alshowto.com answered queries through the public Pangolin
+	// path before this was scoped down.
+	allow-query { {{ allowed_query_networks | join('; ') }}; };
 };

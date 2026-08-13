@@ -357,6 +357,16 @@ revisiting as a ULA (`fd00::/8`) if that ever becomes a real problem — a
 ULA would be immune to WAN prefix changes since it's never routed off the
 LAN anyway.
 
+The same tradeoff applies to anything *else* that references this DNS
+cluster from within the LAN — notably a router's RA/DHCPv6 DNS-server
+setting. See [Incident: opnsense reverse-DNS falling through to the ISP
+instead of resolving
+locally](#incident-opnsense-reverse-dns-falling-through-to-the-isp-instead-of-resolving-locally-aug-2026)
+for a real case of this: point that kind of on-link config at the
+cluster's link-local addresses (shown per-server in the dashboard, see
+[Dashboard](#dashboard)), not global/SLAAC ones — link-local is immune
+to prefix renumbering in a way no global address can be, VIP included.
+
 A single keepalived `vrrp_instance` can't carry both an IPv4 and IPv6
 `virtual_ipaddress` — VRRPv2 (IPv4 adverts) and VRRPv3 (IPv6 adverts) are
 different wire protocols. IPv6 gets its own instance with its own
@@ -1859,6 +1869,14 @@ callable directly (e.g. via a one-off script against a live instance).
   - Shows MASTER (green), STANDBY (orange), or INACTIVE (gray) for each server
   - Displays keepalived VIP address and active master server
   - Auto-refreshes every 30 seconds
+- **Per-server address list**: every real address across every interface
+  (not just the "main" IP), labeled with its interface and tagged `(VIP)`
+  or `(link-local)` where applicable — link-local addresses are shown
+  specifically because they're the right thing to point a router's own
+  RA/DHCPv6 DNS-server config at (immune to SLAAC/prefix renumbering, see
+  [Incident: opnsense reverse-DNS falling through to the ISP instead of
+  resolving
+  locally](#incident-opnsense-reverse-dns-falling-through-to-the-isp-instead-of-resolving-locally-aug-2026))
 - Zone overview with record counts
 - Quick health check overview
 - Navigate to zone management and configuration
@@ -2594,6 +2612,46 @@ directly observed usability (the address worked in a browser the whole
 time), trust the observed usability and treat the check itself as
 suspect — `ping6`'s reachability semantics on a firewalled network are
 not the same as "can a client actually talk to this service."
+
+### Incident: opnsense reverse-DNS falling through to the ISP instead of resolving locally (Aug 2026)
+
+A wireless client on opnsense's mgmt VLAN found that `dig -x <ipv6>`
+without an explicit `@server` fell through to the ISP's resolver (Midco)
+instead of answering locally, even though `dig -x @<dns-server> <ipv6>`
+worked fine. Root cause: opnsense's Router Advertisement **Recursive DNS
+Server (RDNSS)** setting for that interface had a stale, hardcoded IPv6
+address left over from an earlier ad-hoc setup — it didn't match any
+currently-tracked host, so clients using it got nothing useful and fell
+back to the ISP. First fix was just clearing the hardcoded entry back to
+opnsense's own default RDNSS behavior ("use this interface's own address
+with an enabled DNS service, or the configured global DNS servers"),
+which resolved the immediate symptom.
+
+**That default is itself fragile, though — same root problem as the [IPv6
+VIP](#ipv6-vip)'s ULA-vs-SLAAC tradeoff.** Whatever address ends up in
+RDNSS (an interface's own SLAAC-derived global address, or a manually
+re-hardcoded one) lives inside the LAN's ISP-delegated `/64`. If that
+prefix is ever renumbered, the address goes stale under RDNSS the exact
+same way it would under a hardcoded config, quietly breaking DNS for
+every client that cached it via RA. **The actual durable fix**:
+point RDNSS (and/or DHCPv6 DNS servers) at the DNS cluster's
+**link-local** (`fe80::/10`) addresses instead of any global one.
+Link-local addresses are never delegated and never renumbered — they're
+derived once from the interface's own MAC (or statically assigned) and
+stay valid regardless of what the ISP does upstream, which is exactly
+the property a router's own on-link DNS reference needs. Confirmed
+working end-to-end after switching. The dashboard surfaces every
+server's link-local addresses for exactly this purpose (see
+[Dashboard](#dashboard)) — they weren't discoverable anywhere before
+except by SSHing in and running `ip addr`.
+
+Lesson: for anything that references this DNS cluster from *within* the
+same L2 segment (a router's RDNSS/DHCPv6 config being the main case,
+but the same logic applies to any other on-link static reference),
+prefer the cluster's link-local addresses over global/SLAAC ones. Global
+addresses are still the right choice for anything that needs to be
+reachable from *off*-link (other VLANs, the internet), where link-local
+scope doesn't apply.
 
 ### keepalive check failing
 
