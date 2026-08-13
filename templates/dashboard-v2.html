@@ -1022,7 +1022,8 @@
                             addrRow.style.display = 'block';
                             addrValue.innerHTML = status.addresses.map(a => {
                                 const vipTag = a.is_vip ? ' <span style="color: #4caf50;">(VIP)</span>' : '';
-                                return `<span>${a.address} <span style="color: #999;">[${a.interface}]</span>${vipTag}</span>`;
+                                const llTag = a.is_link_local ? ' <span style="color: #64b5f6;" title="Link-local -- stable across SLAAC/prefix renumbering">(link-local)</span>' : '';
+                                return `<span>${a.address} <span style="color: #999;">[${a.interface}]</span>${vipTag}${llTag}</span>`;
                             }).join('');
                         }
                     }

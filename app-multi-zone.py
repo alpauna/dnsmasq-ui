@@ -1350,20 +1350,28 @@ class ZoneManager:
         return None
 
     def get_server_addresses(self, server_ip):
-        """Every real, currently-assigned global-scope address across all
-        of a server's interfaces -- not just its "main" IP/hostname AAAA,
-        since a server can now have presence on more than one subnet (see
-        poll_subnets()). Ground truth from the server itself rather than
-        derived from config, so it naturally reflects new interfaces
-        (VLAN presence, etc.) without needing code changes each time one
-        is added. Docker's own bridge network is excluded -- internal
-        plumbing, not a real network presence worth showing. Returns a
-        list of {interface, address, version, is_vip} dicts, or []."""
+        """Every real, currently-assigned global- and link-scope address
+        across all of a server's interfaces -- not just its "main"
+        IP/hostname AAAA, since a server can now have presence on more
+        than one subnet (see poll_subnets()). Link-local (fe80::/10)
+        addresses are included alongside global ones: they're immune to
+        SLAAC/prefix-delegation renumbering (fe80::/10 is never
+        delegated), which makes them a genuinely more stable thing for
+        e.g. opnsense to point a DNS-server reference at than a global
+        SLAAC address -- but they weren't visible anywhere before, only
+        discoverable by SSHing in and running `ip addr`. Ground truth
+        from the server itself rather than derived from config, so it
+        naturally reflects new interfaces (VLAN presence, etc.) without
+        needing code changes each time one is added. Docker's own bridge
+        network and loopback are excluded -- internal plumbing, not a
+        real network presence worth showing. Returns a list of
+        {interface, address, version, is_vip, is_link_local} dicts, or
+        []."""
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(server_ip, username=SSH_USER, key_filename=SSH_KEY, timeout=5)
-            stdin, stdout, stderr = ssh.exec_command('ip -o addr show scope global')
+            stdin, stdout, stderr = ssh.exec_command('ip -o addr show')
             output = stdout.read().decode()
             ssh.close()
 
@@ -1373,21 +1381,32 @@ class ZoneManager:
                 if len(parts) < 4:
                     continue
                 iface = parts[1]
-                if iface == 'docker0' or iface.startswith(('veth', 'br-')):
+                if iface in ('lo',) or iface == 'docker0' or iface.startswith(('veth', 'br-')):
                     continue
                 family = parts[2]
                 if family not in ('inet', 'inet6'):
                     continue
-                # v4 VIPs show an explicit 'secondary' flag; v6 VIPs don't
-                # carry SLAAC's 'dynamic' flag (same signal used elsewhere
-                # in this file to tell a keepalived-assigned address apart
-                # from the interface's real one).
-                is_vip = 'secondary' in line if family == 'inet' else 'dynamic' not in line
+                is_link_local = 'scope link' in line
+                if not is_link_local and 'scope global' not in line:
+                    continue
+                if is_link_local:
+                    # keepalived's VIP addresses skip DAD ('nodad') since
+                    # they're already known-unique; the kernel's own
+                    # auto-generated link-local (proto kernel_ll) doesn't.
+                    is_vip = 'nodad' in line
+                else:
+                    # v4 VIPs show an explicit 'secondary' flag; v6 VIPs
+                    # don't carry SLAAC's 'dynamic' flag (same signal
+                    # used elsewhere in this file to tell a
+                    # keepalived-assigned address apart from the
+                    # interface's real one).
+                    is_vip = 'secondary' in line if family == 'inet' else 'dynamic' not in line
                 addresses.append({
                     'interface': iface,
                     'address': parts[3].split('/')[0],
                     'version': 6 if family == 'inet6' else 4,
-                    'is_vip': is_vip
+                    'is_vip': is_vip,
+                    'is_link_local': is_link_local,
                 })
             return addresses
         except Exception as e:
