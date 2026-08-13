@@ -1,0 +1,36 @@
+# Phase 0 sandbox for the BIND9 migration -- two nodes only (primary +
+# secondary), enough to validate the AXFR/dnssec-policy relationship the
+# real mgmt.alshowto.com topology needs. Not a 3-node HA mirror like
+# dns-cluster.yml -- that's Phase 3's concern against the real servers.
+
+networks:
+  bind-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.23.0.0/24
+
+services:
+  bind-primary:
+    build: ./bind-node
+    container_name: bind-primary
+    hostname: bind-primary
+    networks:
+      bind-net:
+        ipv4_address: 172.23.0.11
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "2211:22"
+
+  bind-secondary:
+    build: ./bind-node
+    container_name: bind-secondary
+    hostname: bind-secondary
+    networks:
+      bind-net:
+        ipv4_address: 172.23.0.12
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "2212:22"
