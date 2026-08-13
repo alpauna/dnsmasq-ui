@@ -362,6 +362,34 @@ def _send_email_code(to_addr, code):
         f"Your dnsmasq-ui login code is: {code}\n\nThis code expires in 10 minutes."
     )
 
+# Serializes every request against a single global lock — confirmed the
+# hard way that Flask's dev server (app.run() at the bottom of this
+# file, no threaded=True passed) does NOT actually process requests
+# one-at-a-time despite that being the documented default: captured a
+# separate client's full request/response cycle completing while a
+# slow POST (a Group Update Plan's run_update_group(), which does
+# multiple sequential SSH round-trips) was still mid-flight. That
+# concurrency, combined with _reload_config_from_disk below replacing
+# `manager.config`'s object reference on every request, meant a
+# concurrent request's reload could silently orphan a long-running
+# request's in-progress mutations — confirmed live: a Group Update
+# Plan's lock, set and "saved" after a member failed, was gone by the
+# next request because a concurrent reload swapped the config object
+# out from under it before the save actually happened against the
+# right object. Acquired here, first, and released in teardown_request
+# so it covers the full request lifecycle including _reload_config_
+# from_disk and every route handler, not just the reload itself.
+_request_lock = threading.Lock()
+
+@app.before_request
+def _serialize_requests():
+    _request_lock.acquire()
+
+@app.teardown_request
+def _release_serialize_lock(exception=None):
+    if _request_lock.locked():
+        _request_lock.release()
+
 @app.before_request
 def _require_login():
     if request.path in _PUBLIC_PATHS or request.path.startswith('/static/'):
