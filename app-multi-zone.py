@@ -1177,11 +1177,113 @@ class ZoneManager:
             return False, f"pvesh apply failed for {node}/{iface} (still pending, not reverted): {output}"
         return True, f"{node}/{iface} updated to {new_addr} and applied"
 
+    def provision_proxmox_interface_v6(self, node, iface, address6, gateway6, apply=True):
+        """One-time setup of static IPv6 on a Proxmox VE VLAN interface
+        that currently has NONE at all (no netmask6 in its config) —
+        e.g. a node whose vlan7 only ever got IPv4 configured. Separate
+        from update_proxmox_interface_v6 (which requires an existing
+        IPv6 config to safely diff against) because there's nothing to
+        diff against or revert to here: on failure, "revert" means
+        removing the IPv6 config entirely (back to IPv4-only), not
+        restoring some prior IPv6 that never existed. Refuses outright
+        if the interface already has netmask6 — that's
+        update_proxmox_interface_v6's job, not this one's.
+
+        address6 is always applied at /64, matching every other
+        mgmt-VLAN presence in this project. gateway6 must be supplied
+        explicitly — there's no prior value to preserve here;
+        commit_proxmox_interface_v6 derives it as the /64 network's own
+        address, matching the pattern already established by pve01's
+        real, manually-configured interface.
+
+        Returns (success, message). apply=False stops after staging +
+        verifying, same meaning as update_proxmox_interface_v6.
+        """
+        try:
+            current = self.get_proxmox_interface(node, iface)
+        except Exception as e:
+            return False, f"Failed to read current config for {node}/{iface}: {e}"
+
+        if current.get('type') != 'vlan':
+            return False, (f"{node}/{iface} is type={current.get('type')!r}, not 'vlan' — "
+                            "refusing (field mapping only validated for vlan interfaces)")
+
+        if 'netmask6' in current:
+            return False, (f"{node}/{iface} already has IPv6 configured (netmask6={current['netmask6']}) "
+                            "— use the normal update path, not provisioning")
+
+        try:
+            new_addr = ipaddress.IPv6Address(address6)
+            new_gw = ipaddress.IPv6Address(gateway6)
+        except ValueError as e:
+            return False, f"Invalid IPv6 address: {e}"
+
+        new_cidr6 = f"{new_addr}/64"
+        fields = {k: current[k] for k in self._PVESH_VLAN_FIELDS if current.get(k) is not None}
+        fields['cidr6'] = new_cidr6
+        fields['gateway6'] = str(new_gw)
+
+        ok, output = self._run_proxmox_ssh_command(node, self._build_pvesh_set_cmd(node, iface, fields))
+        if not ok:
+            return False, f"pvesh set failed for {node}/{iface}: {output}"
+
+        try:
+            pending = self.get_proxmox_interface(node, iface)
+        except Exception as e:
+            self._run_proxmox_ssh_command(node, f"pvesh delete /nodes/{node}/network")
+            return False, f"Failed to verify pending change for {node}/{iface}, reverted: {e}"
+
+        # Baseline from `current` (every field Proxmox actually returns,
+        # e.g. address/netmask/type), not `fields` (only the write
+        # whitelist) -- confirmed the hard way: starting from `fields`
+        # meant `expected` was missing address/netmask/type entirely,
+        # so the diff check saw pending's real values as "unexpected"
+        # and reverted a perfectly correct provision.
+        expected = dict(current)
+        expected['cidr6'] = new_cidr6
+        expected['gateway6'] = str(new_gw)
+        expected['address6'] = str(new_addr)
+        # netmask6 is ignored here specifically because provisioning
+        # starts with none at all in `current`/`fields` — Proxmox
+        # derives it from cidr6 once applied, so pending will have it
+        # even though expected never did; that's correct, not a
+        # mismatch (unlike update_proxmox_interface_v6, where an
+        # existing netmask6 is preserved and directly comparable).
+        ignore = ('active', 'exists', 'priority', 'families', 'method', 'method6', 'netmask6')
+        unexpected_diff = {k: (expected.get(k), pending.get(k))
+                            for k in set(expected) | set(pending)
+                            if k not in ignore and expected.get(k) != pending.get(k)}
+        if unexpected_diff:
+            self._run_proxmox_ssh_command(node, f"pvesh delete /nodes/{node}/network")
+            return False, f"Pending change for {node}/{iface} didn't match expectations, reverted: {unexpected_diff}"
+
+        if not apply:
+            return True, f"{node}/{iface} staged to provision {new_addr} (pending, not applied)"
+
+        ok, output = self._run_proxmox_ssh_command(node, f"pvesh set /nodes/{node}/network")
+        if not ok:
+            return False, f"pvesh apply failed for {node}/{iface} (still pending, not reverted): {output}"
+        return True, f"{node}/{iface} provisioned with {new_addr} and applied"
+
     def commit_proxmox_interface_v6(self, node, iface, address6):
         """Full commit-confirm push of a new static IPv6 address to a
-        Proxmox VE node's own interface — the safe wrapper around
-        update_proxmox_interface_v6 that _propagate_subnet_prefix_change
-        actually calls.
+        Proxmox VE node's own interface — the safe wrapper that
+        _propagate_subnet_prefix_change (and the manual "Sync Now"
+        path) actually calls.
+
+        Dispatches to one of two underlying implementations depending
+        on whether the interface already has IPv6 configured at all
+        (netmask6 present in its current config): update_proxmox_
+        interface_v6 for an existing address (diffs against and can
+        revert to what was there before), or provision_proxmox_
+        interface_v6 for a bare IPv4-only interface (nothing to diff
+        against — confirmed live: pve04/pve06's vlan7 had IPv4 only,
+        while pve01/pve3 already had some IPv6). gateway6 for
+        provisioning is derived here as the /64 network's own address
+        (e.g. address6 = ...::14 -> gateway6 = ...::), matching the
+        pattern pve01's real, manually-configured interface already
+        established — not something either underlying method guesses
+        on its own.
 
         Order matters: the self-revert timer (_schedule_proxmox_revert)
         is scheduled FIRST, on the node's own systemd, before the real
@@ -1201,16 +1303,22 @@ class ZoneManager:
         except Exception as e:
             return False, f"Failed to read current config for {node}/{iface}: {e}"
 
+        provisioning = 'netmask6' not in current
         revert_fields = {k: current[k] for k in self._PVESH_VLAN_FIELDS if current.get(k) is not None}
         scheduled, detail = self._schedule_proxmox_revert(node, iface, revert_fields, PROXMOX_COMMIT_TIMEOUT_SECONDS)
         if not scheduled:
             return False, (f"Refusing to proceed — couldn't schedule the safety-net revert timer "
                             f"for {node}/{iface}: {detail}")
 
-        success, message = self.update_proxmox_interface_v6(node, iface, address6, apply=True)
+        if provisioning:
+            gateway6 = str(ipaddress.ip_interface(f"{address6}/64").network.network_address)
+            success, message = self.provision_proxmox_interface_v6(node, iface, address6, gateway6, apply=True)
+        else:
+            success, message = self.update_proxmox_interface_v6(node, iface, address6, apply=True)
         if not success:
             self._cancel_proxmox_revert(node, iface)
-            return False, f"Update failed, nothing was left applied (revert timer cancelled, nothing to revert): {message}"
+            verb = "Provisioning" if provisioning else "Update"
+            return False, f"{verb} failed, nothing was left applied (revert timer cancelled, nothing to revert): {message}"
 
         valid, valid_detail = self._validate_proxmox_reachability(node, address6)
         if not valid:
@@ -1506,6 +1614,48 @@ class ZoneManager:
                     logger.error(f"Failed computing new address for {domain}: {e}")
             if member_targets:
                 self.run_update_group(group_name, member_targets)
+
+    def sync_update_group(self, group_name):
+        """Manually run a group through its Group Update Plan right now,
+        using each member's CURRENTLY expected target (computed from its
+        subnet's live prefix_v6, same math as
+        _propagate_subnet_prefix_change) rather than waiting for an
+        actual detected prefix change. Useful to bring a newly-added
+        member into compliance — e.g. provisioning IPv6 on a Proxmox
+        node that's never had any — without needing to wait for, or
+        fake, a real ISP renumbering event.
+
+        Returns the same (all_converged, results) shape as
+        run_update_group, or (False, [...]) with a single explanatory
+        entry if the group doesn't exist or none of its members
+        currently have a subnet+ipv6_host to compute a target from.
+        """
+        groups = self.get_update_groups()
+        group = groups.get(group_name)
+        if not group:
+            return False, [{'domain': None, 'ok': False, 'detail': f"Unknown update group '{group_name}'"}]
+
+        subnets = self.get_subnets()
+        member_targets = {}
+        for domain in group.get('members', []):
+            entry = self.get_dynamic_host(domain)
+            if not entry or entry.get('ipv6_host') is None:
+                continue
+            subnet = subnets.get(entry.get('subnet'), {})
+            prefix_v6 = subnet.get('prefix_v6')
+            if not prefix_v6:
+                continue
+            try:
+                member_targets[domain] = str(
+                    _ipv6_from_prefix_and_host(ipaddress.ip_network(prefix_v6), entry['ipv6_host']))
+            except ValueError as e:
+                logger.error(f"Failed computing sync-now target for {domain}: {e}")
+
+        if not member_targets:
+            return False, [{'domain': None, 'ok': False,
+                             'detail': "No members with a subnet live prefix_v6 and ipv6_host to sync"}]
+
+        return self.run_update_group(group_name, member_targets)
 
     def _build_vlan_netplan(self, vlan_id, ipv4_mode, ipv4_address, ipv6_mode, ipv6_address):
         """Netplan v2 YAML for a single VLAN sub-interface. ipv4_mode:
@@ -3455,6 +3605,14 @@ def api_update_groups_remove_member(group_name, domain):
     """API: Remove a member from a group."""
     success, message = manager.remove_group_member(group_name, domain)
     return jsonify({'success': success, 'message': message})
+
+@app.route('/api/update-groups/<group_name>/sync-now', methods=['POST'])
+def api_update_groups_sync_now(group_name):
+    """API: Manually run a group through its commit-confirm plan right
+    now, using each member's currently-expected target instead of
+    waiting for a detected subnet prefix change."""
+    all_converged, results = manager.sync_update_group(group_name)
+    return jsonify({'success': all_converged, 'results': results})
 
 @app.route('/api/subnets', methods=['GET'])
 def api_subnets_list():

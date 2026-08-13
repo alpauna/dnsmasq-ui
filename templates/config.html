@@ -2428,6 +2428,13 @@
                                 <ul style="font-size: 13px;">${members}</ul>
                                 ${addForm}
                                 <div id="group-member-result-${name}" style="margin-top: 10px;"></div>
+                                <button class="btn btn-secondary btn-sm" style="margin-top: 8px;" onclick="syncGroupNow('${name}')">Sync Now</button>
+                                <p style="font-size: 11px; color: #666; margin-top: 4px;">
+                                    Runs every member to its currently-expected address right now, instead of
+                                    waiting for a detected subnet prefix change — e.g. to provision a member
+                                    that's never had IPv6 configured yet.
+                                </p>
+                                <div id="group-sync-result-${name}" style="margin-top: 10px;"></div>
                                 ${statusBlock}
                             </div>`;
                     }).join('');
@@ -2462,6 +2469,27 @@
                 })
                 .catch(error => {
                     console.error('Error unlocking update group:', error);
+                    resultEl.innerHTML = '<div class="alert alert-error">Error contacting server</div>';
+                });
+        }
+
+        function syncGroupNow(name) {
+            if (!confirm(`Sync '${name}' now, pushing every member to its currently-expected address?`)) return;
+            const resultEl = document.getElementById(`group-sync-result-${name}`);
+            resultEl.innerHTML = '<p>Syncing — this can take a while (each member commits one at a time)...</p>';
+            fetch(`/api/update-groups/${encodeURIComponent(name)}/sync-now`, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    const results = (data.results || [])
+                        .map(r => `<li>${r.ok ? '✅' : '❌'} ${r.domain || '(n/a)'}: ${r.detail}</li>`)
+                        .join('');
+                    resultEl.innerHTML = `
+                        <div class="alert ${data.success ? 'alert-success' : 'alert-error'}">${data.success ? 'All members converged.' : 'Sync did not fully complete — see below.'}</div>
+                        <ul style="font-size: 13px;">${results}</ul>`;
+                    loadUpdateGroups();
+                })
+                .catch(error => {
+                    console.error('Error syncing update group:', error);
                     resultEl.innerHTML = '<div class="alert alert-error">Error contacting server</div>';
                 });
         }
