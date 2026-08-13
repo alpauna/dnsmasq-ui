@@ -1096,11 +1096,32 @@ class ZoneManager:
         if '@' in contact:
             contact = contact.replace('@', '.', 1)
         ttl = soa.get('ttl', 3600)
+        # mgmt.alshowto.com is inline-signed with serial-update-method
+        # unixtime -- that setting only governs the *signed* side; the
+        # RAW zone file still needs its own strictly-increasing serial
+        # for ixfr-from-differences to accept a reload. zones.json's
+        # static soa.serial would go stale (never bumped); a raw Unix
+        # timestamp was tried and is WRONG here too -- the Ansible
+        # placeholder's date-coded serial (YYYYMMDDnn, e.g. 2026081300,
+        # ~2.03 billion) is already larger than any real Unix timestamp
+        # will be until year 2033, so a real timestamp (~1.8 billion in
+        # 2026) reads as "backward" under RFC 1982 comparison and gets
+        # rejected forever. Confirmed live via named's journal
+        # ("ixfr-from-differences: new serial ... out of range") for
+        # both attempts. Fix: keep the SAME YYYYMMDDnn family the
+        # placeholder used, with a same-day 15-minute-resolution counter
+        # (00-95) so it both stays ahead of that baseline and keeps
+        # increasing across repeated same-day deploys.
+        if zone_name == _BIND_MGMT_ZONE:
+            now = datetime.now()
+            serial = int(now.strftime('%Y%m%d')) * 100 + (now.hour * 4 + now.minute // 15)
+        else:
+            serial = soa.get('serial') or int(datetime.now().timestamp())
 
         lines = [
             f"$TTL {ttl}",
             f"@\tIN\tSOA\t{_bind_absolute(primary_ns)} {_bind_absolute(contact)} (",
-            f"\t\t\t{soa.get('serial') or int(datetime.now().timestamp())}\t; serial",
+            f"\t\t\t{serial}\t; serial",
             f"\t\t\t{soa.get('refresh', 3600)}\t\t; refresh",
             f"\t\t\t{soa.get('retry', 1800)}\t\t; retry",
             f"\t\t\t{soa.get('expire', 604800)}\t\t; expire",

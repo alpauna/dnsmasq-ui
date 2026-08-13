@@ -386,7 +386,7 @@
           "ipv6_address": null
         }
       ],
-      "dns_backend": "dnsmasq"
+      "dns_backend": "bind9"
     },
     "dns02": {
       "ip": "192.168.0.232",
@@ -409,7 +409,7 @@
           "ipv6_address": null
         }
       ],
-      "dns_backend": "dnsmasq"
+      "dns_backend": "bind9"
     },
     "dns03": {
       "ip": "192.168.0.233",
@@ -432,7 +432,7 @@
           "ipv6_address": null
         }
       ],
-      "dns_backend": "dnsmasq"
+      "dns_backend": "bind9"
     }
   },
   "global": {

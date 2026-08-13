@@ -130,7 +130,7 @@
       copy:
         content: |
           $TTL 3600
-          @	IN	SOA	dns01.{{ item }}. admin.alshowto.com. (
+          @	IN	SOA	dns01.ad.alshowto.com. admin.alshowto.com. (
           			{{ ansible_date_time.date | regex_replace('-', '') }}00	; serial
           			3600		; refresh
           			1800		; retry
