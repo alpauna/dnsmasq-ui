@@ -123,6 +123,78 @@ PROXMOX_NODE_IPS = dict(zip(
 # itself, so this fires even if dnsmasq-ui can't reach the node again.
 PROXMOX_COMMIT_TIMEOUT_SECONDS = int(os.getenv('PROXMOX_COMMIT_TIMEOUT_SECONDS', '300'))
 
+# /api/acme-challenge is called by unattended ACME DNS-01 hook scripts
+# (acme.sh custom dnsapi, certbot manual-auth-hook) with no dashboard
+# session, so the normal login can't gate it. Auth there is per-key bearer
+# tokens, generated/revoked from the Config page and stored (hashed, never
+# in plaintext) under zones.json global.acme_hook_keys -- see
+# ZoneManager.create_acme_hook_key / revoke_acme_hook_key /
+# _authenticate_acme_hook_key. No keys configured means every call is
+# rejected, same as before this was per-key.
+#
+# Where the challenge TXT record actually gets published is a separate
+# question from that auth, and switchable: Cloudflare currently runs
+# alshowto.com's real public DNS (dnsmasq's own zones here are internal/
+# split-horizon and never queried by a public CA), so 'cloudflare' is the
+# only backend that can make a real Let's Encrypt DNS-01 challenge pass
+# today. 'local' -- writing the TXT into zones.json and pushing it to
+# dns31/32/33 like any other record -- is kept working for the day
+# alshowto.com's authoritative DNS moves onto these servers themselves;
+# flipping this one setting is meant to be the entire migration for ACME
+# once that happens, no code changes. The hook scripts and /api/acme-
+# challenge contract are identical either way -- this is invisible to them.
+ACME_DNS_BACKEND = os.getenv('ACME_DNS_BACKEND', 'cloudflare')
+CLOUDFLARE_API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN', '')
+CLOUDFLARE_ZONE_ID = os.getenv('CLOUDFLARE_ZONE_ID', '')
+CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
+
+def _cloudflare_request(method, path, payload=None):
+    """Low-level Cloudflare API call, scoped to the one configured zone.
+    Raises on any transport error or a well-formed-but-unsuccessful
+    response -- callers translate that into this codebase's usual
+    (success, message) tuple convention."""
+    if not CLOUDFLARE_API_TOKEN or not CLOUDFLARE_ZONE_ID:
+        raise RuntimeError('CLOUDFLARE_API_TOKEN / CLOUDFLARE_ZONE_ID not configured')
+    url = f'{CLOUDFLARE_API_BASE}/zones/{CLOUDFLARE_ZONE_ID}{path}'
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={
+            'Authorization': f'Bearer {CLOUDFLARE_API_TOKEN}',
+            'Content-Type': 'application/json',
+        }
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = json.loads(resp.read().decode())
+    if not body.get('success'):
+        raise RuntimeError(f"Cloudflare API error: {body.get('errors')}")
+    return body
+
+def _cloudflare_add_txt(fulldomain, value):
+    try:
+        body = _cloudflare_request('POST', '/dns_records', {
+            'type': 'TXT', 'name': fulldomain, 'content': value, 'ttl': 120
+        })
+        return True, f"Created TXT record on Cloudflare (id {body['result']['id']})"
+    except Exception as e:
+        return False, f"Cloudflare add failed: {e}"
+
+def _cloudflare_remove_txt(fulldomain, value):
+    """Looks the record up by (name, content) rather than tracking the
+    Cloudflare-assigned id locally -- self-healing across a dnsmasq-ui
+    restart between add and remove, no extra state to keep in sync."""
+    try:
+        query = urllib.parse.urlencode({'type': 'TXT', 'name': fulldomain, 'content': value})
+        body = _cloudflare_request('GET', f'/dns_records?{query}')
+        matches = body.get('result', [])
+        if not matches:
+            return True, "No matching Cloudflare TXT record found (already removed?)"
+        for record in matches:
+            _cloudflare_request('DELETE', f"/dns_records/{record['id']}")
+        return True, f"Removed {len(matches)} TXT record(s) from Cloudflare"
+    except Exception as e:
+        return False, f"Cloudflare removal failed: {e}"
+
 # Reverse proxy configuration
 PROXY_PATH_PREFIX = os.getenv('PROXY_PATH_PREFIX', '')  # e.g., '/dnsmasq-ui' for http://proxy/dnsmasq-ui/
 TRUSTED_PROXIES = [p.strip() for p in os.getenv('TRUSTED_PROXIES', '*').split(',') if p.strip()]  # comma-separated IPs, or '*'
@@ -318,8 +390,40 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 _PUBLIC_PATHS = {
     '/setup', '/login', '/favicon.ico',
     '/login/verify', '/login/verify/totp', '/login/verify/email/send', '/login/verify/email',
-    '/api/proxy-check'
+    '/api/proxy-check',
+    # Exempt from session login, not from auth entirely -- gated by its own
+    # bearer-token check (_require_acme_token) since callers are unattended
+    # ACME hook scripts with no browser session.
+    '/api/acme-challenge'
 }
+
+# ACME key-authorization digests are base64url (RFC 4648 sec 5) SHA-256
+# hashes -- 43 chars, no padding, alphabet below. Full domain names under
+# an _acme-challenge label, bounded to the same length DNS itself allows.
+# Both hook scripts (acme.sh, certbot) only ever send well-formed values,
+# but this endpoint is reachable by anything holding the bearer token, so
+# reject anything that isn't shaped like an actual challenge before it can
+# reach save_config()/deploy_to_servers() -- those single-quote the whole
+# generated config into a remote shell command (see _ssh_update), so a
+# stray quote in unvalidated input would corrupt every zone's deploy, not
+# just this record.
+_ACME_CHALLENGE_VALUE_RE = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
+_ACME_CHALLENGE_DOMAIN_RE = re.compile(
+    r'^_acme-challenge\.(?=.{1,253}$)'
+    r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?'
+    r'(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+)
+
+def _require_acme_token():
+    """Returns an error response if the request's bearer token doesn't
+    match any live acme_hook_keys entry, or None if it's authorized to
+    proceed. Keys are managed from the Config page (generate/revoke), not
+    a single shared secret -- see ZoneManager.create_acme_hook_key."""
+    auth_header = request.headers.get('Authorization', '')
+    provided = auth_header[7:] if auth_header.startswith('Bearer ') else ''
+    if not manager._authenticate_acme_hook_key(provided):
+        return jsonify({'error': 'Invalid or missing bearer token'}), 403
+    return None
 
 # In-memory only (never persisted): short-lived state for a password-verified
 # login awaiting a second factor. Keyed by a random token stored in the
@@ -605,6 +709,7 @@ class ZoneManager:
             (DEVICE_CREDENTIALS_FILE, 'device-credentials.json', 0o600),
             (os.path.join(zones_dir, 'smtp.env'), 'smtp.env', 0o600),
             (os.path.join(zones_dir, 'proxmox.env'), 'proxmox.env', 0o600),
+            (os.path.join(zones_dir, 'acme.env'), 'acme.env', 0o600),
         ]
 
         for server_name, server_info in self.get_servers().items():
@@ -698,6 +803,113 @@ class ZoneManager:
         self.save_config()
         return True, "Record deleted"
 
+    def _zone_for_domain(self, fulldomain):
+        """Longest-suffix match against configured zone names, e.g.
+        '_acme-challenge.foo.ad.alshowto.com' -> zone 'ad.alshowto.com'.
+        Picks the most specific zone if more than one suffix matches."""
+        candidates = [z for z in self.get_zones()
+                      if fulldomain == z['name'] or fulldomain.endswith('.' + z['name'])]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda z: len(z['name']))
+
+    def add_txt_challenge(self, fulldomain, value):
+        """Publish an ACME DNS-01 challenge TXT record via whichever
+        backend is currently authoritative -- see ACME_DNS_BACKEND."""
+        if ACME_DNS_BACKEND == 'cloudflare':
+            return _cloudflare_add_txt(fulldomain, value)
+        return self._add_txt_challenge_local(fulldomain, value)
+
+    def remove_txt_challenge(self, fulldomain, value):
+        """Remove one specific ACME challenge TXT value via whichever
+        backend is currently authoritative -- see ACME_DNS_BACKEND."""
+        if ACME_DNS_BACKEND == 'cloudflare':
+            return _cloudflare_remove_txt(fulldomain, value)
+        return self._remove_txt_challenge_local(fulldomain, value)
+
+    def _add_txt_challenge_local(self, fulldomain, value):
+        """Local-zone-file path: writes into zones.json and pushes to
+        dns31/32/33 like any other record. Only actually reachable by a
+        public CA once alshowto.com's authoritative DNS moves onto these
+        servers -- see the ACME_DNS_BACKEND comment above. Deliberately
+        does not dedupe/overwrite by domain like add_record's other
+        callers assume -- a wildcard + apex cert request needs two TXT
+        values live under the same _acme-challenge name at once, so this
+        always appends."""
+        zone = self._zone_for_domain(fulldomain)
+        if not zone:
+            return False, f"No zone configured for {fulldomain}"
+        zone['records'].append({'domain': fulldomain, 'type': 'TXT', 'value': value})
+        self.save_config()
+        return True, "TXT challenge record added"
+
+    def _remove_txt_challenge_local(self, fulldomain, value):
+        """Local-zone-file counterpart to _add_txt_challenge_local.
+        Removes one specific ACME challenge TXT value, not every TXT
+        record under that name -- a concurrent wildcard+apex request can
+        have two live at once and cleanup must not race the other one."""
+        zone = self._zone_for_domain(fulldomain)
+        if not zone:
+            return False, f"No zone configured for {fulldomain}"
+        before = len(zone['records'])
+        zone['records'] = [r for r in zone['records']
+                            if not (r['domain'] == fulldomain and r['type'] == 'TXT'
+                                    and r['value'] == value)]
+        removed = before - len(zone['records'])
+        self.save_config()
+        return True, f"Removed {removed} TXT record(s)"
+
+    def get_acme_hook_keys(self):
+        """Metadata only -- key_hash never leaves this method, and the
+        plaintext key only ever exists in create_acme_hook_key's return
+        value, once."""
+        keys = self.config.get('global', {}).get('acme_hook_keys', [])
+        return [{k: v for k, v in key.items() if k != 'key_hash'} for key in keys]
+
+    def create_acme_hook_key(self, label):
+        """Generates a new /api/acme-challenge bearer token and returns the
+        plaintext exactly once. Only its hash is persisted, so losing this
+        response means generating a replacement, not recovering it -- same
+        UX as a GitHub personal access token."""
+        plaintext = secrets.token_urlsafe(32)
+        entry = {
+            'id': secrets.token_hex(4),
+            'label': label or 'unlabeled',
+            'key_hash': generate_password_hash(plaintext),
+            'created': datetime.now().isoformat(),
+            'last_used': None
+        }
+        self.config.setdefault('global', {}).setdefault('acme_hook_keys', []).append(entry)
+        self.save_config()
+        return entry['id'], plaintext
+
+    def revoke_acme_hook_key(self, key_id):
+        """Deletes a key outright -- revocation should mean a script using
+        it starts failing immediately, not just stops being listed."""
+        global_cfg = self.config.setdefault('global', {})
+        keys = global_cfg.get('acme_hook_keys', [])
+        before = len(keys)
+        global_cfg['acme_hook_keys'] = [k for k in keys if k['id'] != key_id]
+        removed = before - len(global_cfg['acme_hook_keys'])
+        if removed:
+            self.save_config()
+        return removed > 0
+
+    def _authenticate_acme_hook_key(self, provided_token):
+        """Hashes are salted, so this can't be a dict lookup by hash --
+        an O(n) scan over a handful of hook keys is fine. On a match,
+        updates last_used in memory only; the caller's own add/remove
+        already calls save_config() right after, so this rides along with
+        that write instead of costing its own peer-sync SSH round trip
+        just to persist a timestamp."""
+        if not provided_token:
+            return False
+        for key in self.config.get('global', {}).get('acme_hook_keys', []):
+            if check_password_hash(key['key_hash'], provided_token):
+                key['last_used'] = datetime.now().isoformat()
+                return True
+        return False
+
     def generate_dnsmasq_config(self):
         """Generate complete dnsmasq configuration."""
         config = "# Auto-generated by dnsmasq-ui\n"
@@ -713,6 +925,8 @@ class ZoneManager:
 
                 if record_type == 'CNAME':
                     config += f"cname={domain},{value}\n"
+                elif record_type == 'TXT':
+                    config += f"txt-record={domain},{value}\n"
                 else:
                     config += f"address=/{domain}/{value}\n"
             config += "\n"
@@ -3819,6 +4033,77 @@ def api_delete_record(zone_name, domain, record_type):
     """API: Delete record from zone."""
     success, message = manager.delete_record(zone_name, domain, record_type)
     return jsonify({'success': success, 'message': message})
+
+@app.route('/api/acme-hook-keys', methods=['GET'])
+def api_list_acme_hook_keys():
+    """API: list ACME hook keys (dashboard session required) -- metadata
+    only, never the plaintext key or its hash."""
+    return jsonify({'keys': manager.get_acme_hook_keys()})
+
+@app.route('/api/acme-hook-keys', methods=['POST'])
+def api_create_acme_hook_key():
+    """API: generate a new ACME hook key. Returns the plaintext key exactly
+    once -- the caller must copy it now, it cannot be retrieved again."""
+    data = request.json or {}
+    key_id, plaintext = manager.create_acme_hook_key(data.get('label', ''))
+    return jsonify({'id': key_id, 'key': plaintext})
+
+@app.route('/api/acme-hook-keys/<key_id>', methods=['DELETE'])
+def api_revoke_acme_hook_key(key_id):
+    """API: revoke an ACME hook key -- any script still using it starts
+    failing on its next call, immediately."""
+    removed = manager.revoke_acme_hook_key(key_id)
+    if not removed:
+        return jsonify({'success': False, 'message': 'Key not found'}), 404
+    return jsonify({'success': True, 'message': 'Key revoked'})
+
+@app.route('/api/acme-challenge', methods=['POST'])
+def api_add_acme_challenge():
+    """API: create an ACME DNS-01 challenge TXT record and deploy it
+    immediately -- both acme.sh's custom dnsapi hook and certbot's
+    manual-auth-hook call this, then ask the CA to validate right away, so
+    this blocks until the change is actually live rather than returning
+    before deploy_to_servers() has finished."""
+    auth_error = _require_acme_token()
+    if auth_error:
+        return auth_error
+
+    data = request.json or {}
+    fulldomain = data.get('fulldomain', '')
+    value = data.get('value', '')
+    if not _ACME_CHALLENGE_DOMAIN_RE.match(fulldomain):
+        return jsonify({'error': 'fulldomain must be _acme-challenge.<name>'}), 400
+    if not _ACME_CHALLENGE_VALUE_RE.match(value):
+        return jsonify({'error': 'value is not a well-formed challenge token'}), 400
+
+    success, message = manager.add_txt_challenge(fulldomain, value)
+    if not success:
+        return jsonify({'success': False, 'message': message}), 404
+
+    deploy_results = manager.deploy_to_servers()
+    return jsonify({'success': True, 'message': message, 'deploy': deploy_results})
+
+@app.route('/api/acme-challenge', methods=['DELETE'])
+def api_remove_acme_challenge():
+    """API: remove one ACME challenge TXT value (cleanup hook)."""
+    auth_error = _require_acme_token()
+    if auth_error:
+        return auth_error
+
+    data = request.json or {}
+    fulldomain = data.get('fulldomain', '')
+    value = data.get('value', '')
+    if not _ACME_CHALLENGE_DOMAIN_RE.match(fulldomain):
+        return jsonify({'error': 'fulldomain must be _acme-challenge.<name>'}), 400
+    if not _ACME_CHALLENGE_VALUE_RE.match(value):
+        return jsonify({'error': 'value is not a well-formed challenge token'}), 400
+
+    success, message = manager.remove_txt_challenge(fulldomain, value)
+    if not success:
+        return jsonify({'success': False, 'message': message}), 404
+
+    deploy_results = manager.deploy_to_servers()
+    return jsonify({'success': True, 'message': message, 'deploy': deploy_results})
 
 @app.route('/api/deploy', methods=['POST'])
 def api_deploy():

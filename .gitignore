@@ -49,6 +49,7 @@ auth.json
 auth.json.bak
 smtp.env
 proxmox.env
+acme.env
 
 # Logs
 *.log

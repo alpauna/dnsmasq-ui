@@ -880,6 +880,30 @@
         </div>
 
         <div class="section">
+            <h2>ACME Hook Keys</h2>
+            <div class="alert alert-info">
+                Bearer tokens for <code>/api/acme-challenge</code> — the endpoint an ACME DNS-01 hook script
+                (acme.sh's <code>dns_dnsmasqui</code>, or certbot's <code>--manual-auth-hook</code>) calls to
+                create/remove <code>_acme-challenge</code> TXT records while a cert is being issued. Each key
+                is shown in full exactly once, right after you generate it — only its hash is stored, so a
+                lost key means generating a replacement, not recovering it. Revoking a key takes effect on
+                its very next use.
+            </div>
+            <div id="acme-hook-keys-status">
+                <p style="padding: 20px;">Loading ACME hook keys...</p>
+            </div>
+            <h3 style="color: #333; margin: 20px 0 15px;">Generate a Key</h3>
+            <form id="acme-hook-key-form" onsubmit="generateAcmeHookKey(event)">
+                <div class="form-group">
+                    <label for="ahk-label">Label (which script/host this is for)</label>
+                    <input type="text" id="ahk-label" placeholder="acme.sh on wiki-vm">
+                </div>
+                <button type="submit" class="btn btn-secondary">Generate Key</button>
+            </form>
+            <div id="acme-hook-key-generate-result" style="margin-top: 15px;"></div>
+        </div>
+
+        <div class="section">
             <h2>Backup & Restore</h2>
 
             <div class="tab-group" style="margin-bottom: 20px;">
@@ -2611,6 +2635,67 @@
                 });
         }
 
+        function loadAcmeHookKeys() {
+            return fetch('/api/acme-hook-keys')
+                .then(response => response.json())
+                .then(data => {
+                    const keys = data.keys || [];
+                    const el = document.getElementById('acme-hook-keys-status');
+                    if (keys.length === 0) {
+                        el.innerHTML = '<p style="padding: 20px;">No ACME hook keys yet.</p>';
+                        return;
+                    }
+                    el.innerHTML = keys.map(k => `
+                        <div class="server-item" style="margin-bottom: 10px;">
+                            <h4>${escapeHtml(k.label)}</h4>
+                            <p><strong>Created:</strong> ${new Date(k.created).toLocaleString()}</p>
+                            <p><strong>Last used:</strong> ${k.last_used ? new Date(k.last_used).toLocaleString() : 'never'}</p>
+                            <button class="btn btn-secondary btn-sm" onclick="revokeAcmeHookKey('${k.id}')">Revoke</button>
+                        </div>`).join('');
+                })
+                .catch(error => {
+                    console.error('Error loading ACME hook keys:', error);
+                    document.getElementById('acme-hook-keys-status').innerHTML =
+                        '<div class="alert alert-error">Error loading ACME hook keys</div>';
+                });
+        }
+
+        function generateAcmeHookKey(event) {
+            event.preventDefault();
+            const label = document.getElementById('ahk-label').value.trim();
+            fetch('/api/acme-hook-keys', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ label: label })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    let html = '<div class="alert alert-success"><strong>Key generated — copy it now, it will not be shown again.</strong></div>';
+                    html += '<div class="form-group"><label>Key</label>';
+                    html += `<div class="code-block">${escapeHtml(data.key)}</div>`;
+                    html += '<button class="copy-btn" onclick="copyToClipboard(this.previousElementSibling)">Copy Key</button></div>';
+                    document.getElementById('acme-hook-key-generate-result').innerHTML = html;
+                    document.getElementById('acme-hook-key-form').reset();
+                    loadAcmeHookKeys();
+                })
+                .catch(error => {
+                    console.error('Error generating ACME hook key:', error);
+                    document.getElementById('acme-hook-key-generate-result').innerHTML =
+                        '<div class="alert alert-error">Error contacting server</div>';
+                });
+        }
+
+        function revokeAcmeHookKey(id) {
+            if (!confirm('Revoke this ACME hook key? Any script still using it will start failing immediately.')) return;
+            fetch(`/api/acme-hook-keys/${encodeURIComponent(id)}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(() => loadAcmeHookKeys())
+                .catch(error => {
+                    console.error('Error revoking ACME hook key:', error);
+                    alert('Error contacting server');
+                });
+        }
+
         function addGroupMember(name) {
             const domain = document.getElementById(`group-add-select-${name}`).value;
             const resultEl = document.getElementById(`group-member-result-${name}`);
@@ -2658,11 +2743,13 @@
         updateDynamicHostFormVisibility();
         loadDeviceCredentials();
         load2FAStatus();
+        loadAcmeHookKeys();
         setInterval(loadServerStatus, 30000);
         setInterval(loadSubnets, 30000);
         setInterval(loadVlans, 30000);
         setInterval(loadUpdateGroups, 30000);
         setInterval(loadIpsetTracking, 30000);
+        setInterval(loadAcmeHookKeys, 30000);
     </script>
 </body>
 </html>

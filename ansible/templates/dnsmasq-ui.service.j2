@@ -17,6 +17,7 @@ Environment="TRUSTED_PROXIES={{ trusted_proxies }}"
 Environment="PROXY_PATH_PREFIX={{ proxy_path_prefix }}"
 EnvironmentFile=-{{ ui_path }}/smtp.env
 EnvironmentFile=-{{ ui_path }}/proxmox.env
+EnvironmentFile=-{{ ui_path }}/acme.env
 ExecStart={{ ui_path }}/venv/bin/python app-multi-zone.py
 Restart=on-failure
 RestartSec=10
