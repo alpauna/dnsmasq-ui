@@ -104,6 +104,27 @@
         group: bind
         mode: '0755'
 
+    - name: Grant AppArmor read-write access to the zone directory
+      copy:
+        content: |
+          # dnsmasq-ui BIND9 migration: zone directory needs read-write for
+          # inline-signing (temp zone dumps, .jnl journal, .jbk key-state
+          # files). Debian's packaged usr.sbin.named profile only grants
+          # `/etc/bind/** r,` (read-only) -- confirmed live during Phase 3's
+          # mgmt.alshowto.com cutover: DNSSEC keys were created but no
+          # DNSKEY/RRSIG were ever actually served, with named's journal
+          # showing repeated "permission denied" writing tmp zone dumps,
+          # db.mgmt.alshowto.com.jnl/.signed.jnl/.jbk -- silent until you
+          # go looking, since rndc reload/deploy still reports success.
+          # This uses Debian's standard local-override hook so it survives
+          # `apt upgrade` reinstalling the packaged profile.
+          {{ bind_zone_dir }}/** rwk,
+        dest: /etc/apparmor.d/local/usr.sbin.named
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload apparmor for named
+
     - name: Deploy named.conf.options
       template:
         src: templates/named.conf.options.j2
@@ -236,3 +257,13 @@
     - name: named-checkconf validation
       command: named-checkconf
       changed_when: false
+
+    - name: reload apparmor for named
+      command: systemctl reload apparmor
+      # Editing the profile source file alone does not update the
+      # compiled profile the kernel already has loaded -- confirmed live,
+      # a plain `systemctl restart named` after only editing the file was
+      # NOT sufficient. Reloading here (while named is still masked/
+      # stopped during provisioning) means the correct profile is already
+      # in the kernel by the time Phase 3 actually starts named for real,
+      # no extra restart-after-the-fact step needed on the day.
