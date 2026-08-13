@@ -241,6 +241,10 @@
             background: #e91e63;
         }
 
+        .record-type.ptr {
+            background: #607d8b;
+        }
+
         .record-actions {
             display: flex;
             gap: 8px;
@@ -392,7 +396,16 @@
                             <option value="MX">MX (Mail Exchanger)</option>
                             <option value="SRV">SRV (Service)</option>
                             <option value="CAA">CAA (Cert Authorization)</option>
+                            <option value="PTR">PTR (Reverse DNS)</option>
                         </select>
+                    </div>
+                    <div class="form-group" id="ptr-helper-group" style="display: none;">
+                        <label for="ptr-ip-helper">PTR Helper: IP Address</label>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="text" id="ptr-ip-helper" placeholder="192.168.0.100 or 2604:7a00::100">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="computePtrDomain()">Fill Domain</button>
+                        </div>
+                        <div id="ptr-helper-error" style="color: #d32f2f; font-size: 12px; margin-top: 4px;"></div>
                     </div>
                     <div class="form-group" id="txt-preset-group" style="display: none;">
                         <label for="txt-preset">TXT Preset</label>
@@ -440,7 +453,7 @@
                         <tr>
                             <td>{{ record.domain }}</td>
                             <td>
-                                <span class="record-type {% if record.type == 'AAAA' %}aaaa{% elif record.type == 'CNAME' %}cname{% elif record.type == 'TXT' %}txt{% elif record.type == 'MX' %}mx{% elif record.type == 'SRV' %}srv{% elif record.type == 'CAA' %}caa{% endif %}">
+                                <span class="record-type {% if record.type == 'AAAA' %}aaaa{% elif record.type == 'CNAME' %}cname{% elif record.type == 'TXT' %}txt{% elif record.type == 'MX' %}mx{% elif record.type == 'SRV' %}srv{% elif record.type == 'CAA' %}caa{% elif record.type == 'PTR' %}ptr{% endif %}">
                                     {{ record.type }}
                                 </span>
                             </td>
@@ -506,7 +519,8 @@
             TXT: 'v=spf1 -all',
             MX: '10 mail.example.com',
             SRV: 'sipserver.example.com 5060 10 20',
-            CAA: '0 issue letsencrypt.org'
+            CAA: '0 issue letsencrypt.org',
+            PTR: 'target.example.com'
         };
 
         function onRecordTypeChange() {
@@ -528,6 +542,64 @@
                 caaPresetGroup.style.display = 'none';
                 document.getElementById('caa-preset').value = 'custom';
             }
+
+            const ptrHelperGroup = document.getElementById('ptr-helper-group');
+            ptrHelperGroup.style.display = (type === 'PTR') ? '' : 'none';
+        }
+
+        // Ported 1:1 from a Python implementation checked against
+        // ipaddress.ip_address(...).reverse_pointer for a range of
+        // IPv4/IPv6 cases (including ::, leading zeros, all-zero groups)
+        // before being translated here -- see the commit that added PTR
+        // support for the verification.
+        function ipv4ToPtrName(ip) {
+            const parts = ip.split('.');
+            if (parts.length !== 4) return null;
+            for (const p of parts) {
+                if (!/^\d{1,3}$/.test(p) || Number(p) > 255 || (p.length > 1 && p[0] === '0')) return null;
+            }
+            return parts.slice().reverse().join('.') + '.in-addr.arpa';
+        }
+
+        function ipv6ToPtrName(ip) {
+            let headGroups, tailGroups;
+            if (!ip.includes('::')) {
+                headGroups = ip.split(':');
+                tailGroups = [];
+                if (headGroups.length !== 8) return null;
+            } else {
+                if ((ip.match(/::/g) || []).length !== 1) return null;
+                const [head, tail] = ip.split('::');
+                headGroups = head ? head.split(':') : [];
+                tailGroups = tail ? tail.split(':') : [];
+                const missing = 8 - (headGroups.length + tailGroups.length);
+                if (missing < 0) return null;
+                headGroups = headGroups.concat(Array(missing).fill('0'));
+            }
+            const allGroups = headGroups.concat(tailGroups);
+            if (allGroups.length !== 8) return null;
+            let hex = '';
+            for (const g of allGroups) {
+                if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
+                hex += g.toLowerCase().padStart(4, '0');
+            }
+            return hex.split('').reverse().join('.') + '.ip6.arpa';
+        }
+
+        function computePtrDomain() {
+            const raw = document.getElementById('ptr-ip-helper').value.trim();
+            const errorEl = document.getElementById('ptr-helper-error');
+            errorEl.textContent = '';
+            if (!raw) {
+                errorEl.textContent = 'Enter an IP address first';
+                return;
+            }
+            const name = raw.includes(':') ? ipv6ToPtrName(raw) : ipv4ToPtrName(raw);
+            if (!name) {
+                errorEl.textContent = 'Not a valid IPv4 or IPv6 address';
+                return;
+            }
+            document.getElementById('domain').value = name;
         }
 
         // SPF/DKIM/DMARC aren't separate record types to dnsmasq -- they're

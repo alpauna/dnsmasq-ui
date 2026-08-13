@@ -1766,6 +1766,18 @@ curl http://localhost:5000/api/wireguard/status
   feature — a CAA record is what actually enforces that only the
   expected CA (Let's Encrypt, here) can act on a `_acme-challenge`
   record it publishes.
+- **PTR**: Reverse DNS (IP → hostname). Unlike MX/SRV/CAA, this needs no
+  compound-value encoding — `domain` is the reverse-lookup name
+  (`<reversed-IP>.in-addr.arpa` for IPv4, `<reversed-nibbles>.ip6.arpa`
+  for IPv6) and `value` is just the target hostname, which is exactly
+  what the existing `{domain, type, value}` schema already holds. The
+  Add New Record form's **PTR Helper** takes a plain IP address and
+  computes the correct reverse-lookup domain name into the Domain field
+  — that computation (especially the IPv6 nibble-reversal) is fiddly
+  enough to get wrong by hand that it's worth automating; the JS was
+  checked line-for-line against Python's `ipaddress.ip_address(...).
+  reverse_pointer` for a range of IPv4/IPv6 cases (including `::`,
+  leading zeros, all-zero groups) before being written.
 
 ## Web UI
 
@@ -1782,12 +1794,15 @@ curl http://localhost:5000/api/wireguard/status
 
 ### Zone Management
 - View all DNS records organized by zone
-- Add new records to any zone — **A, AAAA, CNAME, TXT, MX, SRV, CAA**;
-  a **TXT Preset** dropdown (SPF/DKIM/DMARC/Custom) appears when TXT is
-  selected and pre-fills the conventional domain name plus a content
-  example for each, and a **CAA Preset** dropdown (Let's Encrypt
+- Add new records to any zone — **A, AAAA, CNAME, TXT, MX, SRV, CAA,
+  PTR**; a **TXT Preset** dropdown (SPF/DKIM/DMARC/Custom) appears when
+  TXT is selected and pre-fills the conventional domain name plus a
+  content example for each, a **CAA Preset** dropdown (Let's Encrypt
   issue/issuewild, Disallow all CAs, Custom) appears when CAA is
-  selected and fills in the complete, correctly-formatted value
+  selected and fills in the complete, correctly-formatted value, and a
+  **PTR Helper** appears when PTR is selected — enter a plain IP address
+  and it computes the correct `in-addr.arpa`/`ip6.arpa` reverse-lookup
+  name into the Domain field
 - Edit and delete existing records
 - Inline record editing with save functionality
 - Deploy changes across all servers with one click
@@ -1938,6 +1953,10 @@ srv-host=_sip._tcp.ad.alshowto.com,sipserver.ad.alshowto.com,5060,10,20
 # CAA records (stored value "0 issue letsencrypt.org" splits into
 # flags + tag + value here)
 caa-record=ad.alshowto.com,0,issue,letsencrypt.org
+
+# PTR records (reverse DNS -- domain is already the reverse-lookup name,
+# no splitting needed)
+ptr-record=100.0.168.192.in-addr.arpa,example.ad.alshowto.com
 
 # Upstream DNS
 server=1.1.1.1
@@ -2255,7 +2274,7 @@ The dashboard supports flexible viewing of DNS zones to accommodate varying numb
 
 **Record Preview:**
 - First 3 records displayed inline
-- Record type shown with colored badge (A, AAAA, CNAME, TXT, MX, SRV, CAA)
+- Record type shown with colored badge (A, AAAA, CNAME, TXT, MX, SRV, CAA, PTR)
 - "+X more records" indicator for zones with 4+ records
 - No need to click through to see zone contents
 

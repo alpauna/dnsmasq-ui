@@ -962,6 +962,13 @@ class ZoneManager:
                         config += f"caa-record={domain},{flags},{tag},{caa_value}\n"
                     else:
                         config += f"# Skipped malformed CAA record for {domain}: '{value}' (expected '<flags> <tag> <value>')\n"
+                elif record_type == 'PTR':
+                    # Unlike MX/SRV/CAA, PTR only ever needs the two
+                    # fields the schema already has -- domain holds the
+                    # reverse-lookup name (<ip>.in-addr.arpa or
+                    # <ip>.ip6.arpa), value holds the target hostname --
+                    # so no compound-value encoding/parsing needed here.
+                    config += f"ptr-record={domain},{value}\n"
                 else:
                     config += f"address=/{domain}/{value}\n"
             config += "\n"
