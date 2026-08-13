@@ -22,6 +22,7 @@ Web-based management dashboard for dnsmasq DNS servers with multi-zone support, 
 - **🔗 WireGuard Mesh**: Full-mesh encrypted network for secure cross-cluster DNS synchronization (v2.2+)
 - **🏷️ VLAN Sub-Interfaces**: Give a DNS server a real address on another subnet (via VLAN tag) without a second NIC, provisioned live from the Config page
 - **🛡️ Group Update Plans**: Pluggable, script-based HA group updates (Proxmox VE VLAN presence today) with a self-reverting commit-confirm safety net, serialized one member at a time with a hard-stop-and-lock on any failure
+- **🧯 Proxmox Firewall IPSet Tracking**: Keeps a Proxmox cluster ipset CIDR entry in sync with a subnet's live prefix, closing a `ctstate INVALID`/conntrack reachability gap discovered on the mgmt VLAN — auto-syncs on drift, manual "Sync Now" for first-time setup
 
 ## Architecture
 
@@ -710,11 +711,27 @@ network gear uses for exactly this risk:
    node, it fires even if dnsmasq-ui loses all contact with the node
    right after applying — the one failure mode a client-side-only revert
    can't cover.
-2. Stage, diff-verify, and apply the real change (`update_proxmox_interface_v6`).
+2. Stage, diff-verify, and apply the real change — dispatched
+   automatically to one of two implementations depending on whether the
+   interface already has *any* IPv6 configured:
+   `update_proxmox_interface_v6` (diffs against and can revert to an
+   existing address) for the common case, or
+   `provision_proxmox_interface_v6` (no prior
+   IPv6 to diff against — a fresh static address plus a `gateway6`
+   derived as the /64 network's own address, matching the pattern
+   already established by hand-configured nodes) for an interface
+   that's only ever had IPv4.
 3. **Independently validate** the node is actually reachable at the new
-   address: `ping6` to the new address itself, plus a fresh SSH connect
-   to the node's stable mgmt IP (proves the box as a whole is still up,
-   not just that one address answers ICMP).
+   address: a TCP connect to the Proxmox API/UI port (`8006`) on the
+   new address itself, plus a fresh SSH connect to the node's stable
+   mgmt IP (proves the box as a whole is still up, not just that one
+   port answers). **This used to be `ping6` instead of the TCP
+   connect** — dropped after confirming live that `ping6` is unreliable
+   on this network for freshly-applied addresses specifically (ICMPv6
+   echo gets dropped by conntrack, `ctstate INVALID`, for reasons
+   unrelated to whether the address actually works — see
+   [Keeping a Proxmox firewall ipset in sync](#keeping-a-proxmox-firewall-ipset-in-sync-proxmox_ipset_tracking)
+   below for the full story and where `ping6` still *is* the right tool).
 4. Only if validation passes: cancel the revert timer. Otherwise — including
    if dnsmasq-ui can't even reach the node to check — do nothing and let
    the timer fire on its own; the node self-heals with no further action
@@ -792,6 +809,114 @@ curl -X POST http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/members \
   -H "Content-Type: application/json" -d '{"domain": "pve02.mgmt.alshowto.com"}'
 
 curl -X DELETE http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/members/pve02.mgmt.alshowto.com
+```
+
+#### Keeping a Proxmox firewall ipset in sync (proxmox_ipset_tracking)
+
+Rolling `proxmox_update` out to more than one node surfaced a real
+network issue, not a dnsmasq-ui bug — worth the full story since the
+fix is non-obvious and the failure mode looks exactly like "the node is
+down" if you don't know to look past that.
+
+**Symptom:** `pve04` and `pve06` both applied their new static IPv6
+address cleanly, but failed the (then-`ping6`-based) reachability
+check every time, so the commit-confirm safety net correctly
+self-reverted them rather than leaving an unconfirmed change in place.
+`pve01` — the one node whose mgmt-VLAN address predates all of this —
+worked fine.
+
+**Diagnosis, in order of what actually ruled things out:**
+- Not a firewall *rule* gap — `pve-firewall`'s `ip6tables` chains
+  explicitly `RETURN`-allow Neighbor Solicitation/Advertisement
+  (ICMPv6 133-136) in both directions, confirmed via live packet
+  counters.
+- Not IPv6 disabled — `net.ipv6.conf.*.disable_ipv6`/`forwarding`/
+  `accept_ra` sysctls were identical between a working node and a
+  failing one.
+- Not stale connection-tracking state — `conntrack -F` (full flush)
+  made no difference.
+- Not the physical NIC's checksum offload — toggling
+  `ethtool -K <nic> rx off` live made no difference (reverted cleanly).
+- **The actual fault**: `ip6tables -L PVEFW-HOST-IN -n -v -x` showed
+  fresh ICMPv6 echo-request packets matching `DROP ... ctstate INVALID`
+  — rejected by connection tracking itself, before ever reaching any
+  allow rule. Meanwhile a plain **TCP connect to the same address on
+  port `8006`** (the Proxmox UI/API) succeeded every time, proving the
+  address was fully usable the whole time — this is exactly why
+  `_validate_proxmox_reachability` now checks TCP instead of `ping6`
+  (see above).
+- **The actual fix**: adding the *entire subnet* as a CIDR to the
+  cluster-wide `proxmox-cluster` firewall ipset (not a single host)
+  forces Proxmox to recompile and reload its whole ruleset, which
+  cleared the bad conntrack state. A plain `systemctl restart
+  pve-firewall` alone had *not* fixed it — the rule-driven recompile
+  specifically mattered. The fix is cluster-wide: a node that never had
+  its own rule touched started passing too, once *any* cluster member's
+  firewall config changed (Proxmox clusters sync firewall config via
+  corosync).
+
+**The gap this created, and how it's closed:** that ipset CIDR is tied
+to the *current* delegated prefix. Nothing about it updates on its own
+— unlike interface addresses, which the Group Update Plan above already
+keeps in sync automatically. An ISP renumber would silently make the
+entry stale and could reintroduce the exact same symptom. So:
+`global.proxmox_ipset_tracking` in `zones.json` maps a subnet name to
+an ipset + CIDR + label:
+
+```json
+"proxmox_ipset_tracking": {
+  "mgmt": {
+    "ipset": "proxmox-cluster",
+    "cidr": "2605:4a80:b009:c100::/64",
+    "label": "mgmt subnet (VLAN 7)"
+  }
+}
+```
+
+When `poll_subnets()` detects that subnet's prefix has changed,
+`update_proxmox_ipset_cidr()` runs **before** any Group Update Plan
+pushes for that subnet — so the firewall/conntrack path for the new
+addresses is already correct by the time they're applied and validated,
+not patched up after the fact. It adds the new CIDR before removing the
+old one (never a window with neither present), and only ever touches
+the exact CIDR strings it's tracking — this ipset also holds ~20
+unrelated, hand-maintained entries (Ceph storage/mgmt networks, NAS,
+backup server) that must never be touched. Every entry this code
+creates is tagged with a `dnsmasq-ui-managed: <label>` comment so it's
+identifiable at a glance and doesn't get mistaken for one of those.
+
+Since a subnet's prefix rarely actually *changes*,
+`sync_proxmox_ipset_tracking()` (Config page "Sync Now", or
+`POST /api/proxmox-ipset-tracking/<subnet>/sync-now`) is the
+manual-trigger path for the two cases the drift-only path can't
+handle — first-time setup, and
+recreating an entry after a human removes it by hand — both of which
+look like "no change" to the locally-recorded value, so this always
+checks the ipset's real live contents rather than trusting the cache.
+
+**`ping6` makes a comeback here, deliberately** — dropped as a
+*commit-gate* signal (unreliable, see above), but it's exactly the
+right tool to confirm the ipset fix itself actually worked, since
+ICMPv6 echo is the literal symptom being fixed.
+`_verify_subnet_ping_reachability()` pings every subnet-tracked,
+`ipv6_host`-based host after an ipset update — for the drift-triggered
+path, deliberately *after* the Group Update Plan's own pushes complete
+(checking right after the ipset update would ping addresses that don't
+exist on any interface yet). A failed check doesn't undo the ipset
+entry — there's no better state to fall back to — but does flag the
+overall result as failed and sends its own notification email, separate
+from the plain ipset-update notice, since "the API call succeeded" and
+"the fix actually worked end-to-end" are different questions worth
+answering separately.
+
+Add/manage tracking from the Config page, or directly:
+
+```bash
+curl -X POST http://localhost:5000/api/proxmox-ipset-tracking \
+  -H "Content-Type: application/json" \
+  -d '{"subnet": "mgmt", "ipset": "proxmox-cluster", "label": "mgmt subnet (VLAN 7)"}'
+
+curl -X POST http://localhost:5000/api/proxmox-ipset-tracking/mgmt/sync-now
 ```
 
 Verified against production: recomputing all six LAN devices' addresses
@@ -1312,6 +1437,10 @@ curl http://localhost:5000/api/update-groups
 # group's lock only if all of them check out
 curl -X POST http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/unlock
 
+# Run the group against each member's currently-expected target right
+# now, instead of waiting for an actual detected prefix change
+curl -X POST http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/sync-now
+
 # Add/remove a member
 curl -X POST http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/members \
   -H "Content-Type: application/json" -d '{"domain": "pve02.mgmt.alshowto.com"}'
@@ -1320,6 +1449,26 @@ curl -X DELETE http://localhost:5000/api/update-groups/mgmt-vlan-proxmox/members
 
 See [Group Update Plans](#group-update-plans-one-node-at-a-time-hard-stop-per-group-lockout)
 for what a group is, what engages a group's lock, and what "verify" actually checks.
+
+### Proxmox IPSet Tracking
+
+```bash
+# Subnets currently tracked into a Proxmox cluster ipset CIDR entry
+curl http://localhost:5000/api/proxmox-ipset-tracking
+
+# Start (or reconfigure) tracking a subnet
+curl -X POST http://localhost:5000/api/proxmox-ipset-tracking \
+  -H "Content-Type: application/json" \
+  -d '{"subnet": "mgmt", "ipset": "proxmox-cluster", "label": "mgmt subnet (VLAN 7)"}'
+
+# (Re)create the ipset entry right now, instead of waiting for a
+# detected prefix change -- needed for first-time setup, or after
+# someone removes the entry by hand
+curl -X POST http://localhost:5000/api/proxmox-ipset-tracking/mgmt/sync-now
+```
+
+See [Keeping a Proxmox firewall ipset in sync](#keeping-a-proxmox-firewall-ipset-in-sync-proxmox_ipset_tracking)
+for why this exists and the incident that led to it.
 
 ### SSH Key Management
 
@@ -1462,6 +1611,25 @@ and VLAN management:
 - **Verify & Unlock**: re-checks every member's live state and only
   clears that group's lock if all of them match expectations — a
   partial pass reports exactly which member(s) don't
+
+#### Proxmox Firewall IPSet Tracking
+- **Per-Subnet Status**: each tracked subnet's target ipset, the CIDR
+  currently recorded, and whether it matches what's actually live in the
+  Proxmox cluster ipset right now (not just the last-saved value)
+- **Sync Now**: force the ipset entry to be (re)created immediately —
+  needed for first-time setup, or to recover after someone removes the
+  entry by hand; the drift-triggered path alone can't tell either case
+  apart from "already correct"
+- Runs a `ping6`-based reachability check against every tracked host on
+  the subnet right after syncing, since ping is the actual symptom this
+  feature exists to fix — see [Keeping a Proxmox firewall ipset in
+  sync](#keeping-a-proxmox-firewall-ipset-in-sync-proxmox_ipset_tracking)
+  for why
+- Entries this feature manages are tagged `dnsmasq-ui-managed: <label>`
+  in the ipset comment so they stay identifiable among unrelated,
+  hand-maintained entries in the same cluster-wide ipset — never edit or
+  remove an entry without that prefix by hand without also updating the
+  tracking config here
 
 #### Dynamic DNS Tracking
 - **Tracked Hosts**: Cards showing each tracked host's zone, record type,
@@ -2016,6 +2184,72 @@ actual live config file on disk, whether the service actually reloaded it,
 and the value itself against the real host — rather than trusting the
 previous fix's commit message.
 
+### Incident: Proxmox mgmt-VLAN nodes unreachable by `ping6` (Aug 2026)
+
+Extending static IPv6 mgmt-VLAN tracking from one Proxmox node (`pve01`,
+already working) to three more (`pve04`, `pve06`, `pve3`) surfaced a chain
+of unrelated bugs, only one of which was actually a network problem:
+
+- **`ping6` to a freshly-applied address failed 100% of the time on
+  pve04 and pve06, while the address was fully usable.** The user loaded
+  each node's Proxmox web UI directly at the address `ping6` called
+  unreachable, and a plain TCP connect to the same address on port 8006
+  succeeded immediately. `ip6tables -L PVEFW-HOST-IN -n -v -x` showed the
+  ICMP echo requests being dropped by `ctstate INVALID` in conntrack
+  before ever reaching the explicit NDP-allow rules, while NDP itself
+  (types 133-136) passed cleanly. Ruled out before finding the fix:
+  missing firewall rules, IPv6 disabled via sysctl, stale conntrack
+  entries (`conntrack -F` — no change), NIC RX checksum offload (toggled
+  off on pve04's physical NIC as a live test — no change, reverted).
+  **Fix that actually worked**: adding the mgmt subnet's CIDR
+  (`2605:4a80:b009:c100::/64`) as an entry in the cluster-wide
+  `proxmox-cluster` ipset — not a narrower interface-scoped rule, which
+  reasoning about the conntrack chain suggested wouldn't help and which
+  the evidence bore out. Best working theory: any firewall/ipset change
+  forces Proxmox to recompile and reload its whole ruleset, clearing
+  whatever bad conntrack state existed; a rule-less restart
+  (`systemctl restart pve-firewall`) alone did not have the same effect.
+  Confirmed cluster-wide via corosync sync — pve06 started passing
+  `ping6` too, with no rule change made on pve06 itself.
+- Because that root cause was never fully explained at the kernel level
+  and `ping6` had already proven itself an unreliable signal even when
+  the address was genuinely reachable, `_validate_proxmox_reachability()`
+  was changed to gate on a TCP connect to the Proxmox API/UI port (8006)
+  instead — a real functional test that matches actual usability and
+  isn't vulnerable to whatever was eating ICMP echo. `ping6` was later
+  reintroduced, but only as a narrow, non-gating diagnostic inside the
+  ipset-sync path (see [Keeping a Proxmox firewall ipset in
+  sync](#keeping-a-proxmox-firewall-ipset-in-sync-proxmox_ipset_tracking)),
+  since ping *is* the actual symptom that feature exists to fix.
+- **The ipset fix is tied to the mgmt subnet's current delegated prefix**
+  and does nothing to protect itself against a future renumber — closed
+  by building `proxmox_ipset_tracking`, which keeps the ipset CIDR in
+  sync with the subnet's live prefix the same way interface addresses
+  already were.
+- **A provisioning code path (`provision_proxmox_interface_v6`, for
+  interfaces with no prior IPv6 config) had a diff-check bug**: its
+  "expected final state" was built only from the whitelist of fields it
+  had just written, not the full config Proxmox's API actually returns,
+  so it always saw an "unexpected diff" against fields it never touched
+  and reverted every time. Caught in a safe `apply=False` dry run before
+  it ever touched a real node.
+- **A request-concurrency race silently discarded a Group Update Plan's
+  lock.** Flask's dev server turned out to handle requests concurrently
+  despite no `threaded=True` being passed to `app.run()` — confirmed
+  directly (a second client's request completed while a slow `sync-now`
+  POST was still in flight). That raced against an unrelated
+  per-request config-reload fix added earlier for stale in-process state
+  across the 3-server deployment: a concurrent request's reload could
+  swap out the shared config object mid-flight, so a lock mutation
+  landed on an orphaned copy and vanished on save. Fixed with a global
+  `threading.Lock()` serializing the full request lifecycle.
+
+Lesson: when a "the network is down" symptom is inconsistent with
+directly observed usability (the address worked in a browser the whole
+time), trust the observed usability and treat the check itself as
+suspect — `ping6`'s reachability semantics on a firewalled network are
+not the same as "can a client actually talk to this service."
+
 ### keepalive check failing
 
 ```bash
@@ -2085,6 +2319,7 @@ MIT
 - [x] WireGuard mesh networking (v2.2) - full-mesh encrypted inter-node communication
 - [x] VLAN sub-interface management - persistent multi-subnet presence per server, provisioned live from the Config page
 - [x] Group Update Plans - pluggable script-based HA group updates (Proxmox VE VLAN presence first), self-reverting safety net, serialized per-member, hard-stop-and-lock per group on failure
+- [x] Proxmox firewall ipset tracking - keeps a cluster ipset CIDR entry in sync with a subnet's live prefix, closing the renumber-fragility gap left by the mgmt-VLAN `ctstate INVALID` fix
 
 ### Planned 📋
 - [ ] Zone file import/export
