@@ -290,9 +290,21 @@ def _get_local_global_ipv6_prefix():
     `dynamic` flag), the real RA/SLAAC address always carries `dynamic`.
     Only that one is a meaningful signal here; picking whichever global
     line happens to come first would sometimes just compare the configured
-    VIP against itself and silently never detect drift."""
+    VIP against itself and silently never detect drift.
+
+    Pinned to `eth0` specifically (the established "primary interface"
+    convention used throughout this file, e.g. add_subnet/add_dynamic_host's
+    `interface='eth0'` defaults) -- these DNS nodes are also dual-homed
+    onto the MGMT VLAN via `eth0.7`, which independently carries its own
+    unrelated global-dynamic /64. Without pinning to eth0, whichever of the
+    two happened to sort first in `ip addr show`'s output (order isn't
+    guaranteed stable across reboots/interface recreation) could get
+    compared against the VIP instead, false-alarming a "ISP renumbered"
+    drift notice against a subnet the VIP was never meant to track in the
+    first place. Confirmed live: both eth0 and eth0.7 show up as
+    `scope global dynamic` on all three DNS nodes."""
     try:
-        result = subprocess.run([IP_BIN, '-6', '-o', 'addr', 'show', 'scope', 'global', 'dynamic'],
+        result = subprocess.run([IP_BIN, '-6', '-o', 'addr', 'show', 'dev', 'eth0', 'scope', 'global', 'dynamic'],
                                  capture_output=True, text=True, timeout=5)
         for line in result.stdout.splitlines():
             parts = line.split()
