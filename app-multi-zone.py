@@ -1141,7 +1141,17 @@ class ZoneManager:
         forward zone at all, see generate_bind_reverse_zone_files()."""
         zone_name = zone['name']
         soa = zone.get('soa') or {}
-        ns_hostnames = self.config.get('global', {}).get('ns_hostnames', [])
+        # Per-zone override for the actual NS record set, falling back
+        # to the global convention (dns01/02/03.ad.alshowto.com) used by
+        # every internal-only zone today. Needed for a zone with its own
+        # distinct public nameserver identity (e.g. rv-tx.com's
+        # ns1.rv-tx.com, delegated from its registrar) -- without this,
+        # any deploy (including the automatic one after every ACME
+        # challenge write, see api_add_acme_challenge) would silently
+        # replace that zone's correct NS records with the internal
+        # convention, since ns_hostnames was previously always global
+        # with no per-zone escape hatch.
+        ns_hostnames = zone.get('ns_hostnames') or self.config.get('global', {}).get('ns_hostnames', [])
         primary_ns = soa.get('ns') or (ns_hostnames[0] if ns_hostnames else f'ns1.{zone_name}')
         contact = soa.get('contact', 'admin.alshowto.com')
         if '@' in contact:
