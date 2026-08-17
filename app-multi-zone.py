@@ -1343,22 +1343,36 @@ class ZoneManager:
 
     def _deploy_bind_zones(self, server_name, server_ip, reverse_files):
         """Push every zone this server should have to it: forward zones
-        (all of them, except mgmt.alshowto.com if this server isn't the
-        designated signing primary -- it gets that one via BIND's own
-        AXFR instead, once NOTIFYed by the primary) plus every reverse
-        zone. Each zone is checked with named-checkzone before rndc
-        reload -- a bad record aborts just that zone's reload, not the
-        whole server's deploy."""
+        (all of them, except a zone's designated dynamic_primary is set
+        and this server isn't it -- that zone gets pushed here via BIND's
+        own AXFR instead, once NOTIFYed by the primary) plus every
+        reverse zone. Each zone is checked with named-checkzone before
+        rndc reload -- a bad record aborts just that zone's reload, not
+        the whole server's deploy.
+
+        dynamic_primary (a server name, e.g. 'dns01'): set on any zone
+        that has an RFC2136 update-policy for self-hosted ACME DNS-01
+        (mgmt.alshowto.com, rv-tx.com as of 2026-08-17 -- see the rv-tx
+        project's own memory for why a second zone needed this). Such a
+        zone is "dynamic" in BIND's sense and lives in the "public" view
+        on its primary -- a plain `rndc reload` from an externally
+        rewritten flat file is refused there (BIND won't discard
+        legitimate journal-only updates), and only the primary should
+        get a direct file push at all; secondaries pull it via AXFR like
+        any other secondary relationship. Previously hardcoded to
+        mgmt.alshowto.com by name -- generalized so a new self-hosted
+        zone doesn't need a second hardcoded name comparison here."""
         zone_results = {}
         for zone in self.get_zones():
-            if zone['name'] == _BIND_MGMT_ZONE and server_name != _BIND_MGMT_SIGNING_PRIMARY:
+            dynamic_primary = zone.get('dynamic_primary')
+            if dynamic_primary and server_name != dynamic_primary:
                 continue
             content = self.generate_bind_zone_file(zone)
-            if zone['name'] == _BIND_MGMT_ZONE:
-                # Only reached on the signing primary (see the skip
+            if dynamic_primary:
+                # Only reached on the designated primary (see the skip
                 # above) -- see _deploy_bind_zone's docstring for why
-                # this zone specifically needs a view qualifier and
-                # freeze/thaw instead of a plain reload.
+                # a dynamic zone needs a view qualifier and freeze/thaw
+                # instead of a plain reload.
                 zone_results[zone['name']] = self._deploy_bind_zone(
                     server_ip, zone['name'], content, view='public', dynamic=True)
             else:
