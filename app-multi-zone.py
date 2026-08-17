@@ -897,15 +897,27 @@ class ZoneManager:
         return max(candidates, key=lambda z: len(z['name']))
 
     def add_txt_challenge(self, fulldomain, value):
-        """Publish an ACME DNS-01 challenge TXT record via whichever
-        backend is currently authoritative -- see ACME_DNS_BACKEND."""
+        """Publish an ACME DNS-01 challenge TXT record. Routes per-domain:
+        if fulldomain falls under a zone we host locally (e.g.
+        rv-tx.com), use the local backend regardless of
+        ACME_DNS_BACKEND -- that global setting only picks the backend
+        for domains with NO local zone match (today, that's everything
+        under alshowto.com, still Cloudflare-authoritative). Without
+        this check, flipping ACME_DNS_BACKEND to 'local' for a new
+        self-hosted domain would also silently break every existing
+        Cloudflare-backed renewal (e.g. pangolin.alshowto.com's live
+        acme.sh hook)."""
+        if self._zone_for_domain(fulldomain):
+            return self._add_txt_challenge_local(fulldomain, value)
         if ACME_DNS_BACKEND == 'cloudflare':
             return _cloudflare_add_txt(fulldomain, value)
         return self._add_txt_challenge_local(fulldomain, value)
 
     def remove_txt_challenge(self, fulldomain, value):
-        """Remove one specific ACME challenge TXT value via whichever
-        backend is currently authoritative -- see ACME_DNS_BACKEND."""
+        """Remove one specific ACME challenge TXT value. See
+        add_txt_challenge for the per-domain routing rationale."""
+        if self._zone_for_domain(fulldomain):
+            return self._remove_txt_challenge_local(fulldomain, value)
         if ACME_DNS_BACKEND == 'cloudflare':
             return _cloudflare_remove_txt(fulldomain, value)
         return self._remove_txt_challenge_local(fulldomain, value)
@@ -4629,11 +4641,16 @@ def api_add_acme_challenge():
     if not success:
         return jsonify({'success': False, 'message': message}), 404
 
-    # Only the 'local' backend actually changes zones.json -- pushing to
-    # dns31/32/33 and restarting dnsmasq on all three for a Cloudflare-
-    # backed challenge would just be a pointless DNS service blip on
-    # every single cert renewal, since nothing local changed at all.
-    deploy_results = manager.deploy_to_servers() if ACME_DNS_BACKEND == 'local' else None
+    # Only actually deploy when this call took the local-zone-file path
+    # (see add_txt_challenge's per-domain routing) -- pushing to
+    # dns31/32/33 and restarting dnsmasq for a Cloudflare-backed
+    # challenge would be a pointless DNS service blip, since nothing
+    # local changed. Mirrors the same routing check add_txt_challenge
+    # itself just made, not the global ACME_DNS_BACKEND setting, or a
+    # per-domain-local challenge would be written to zones.json but
+    # never actually pushed to the real servers.
+    used_local = manager._zone_for_domain(fulldomain) is not None or ACME_DNS_BACKEND == 'local'
+    deploy_results = manager.deploy_to_servers() if used_local else None
     return jsonify({'success': True, 'message': message, 'deploy': deploy_results})
 
 @app.route('/api/acme-challenge', methods=['DELETE'])
@@ -4657,7 +4674,10 @@ def api_remove_acme_challenge():
     if not success:
         return jsonify({'success': False, 'message': message}), 404
 
-    deploy_results = manager.deploy_to_servers() if ACME_DNS_BACKEND == 'local' else None
+    # See api_add_acme_challenge for why this checks the per-domain
+    # route, not just the global ACME_DNS_BACKEND setting.
+    used_local = manager._zone_for_domain(fulldomain) is not None or ACME_DNS_BACKEND == 'local'
+    deploy_results = manager.deploy_to_servers() if used_local else None
     return jsonify({'success': True, 'message': message, 'deploy': deploy_results})
 
 @app.route('/api/deploy', methods=['POST'])
