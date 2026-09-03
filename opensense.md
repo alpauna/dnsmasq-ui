@@ -165,6 +165,55 @@ Deliberately left alone: hardware checksum offload. Enabling it on
 virtio has a history of pf/vtnet checksum bugs, and the guest is not
 CPU-bound, so the risk is not worth it right now.
 
+## Why OPNsense is slower on pve01 than on pve06 (measured 2026-09-03)
+
+The user migrated VM 106 (now 8 vCPU, `cpu: host`, `queues=6`) to pve01
+and the same tests were repeated from VM 119.
+
+| Through OPNsense | on pve06 (Ryzen 7600X, bnx2x) | on pve01 (Xeon E5-2683 v4, Chelsio T320) |
+|---|---|---|
+| Speedtest download | 4282 to 4324 Mbps | 4262 to 4505 Mbps |
+| Speedtest upload | 4943 to 4990 Mbps | 2968 to 3191 Mbps |
+| iperf3 LAN to VLAN 7, 4 streams | 6.92 Gbps | 3.94 Gbps |
+| iperf3 VLAN 7 to LAN, 4 streams | 6.14 Gbps | 3.80 Gbps |
+| iperf3 single stream | 4.09 Gbps | 2.96 Gbps |
+| Guest vCPU threads on the host during routed iperf3 | 40 to 53% | 95 to 100% (four of them pegged), vhost 80 to 92% |
+
+Causes, in order of weight:
+
+1. **Per-core speed.** OPNsense forwards each flow on one core, one
+   queue at a time. The E5-2683 v4 runs 2.1 GHz base / 3.0 GHz turbo
+   (2016 Broadwell); the 7600X runs 5.4 GHz. On pve01 the vCPU threads
+   peg at 95 to 100% under the routed load where pve06 had half its
+   headroom left. More vCPUs (8 instead of 6) do not help because each
+   flow is still bound to one slow core.
+2. **Hairpin through one 10G port on an old bus.** Every routed byte
+   enters and leaves the router host on the same NIC port. Measured on
+   pve01 during a download: `ens4` rx 4.19 Gbps and tx 4.10 Gbps at the
+   same time. pve01's Chelsio T320 is a PCIe gen1 x8 card (2.5 GT/s,
+   about 16 Gbit usable) shared by both ports, and the second port
+   (`ens4d1`) carries the Ceph/storage VLAN with 0.2 to 0.6 Gbps of
+   background traffic. At 5 Gbps line rate the hairpin alone needs 10
+   Gbit of that bus. pve06's card sits on a modern PCIe link.
+3. **Four receive queues.** cxgb3 exposes 4 queue sets per port (IRQs on
+   4 CPUs); pve3's ixgbe has 63 and pve06's bnx2x 3 but on a much faster
+   core. Host-to-host pve01 still does 9.7 Gbps with jumbo frames and
+   6.8 Gbps single-stream at 1500 bytes, so the NIC is not the first
+   limit, but it leaves no margin.
+
+pve3 has the same Xeon as pve01, so why did OPNsense feel faster there?
+When the router lived on pve3 the speedtester VMs were on the same host:
+the LAN leg never touched a physical NIC, only the WAN leg did, so the
+hairpin cost disappeared and pve3's Intel ixgbe (PCIe gen2, 63 queues,
+interrupts spread over 32 CPUs) carried half the load pve01's Chelsio
+carries. Same CPU, half the NIC work.
+
+Recommendation: keep OPNsense on pve06 and pin it there with an HA group
+preference; treat pve01 as the emergency fallback and expect about 4.3
+down / 3.0 up on it. Also note `rtr-adm-01` (VM 116, the mgmt VLAN
+router on pve01) still runs `cpu: kvm64` with single-queue NICs, the
+same two handicaps VM 106 had before today.
+
 ## Side findings
 
 - **IPv6 DNS was refused by BIND on all three servers since the 08-13
