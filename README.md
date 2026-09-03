@@ -458,6 +458,25 @@ emails whatever address is configured for email 2FA, with a reminder to
 update `keepalive_vip6` in `zones.json` and `virtual_ipaddress` in
 `keepalived.conf` on all three servers by hand.
 
+##### BIND IPv6 client ACL
+
+Reaching the servers over IPv6 is only half of it: BIND's
+`allow-query`/`allow-recursion` lists (`allowed_query_networks` in
+`ansible/bind9-setup.yml`) were IPv4 + loopback only, so every IPv6 query
+— global *or* link-local source — was answered REFUSED from the BIND
+cutover (2026-08-13) until this was found on 2026-09-03 while verifying
+the auto-tracked VIP. A static IPv6 network can't fix that permanently
+because the delegated prefix changes, so the IPv6 side is generated: the
+named ACL `dnsmasq-ui-subnets-v6` (file
+`/etc/bind/named.conf.dnsmasq-ui-acl`, included from `/etc/bind/named.conf`
+and referenced by name in the query lists) holds every tracked subnet's
+live `prefix_v6` plus `fe80::/10`, and `ZoneManager.deploy_bind_client_acl`
+re-pushes it (`named-checkconf`, then `rndc reconfig`) to every bind9
+server on each subnet prefix change, before the VIP move. `POST
+/api/bind-acl/sync-now` pushes it on demand; a failed push is emailed.
+The playbook seeds a placeholder (`fe80::/10` only, `force: no`) so named
+can start on a fresh host before dnsmasq-ui has pushed the real file.
+
 ## Configuration
 
 ### zones.json

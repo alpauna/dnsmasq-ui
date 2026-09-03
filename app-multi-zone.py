@@ -2682,6 +2682,14 @@ class ZoneManager:
                 self.save_config()
             self._notify_proxmox_ipset_update(subnet_name, old_cidr, new_prefix, ipset_ok, ipset_msg)
 
+        # Every tracked subnet's IPv6 prefix is also an entry in BIND's
+        # client ACL (allow-query/allow-recursion). Refresh that first, so
+        # clients already on the new prefix stop getting REFUSED before
+        # anything below hands out addresses on it.
+        acl_ok, acl_results = self.deploy_bind_client_acl()
+        (logger.warning if acl_ok else logger.error)(
+            f"BIND IPv6 client ACL after subnet '{subnet_name}' change: {'OK' if acl_ok else 'FAILED'} — {acl_results}")
+
         # The IPv6 VIP lives on one of these subnets and is addressed the
         # same way (prefix + fixed host suffix) — move it now, off the
         # same detected change, rather than waiting for the drift check
@@ -3424,6 +3432,74 @@ class ZoneManager:
                            "the VIP may be reachable on some nodes and not others. Re-run with "
                            "POST /api/vip6/sync-now once the cause is addressed.") +
             f"\n\nDashboard: {DASHBOARD_URL}/config")
+
+    # ---- BIND IPv6 client ACL ---------------------------------------------
+    # BIND's allow-query/allow-recursion lists (ansible/bind9-setup.yml's
+    # allowed_query_networks) were IPv4 + loopback only, so every IPv6
+    # query -- global or link-local source -- was REFUSED from the 2026-08-13
+    # cutover until 2026-09-03 (found while verifying the auto-tracked VIP:
+    # BIND listened on it fine and answered "query denied"). A static IPv6
+    # entry can't work here because the ISP renumbers the delegated prefix,
+    # so the IPv6 side of that ACL is generated from global.subnets'
+    # tracked prefix_v6 values and re-pushed on every prefix change.
+
+    BIND_CLIENT_ACL_FILE = '/etc/bind/named.conf.dnsmasq-ui-acl'
+    BIND_CLIENT_ACL_NAME = 'dnsmasq-ui-subnets-v6'
+
+    def generate_bind_client_acl(self):
+        """named.conf fragment defining acl "dnsmasq-ui-subnets-v6": every
+        tracked subnet's current IPv6 /64 plus fe80::/10 (on-link clients
+        that were handed the servers' link-local addresses via RA RDNSS
+        query from a link-local source). Referenced by name from the
+        allow-query/allow-recursion lists; the include line itself is
+        wired once by ansible/bind9-setup.yml, not by this code."""
+        prefixes = sorted({s['prefix_v6'] for s in self.get_subnets().values() if s.get('prefix_v6')})
+        entries = prefixes + ['fe80::/10']
+        return (
+            "// Managed by dnsmasq-ui (ZoneManager.deploy_bind_client_acl) -- regenerated whenever a\n"
+            "// tracked subnet's IPv6 prefix changes (global.subnets[*].prefix_v6) and on\n"
+            "// POST /api/bind-acl/sync-now. Do not edit by hand; edits are overwritten.\n"
+            "// Referenced by name from allow-query / allow-recursion in named.conf.options and\n"
+            "// named.conf.local; the include line lives in /etc/bind/named.conf (ansible/bind9-setup.yml).\n"
+            f'acl "{self.BIND_CLIENT_ACL_NAME}" {{\n' + "".join(f"\t{e};\n" for e in entries) + "};\n"
+        )
+
+    def deploy_bind_client_acl(self):
+        """Write the ACL fragment to every enabled bind9 server, validate
+        with named-checkconf and apply with `rndc reconfig` (config-only
+        reload; ACL changes take effect without touching zone data).
+        Returns (all_ok, {server: {'success', 'message'}}). A failure on
+        one server doesn't stop the others; failures are emailed."""
+        content = self.generate_bind_client_acl()
+        results, all_ok = {}, True
+        for name, server in self.get_servers().items():
+            if not server.get('enabled', True) or server.get('dns_backend', 'dnsmasq') != 'bind9':
+                continue
+            ip = server['ip']
+            try:
+                self._write_remote_root_file(ip, content, self.BIND_CLIENT_ACL_FILE,
+                                             mode='644', owner='root', group='bind')
+            except Exception as e:
+                results[name] = {'success': False, 'message': f"upload failed: {e}"}
+                all_ok = False
+                continue
+            ok, out = self._run_remote_root_command(ip, "named-checkconf && rndc reconfig")
+            results[name] = {'success': ok, 'message': (out.strip() or ('reconfigured' if ok else 'failed'))}
+            if not ok:
+                all_ok = False
+        (logger.info if all_ok else logger.error)(f"BIND IPv6 client ACL deploy: {results}")
+        if not all_ok:
+            auth_config = _load_auth() or {}
+            to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+            if to_addr:
+                _send_email(
+                    to_addr, 'dnsmasq-ui: BIND IPv6 client ACL update FAILED',
+                    "dnsmasq-ui tried to push the regenerated BIND IPv6 client ACL "
+                    f"({self.BIND_CLIENT_ACL_FILE}) and at least one server failed:\n\n" +
+                    "\n".join(f"  - {n}: {'OK' if r['success'] else 'FAILED'} — {r['message']}" for n, r in results.items()) +
+                    "\n\nUntil fixed, IPv6 clients on the new prefix get REFUSED from that server. "
+                    f"Retry with POST /api/bind-acl/sync-now.\n\nDashboard: {DASHBOARD_URL}/config")
+        return all_ok, results
 
     def _load_device_credentials(self):
         """Decrypt and return all stored device credentials as
@@ -5083,6 +5159,14 @@ def api_vip6_sync_now():
     changed, ok, message = manager.reconcile_ipv6_vip(reason='manual sync-now', force=True)
     return jsonify({'success': ok, 'changed': changed, 'message': message,
                     'vip6': manager.config.get('global', {}).get('keepalive_vip6')})
+
+@app.route('/api/bind-acl/sync-now', methods=['POST'])
+def api_bind_acl_sync_now():
+    """API: Regenerate and push the BIND IPv6 client ACL (every tracked
+    subnet's live prefix + fe80::/10) to all bind9 servers right now —
+    first-time setup, or a retry after a failed automatic push."""
+    ok, results = manager.deploy_bind_client_acl()
+    return jsonify({'success': ok, 'results': results, 'acl': manager.generate_bind_client_acl()})
 
 @app.route('/api/subnets', methods=['GET'])
 def api_subnets_list():

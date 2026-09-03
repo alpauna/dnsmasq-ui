@@ -159,6 +159,14 @@ CPU-bound, so the risk is not worth it right now.
 
 ## Side findings
 
+- **IPv6 DNS was refused by BIND on all three servers since the 08-13
+  cutover.** `allow-query`/`allow-recursion` listed only IPv4 networks and
+  loopback, so any query from a global or link-local IPv6 source got
+  `REFUSED` ("view internal: query denied" in the named log). Found on
+  2026-09-03 while checking the moved VIP. Fixed by a dnsmasq-ui-generated
+  ACL of the tracked subnets' live prefixes (see README, "BIND IPv6
+  client ACL"), re-pushed automatically on prefix change.
+
 - LAN IPv6 is not working end to end. The router's LAN interface tracks
   the WAN prefix (`2605:4a80:b004:4070::/64`), but VM 119 holds an
   address from a different prefix (`2605:4a80:b000:f800::/64`) and has
