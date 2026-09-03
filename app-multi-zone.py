@@ -3483,7 +3483,12 @@ class ZoneManager:
                 results[name] = {'success': False, 'message': f"upload failed: {e}"}
                 all_ok = False
                 continue
-            ok, out = self._run_remote_root_command(ip, "named-checkconf && rndc reconfig")
+            # One sh -c so BOTH halves run under _run_remote_root_command's
+            # sudo, with absolute paths: the SSH user's PATH has no
+            # /usr/sbin, and `sudo a && b` only elevates `a` (first push
+            # attempt failed exactly that way: "rndc: command not found").
+            ok, out = self._run_remote_root_command(
+                ip, f"sh -c {shlex.quote('/usr/sbin/named-checkconf && /usr/sbin/rndc reconfig')}")
             results[name] = {'success': ok, 'message': (out.strip() or ('reconfigured' if ok else 'failed'))}
             if not ok:
                 all_ok = False
