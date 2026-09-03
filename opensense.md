@@ -155,8 +155,9 @@ hashing cost more than the spreading gained:
 | iperf3 single stream | 4.09 Gbps | 3.48 Gbps |
 | Busiest core during download | 46% interrupt (2 cores active) | 62 to 73% interrupt on all 6 |
 
-So the router runs without RSS (file removed, rebooted again). Both
-reboots kept the delegated prefix, confirming "Prevent release" works.
+So the router runs without RSS (file removed, rebooted again; after that
+reboot: 4282/4990 and 4324/4943 Mbps). Both reboots kept the delegated
+prefix, confirming "Prevent release" works.
 The remaining gap to the 5.2 Gbps line rate is not worth more router
 tuning; the practical ceiling for this VM is about 4.2 Gbps routed.
 
