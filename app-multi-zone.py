@@ -2396,7 +2396,7 @@ class ZoneManager:
         self.save_config()
         return True, f"Now tracking subnet '{subnet_name}' into ipset '{ipset}'"
 
-    def _verify_subnet_ping_reachability(self, subnet_name, timeout=5):
+    def _verify_subnet_ping_reachability(self, subnet_name, timeout=5, prefix_v6=None):
         """Ping every subnet-tracked, ipv6_host-based dynamic_hosts
         entry on the given subnet — used specifically to confirm a
         Proxmox ipset/firewall change actually fixed the ICMPv6
@@ -2407,11 +2407,19 @@ class ZoneManager:
         replaced it there — but it's exactly the right tool here, since
         ping is the actual symptom the ipset fix targets.
 
+        prefix_v6: the prefix to compute addresses under. Callers that
+        just detected a prefix change MUST pass the new prefix
+        explicitly rather than relying on self.config — during the
+        2026-08-31 mgmt renumber this re-read a config object that a
+        concurrent request had reloaded from disk, and so pinged the
+        old, now-nonexistent addresses for three days straight.
+
         Returns (all_ok, details) — details is a list of
         {'domain', 'ok', 'detail'} regardless of outcome, empty list
         (all_ok=True) if there's nothing on this subnet to check.
         """
-        prefix_v6 = self.get_subnets().get(subnet_name, {}).get('prefix_v6')
+        if prefix_v6 is None:
+            prefix_v6 = self.get_subnets().get(subnet_name, {}).get('prefix_v6')
         if not prefix_v6:
             return False, [{'domain': None, 'ok': False,
                              'detail': f"subnet '{subnet_name}' has no live prefix_v6 to check against"}]
@@ -2459,44 +2467,25 @@ class ZoneManager:
         if not current_prefix:
             return False, f"Subnet '{subnet_name}' has no live prefix_v6 to sync"
 
-        node = next(iter(PROXMOX_NODE_IPS), None)
-        if not node:
-            return False, "No Proxmox nodes configured (PROXMOX_NODES/PROXMOX_IPS)"
+        # Same idempotent add-verify-retire-old logic as the drift path
+        # (update_proxmox_ipset_cidr) — it already copes with "new entry
+        # present, stale old one still there" from an earlier partial
+        # run, which is exactly what a manual Sync Now is for. A
+        # recorded cidr equal to the live prefix just means there's
+        # nothing stale to retire; the entry itself still gets
+        # (re)created if a human removed it by hand.
         ipset = tracking['ipset']
-        ok, output = self._run_proxmox_ssh_command(
-            node, f"pvesh get /cluster/firewall/ipset/{shlex.quote(ipset)} --output-format json")
+        old_cidr = tracking.get('cidr')
+        if old_cidr == current_prefix:
+            old_cidr = None
+        ok, base_msg = self.update_proxmox_ipset_cidr(
+            ipset, old_cidr, current_prefix, tracking.get('label', subnet_name))
         if not ok:
-            return False, f"Failed to read ipset '{ipset}': {output}"
-        try:
-            entries = json.loads(output)
-        except Exception as e:
-            return False, f"Failed to parse ipset '{ipset}' listing: {e}"
-
-        already_present = any(e.get('cidr') == current_prefix for e in entries)
-        if not already_present:
-            old_cidr = tracking.get('cidr')
-            comment = f"{self._PROXMOX_IPSET_COMMENT_PREFIX}{tracking.get('label', subnet_name)}"
-            ok, output = self._run_proxmox_ssh_command(
-                node, f"pvesh create /cluster/firewall/ipset/{shlex.quote(ipset)} "
-                      f"--cidr {shlex.quote(current_prefix)} --comment {shlex.quote(comment)}")
-            if not ok:
-                return False, f"Failed to add ipset entry {current_prefix}: {output}"
-
-            if old_cidr and old_cidr != current_prefix and any(e.get('cidr') == old_cidr for e in entries):
-                old_cidr_encoded = urllib.parse.quote(old_cidr, safe='')
-                ok, output = self._run_proxmox_ssh_command(
-                    node, f"pvesh delete /cluster/firewall/ipset/{shlex.quote(ipset)}/{old_cidr_encoded}")
-                if not ok:
-                    tracking['cidr'] = current_prefix
-                    self.save_config()
-                    return False, (f"Added {current_prefix} but failed to remove stale old entry {old_cidr} "
-                                    f"(both now present, safe but should be cleaned up manually): {output}")
+            return False, base_msg
 
         tracking['cidr'] = current_prefix
         self.save_config()
 
-        base_msg = (f"ipset '{ipset}' already has {current_prefix} — nothing to do" if already_present
-                    else f"ipset '{ipset}' now has {current_prefix}")
         ping_ok, ping_details = self._verify_subnet_ping_reachability(subnet_name)
         if not ping_details:
             return True, base_msg
@@ -2533,33 +2522,58 @@ class ZoneManager:
         if not node:
             return False, "No Proxmox nodes configured (PROXMOX_NODES/PROXMOX_IPS)"
 
-        comment = f"{self._PROXMOX_IPSET_COMMENT_PREFIX}{label}"
-        create_cmd = (f"pvesh create /cluster/firewall/ipset/{shlex.quote(ipset)} "
-                       f"--cidr {shlex.quote(new_cidr)} --comment {shlex.quote(comment)}")
-        ok, output = self._run_proxmox_ssh_command(node, create_cmd)
-        if not ok:
-            return False, f"Failed to add new ipset entry {new_cidr}: {output}"
-
-        try:
+        def list_entries():
             ok, output = self._run_proxmox_ssh_command(
                 node, f"pvesh get /cluster/firewall/ipset/{shlex.quote(ipset)} --output-format json")
-            entries = json.loads(output) if ok else []
+            if not ok:
+                raise RuntimeError(output)
+            return json.loads(output)
+
+        # Idempotent: a retry after a partial earlier run (new CIDR
+        # added, old one not yet removed) must pick up where it left off
+        # rather than dying on pvesh's "already exists" — that exact
+        # failure looped hourly for three days after the 2026-08-31
+        # mgmt renumber.
+        try:
+            entries = list_entries()
         except Exception as e:
-            return False, f"Added {new_cidr} but couldn't verify it landed (old entry {old_cidr} left in place, safe): {e}"
-        if not any(e.get('cidr') == new_cidr for e in entries):
-            return False, f"Added {new_cidr} but it isn't showing up in the ipset (old entry {old_cidr} left in place, safe)"
+            return False, f"Couldn't read ipset '{ipset}' (nothing changed): {e}"
 
-        if not old_cidr or not any(e.get('cidr') == old_cidr for e in entries):
+        if any(e.get('cidr') == new_cidr for e in entries):
+            add_msg = f"{new_cidr} already present"
+        else:
+            comment = f"{self._PROXMOX_IPSET_COMMENT_PREFIX}{label}"
+            create_cmd = (f"pvesh create /cluster/firewall/ipset/{shlex.quote(ipset)} "
+                           f"--cidr {shlex.quote(new_cidr)} --comment {shlex.quote(comment)}")
+            ok, output = self._run_proxmox_ssh_command(node, create_cmd)
+            if not ok and 'already exists' not in output:
+                return False, f"Failed to add new ipset entry {new_cidr}: {output}"
+            try:
+                entries = list_entries()
+            except Exception as e:
+                return False, f"Added {new_cidr} but couldn't verify it landed (old entry {old_cidr} left in place, safe): {e}"
+            if not any(e.get('cidr') == new_cidr for e in entries):
+                return False, f"Added {new_cidr} but it isn't showing up in the ipset (old entry {old_cidr} left in place, safe)"
+            add_msg = f"added {new_cidr}"
+
+        old_entry = next((e for e in entries if old_cidr and e.get('cidr') == old_cidr), None)
+        if old_entry is None:
             return True, f"ipset '{ipset}' now has {new_cidr} (no prior {old_cidr!r} entry to remove)"
+        if not (old_entry.get('comment') or '').startswith(self._PROXMOX_IPSET_COMMENT_PREFIX):
+            return True, (f"ipset '{ipset}': {add_msg}; left {old_cidr} alone because it isn't tagged "
+                          f"'{self._PROXMOX_IPSET_COMMENT_PREFIX}' (hand-maintained entry, not ours to remove)")
 
-        old_cidr_encoded = urllib.parse.quote(old_cidr, safe='')
+        # pvesh takes the CIDR verbatim as a path component and does NOT
+        # URL-decode it — a percent-encoded CIDR fails its schema check
+        # with "invalid format" (verified read-only against pvesh get).
+        # shlex.quote leaves ':' and '/' alone, so this stays raw.
         ok, output = self._run_proxmox_ssh_command(
-            node, f"pvesh delete /cluster/firewall/ipset/{shlex.quote(ipset)}/{old_cidr_encoded}")
+            node, f"pvesh delete /cluster/firewall/ipset/{shlex.quote(ipset)}/{shlex.quote(old_cidr)}")
         if not ok:
-            return False, (f"Added {new_cidr} but failed to remove old entry {old_cidr} — both are now "
+            return False, (f"ipset '{ipset}': {add_msg}, but failed to remove old entry {old_cidr} — both are now "
                             f"present (safe, but the stale one should be cleaned up manually): {output}")
 
-        return True, f"ipset '{ipset}' updated: {old_cidr} -> {new_cidr}"
+        return True, f"ipset '{ipset}' updated: {old_cidr} -> {new_cidr} ({add_msg}, old entry removed)"
 
     def _notify_proxmox_ipset_update(self, subnet_name, old_cidr, new_cidr, success, message):
         auth_config = _load_auth() or {}
@@ -2581,26 +2595,42 @@ class ZoneManager:
             return
         _send_email(to_addr, f"dnsmasq-ui: Proxmox ipset update {status} (subnet: {subnet_name})", body)
 
-    def _notify_proxmox_ipset_ping_failure(self, subnet_name, failed_domains):
+    def _notify_proxmox_ipset_ping_failure(self, subnet_name, failed_domains, new_prefix, ipset_ok, ipset_msg):
         """Email when the post-update ping6 check (see
         _verify_subnet_ping_reachability) still fails after an ipset
-        CIDR update that itself succeeded — the ipset entry is correct
-        and was kept (there's no better state to revert to), but the
-        underlying connectivity issue it's meant to fix may not
-        actually be resolved. Separate from _notify_proxmox_ipset_update
-        since this is a distinct, later signal (checked only after the
-        Group Update Plan has actually pushed the new addresses)."""
+        CIDR update. Wording depends on whether that update actually
+        succeeded (ipset_ok/ipset_msg): if it did, the entry is correct
+        and was kept (there's no better state to revert to) and the
+        underlying connectivity issue may genuinely not be resolved; if
+        it didn't, say so plainly instead of claiming success — the
+        original version hard-coded "updated successfully" and sent
+        that, wrongly, 64 times after the 2026-08-31 mgmt renumber.
+        Separate from _notify_proxmox_ipset_update since this is a
+        distinct, later signal (checked only after the Group Update
+        Plan has actually pushed the new addresses)."""
         auth_config = _load_auth() or {}
         to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+        if ipset_ok:
+            ipset_line = (f"Subnet '{subnet_name}''s Proxmox firewall ipset entry was updated successfully "
+                          f"({ipset_msg}), but a ")
+            advice = ("The ipset entry itself is correct (nothing better to fall back to, so it was kept). "
+                      "This means the ICMPv6 ctstate-INVALID workaround this entry provides may not have taken "
+                      "effect this time — see project notes on this class of issue for troubleshooting steps "
+                      "(check pve-firewall's ip6tables counters directly, consider a firewall rule change "
+                      "anywhere in the cluster to force a recompile).")
+        else:
+            ipset_line = (f"Subnet '{subnet_name}''s Proxmox firewall ipset update FAILED "
+                          f"({ipset_msg}), and a ")
+            advice = ("Because the ipset update itself failed, the most likely cause is simply that the "
+                      "ICMPv6 ctstate-INVALID workaround entry is missing or stale for the new prefix — "
+                      "fix the ipset first (Config page -> Proxmox ipset tracking -> Sync Now, or by hand), "
+                      "then re-check ping before suspecting anything else.")
         body = (
-            f"Subnet '{subnet_name}''s Proxmox firewall ipset entry was updated successfully, but a "
-            f"follow-up ping6 check still failed for {len(failed_domains)} host(s):\n\n" +
+            ipset_line +
+            f"follow-up ping6 check (against the new prefix {new_prefix}) failed for "
+            f"{len(failed_domains)} host(s):\n\n" +
             "\n".join(f"  - {d}" for d in failed_domains) +
-            "\n\nThe ipset entry itself is correct (nothing better to fall back to, so it was kept). "
-            "This means the ICMPv6 ctstate-INVALID workaround this entry provides may not have taken "
-            "effect this time — see project notes on this class of issue for troubleshooting steps "
-            "(check pve-firewall's ip6tables counters directly, consider a firewall rule change "
-            "anywhere in the cluster to force a recompile).\n\n"
+            f"\n\n{advice}\n\n"
             f"Dashboard: {DASHBOARD_URL}/config"
         )
         if not to_addr:
@@ -2639,15 +2669,17 @@ class ZoneManager:
         logger.warning(f"Subnet '{subnet_name}' prefix changed: {old_prefix} -> {new_prefix}")
 
         ipset_tracking = self.get_proxmox_ipset_tracking().get(subnet_name)
+        ipset_ok, ipset_msg = None, None
         if ipset_tracking:
             old_cidr = ipset_tracking.get('cidr') or old_prefix
-            ok, msg = self.update_proxmox_ipset_cidr(
+            ipset_ok, ipset_msg = self.update_proxmox_ipset_cidr(
                 ipset_tracking['ipset'], old_cidr, new_prefix, ipset_tracking.get('label', subnet_name))
-            logger.warning(f"Proxmox ipset tracking for subnet '{subnet_name}': {'OK' if ok else 'FAILED'} — {msg}")
-            if ok:
+            logger.warning(f"Proxmox ipset tracking for subnet '{subnet_name}': "
+                           f"{'OK' if ipset_ok else 'FAILED'} — {ipset_msg}")
+            if ipset_ok:
                 ipset_tracking['cidr'] = new_prefix
                 self.save_config()
-            self._notify_proxmox_ipset_update(subnet_name, old_cidr, new_prefix, ok, msg)
+            self._notify_proxmox_ipset_update(subnet_name, old_cidr, new_prefix, ipset_ok, ipset_msg)
 
         for group_name, group in self.get_update_groups().items():
             member_targets = {}
@@ -2664,13 +2696,15 @@ class ZoneManager:
                 self.run_update_group(group_name, member_targets)
 
         if ipset_tracking:
-            ping_ok, ping_details = self._verify_subnet_ping_reachability(subnet_name)
+            # new_prefix passed explicitly — never re-read from self.config
+            # here, see _verify_subnet_ping_reachability's docstring.
+            ping_ok, ping_details = self._verify_subnet_ping_reachability(subnet_name, prefix_v6=new_prefix)
             if ping_details:
-                logger.warning(f"Post-update ping6 verification for subnet '{subnet_name}': "
+                logger.warning(f"Post-update ping6 verification for subnet '{subnet_name}' ({new_prefix}): "
                               f"{'OK' if ping_ok else 'FAILED'} — {ping_details}")
                 if not ping_ok:
                     failed = [d['domain'] for d in ping_details if not d['ok']]
-                    self._notify_proxmox_ipset_ping_failure(subnet_name, failed)
+                    self._notify_proxmox_ipset_ping_failure(subnet_name, failed, new_prefix, ipset_ok, ipset_msg)
 
     def sync_update_group(self, group_name):
         """Manually run a group through its Group Update Plan right now,
@@ -3670,6 +3704,14 @@ expect eof
                 continue
             subnet['prefix_v6'] = new_prefix
             if old_prefix and new_prefix != old_prefix:
+                # Persist the new prefix BEFORE the (slow, multi-step)
+                # propagation. A detected renumber is a fact about the
+                # network regardless of whether the downstream ipset/
+                # group pushes succeed — if the prefix only got saved at
+                # the very end, any failure or interruption in between
+                # meant re-detecting the "change" and re-running
+                # everything every single poll (see the 2026-08-31 loop).
+                self.save_config()
                 self._propagate_subnet_prefix_change(name, old_prefix, new_prefix)
 
     def _detect_subnet_member_address(self, entry):
@@ -5413,17 +5455,31 @@ def _dynamic_host_poller():
             if not _is_local_vrrp_master(vip):
                 logger.info("Not the current keepalived master — skipping dynamic host poll")
                 continue
-            result = manager.poll_dynamic_hosts()
-            if result['deployed']:
-                logger.info(f"Dynamic host poll applied changes: {result['changes']}")
+            # Hold the same lock every HTTP request holds for its whole
+            # lifecycle. _reload_config_from_disk REPLACES manager.config
+            # on every request, and this thread's poll is a long
+            # read-modify-write of that same object (minutes, when a
+            # prefix change triggers a Group Update Plan). Without the
+            # lock, a request landing mid-poll (something hits / every
+            # 5s) orphaned the poll's in-progress mutations: the new
+            # prefix vanished, records were computed as "unchanged",
+            # and the old prefix got written back over the new one —
+            # every hour, for three days, after the 2026-08-31 mgmt
+            # renumber. Requests queue behind the poll for its duration;
+            # that's the correct trade for a config that's actually
+            # consistent.
+            with _request_lock:
+                result = manager.poll_dynamic_hosts()
+                if result['deployed']:
+                    logger.info(f"Dynamic host poll applied changes: {result['changes']}")
 
-            drifted, configured, actual = manager.check_ipv6_vip_drift()
-            if drifted:
-                logger.error(f"IPv6 VIP drift: configured {configured}, active node is actually on {actual}")
-                if not manager._v6_vip_drift_notified:
-                    manager._notify_ipv6_vip_drift(configured, actual)
-            else:
-                manager._v6_vip_drift_notified = False  # a future drift should send a fresh notice
+                drifted, configured, actual = manager.check_ipv6_vip_drift()
+                if drifted:
+                    logger.error(f"IPv6 VIP drift: configured {configured}, active node is actually on {actual}")
+                    if not manager._v6_vip_drift_notified:
+                        manager._notify_ipv6_vip_drift(configured, actual)
+                else:
+                    manager._v6_vip_drift_notified = False  # a future drift should send a fresh notice
         except Exception as e:
             logger.error(f"Dynamic host poll failed: {e}")
 

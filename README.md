@@ -943,7 +943,26 @@ entry — there's no better state to fall back to — but does flag the
 overall result as failed and sends its own notification email, separate
 from the plain ipset-update notice, since "the API call succeeded" and
 "the fix actually worked end-to-end" are different questions worth
-answering separately.
+answering separately. The ping check is handed the *new* prefix
+explicitly rather than re-reading it from config, and the failure email
+states which prefix it pinged and whether the ipset update itself
+succeeded — it never claims "updated successfully" on the strength of
+the call having been attempted.
+
+`update_proxmox_ipset_cidr()` is **idempotent and resumable**. It lists
+the ipset first and only creates the new entry if it's missing (tolerating
+pvesh's `already exists` if it appears in between), then retires the old
+entry only if it's still there *and* carries the `dnsmasq-ui-managed:`
+tag — an untagged entry with the same CIDR is someone's hand-maintained
+rule and is left alone. So a retry after a partial earlier run (new CIDR
+added, old one not yet removed) picks up where it left off instead of
+failing on the add. The manual Sync Now path delegates to the same
+function rather than carrying its own copy of the logic. Two pvesh
+details worth knowing: the entry's CIDR goes into the `pvesh delete` path
+**verbatim** — pvesh does not URL-decode path parameters, so a
+percent-encoded CIDR fails its schema check with "invalid format" — and
+`pvesh` on a cluster-level path is the same one-call-applies-everywhere
+operation regardless of which node runs it.
 
 Add/manage tracking from the Config page, or directly:
 
@@ -2612,6 +2631,47 @@ directly observed usability (the address worked in a browser the whole
 time), trust the observed usability and treat the check itself as
 suspect — `ping6`'s reachability semantics on a firewalled network are
 not the same as "can a client actually talk to this service."
+
+### Incident: a real ISP renumber of the mgmt VLAN looped hourly for three days (Aug 31 – Sep 3, 2026)
+
+The first genuine renumber since all of the above was built
+(`2605:4a80:b009:c100::/64` -> `2605:4a80:b00c:7900::/64`) went half
+right: the Group Update Plan moved all four Proxmox nodes' `vlan7`
+addresses correctly on the first pass, validated over TCP. Everything
+around it then repeated every hour, 64 times, each cycle emailing a
+"ping6 still failing after ipset update" notice that blamed the
+ICMPv6/conntrack workaround — while the new addresses answered ping6
+perfectly the whole time. Meanwhile the mgmt zone's DNS records kept
+pointing at the old, now-nonexistent prefix. Four separate defects
+stacked up:
+
+- **The background poller wasn't covered by the request lock.** The
+  per-request config reload (see the previous incident) *replaces*
+  `manager.config` on every HTTP request, and something hits the
+  dashboard every 5 seconds. The poller's multi-minute propagation was
+  therefore always interrupted: its in-progress prefix update landed on
+  an orphaned dict, the ping check re-read the *old* prefix from the
+  freshly-reloaded config (hence pinging dead addresses), the DNS
+  records computed as "unchanged", and the group plan's own save wrote
+  the old prefix back over the new one. Next hour: "prefix changed"
+  again. Fixed by having the poller hold `_request_lock` for the whole
+  poll, and by saving immediately after a prefix change is detected
+  rather than only at the end of the cycle.
+- **The old ipset entry was never removed** because its CIDR was
+  URL-encoded before going into the `pvesh delete` path, and pvesh
+  doesn't decode path parameters. Verified read-only with `pvesh get`
+  before changing anything: raw works, encoded fails.
+- **Every retry then died on the add**, since the new CIDR was already
+  present from the first pass and "already exists" was treated as
+  fatal. Now idempotent, see above.
+- **The ping-failure email hard-coded "updated successfully"** and
+  fired regardless of whether the ipset update had actually failed.
+
+Lesson: a background thread that mutates shared state needs the same
+serialization the request handlers got — the earlier lock fix covered
+requests racing each other and stopped there. And a verification check
+must be handed the value it's verifying, not re-derive it from state
+that something else can rewrite underneath it.
 
 ### Incident: opnsense reverse-DNS falling through to the ISP instead of resolving locally (Aug 2026)
 
