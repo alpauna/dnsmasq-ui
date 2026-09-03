@@ -3484,11 +3484,14 @@ class ZoneManager:
                 all_ok = False
                 continue
             # One sh -c so BOTH halves run under _run_remote_root_command's
-            # sudo, with absolute paths: the SSH user's PATH has no
-            # /usr/sbin, and `sudo a && b` only elevates `a` (first push
-            # attempt failed exactly that way: "rndc: command not found").
+            # sudo: `sudo a && b` only elevates `a`, and the SSH user's own
+            # PATH has no /usr/sbin (first push failed with "rndc: command
+            # not found"). No absolute paths on purpose -- sudo's
+            # secure_path covers /usr/bin (named-checkconf on Debian 13)
+            # and /usr/sbin (rndc); hardcoding /usr/sbin for both was the
+            # second failed attempt.
             ok, out = self._run_remote_root_command(
-                ip, f"sh -c {shlex.quote('/usr/sbin/named-checkconf && /usr/sbin/rndc reconfig')}")
+                ip, f"sh -c {shlex.quote('named-checkconf && rndc reconfig')}")
             results[name] = {'success': ok, 'message': (out.strip() or ('reconfigured' if ok else 'failed'))}
             if not ok:
                 all_ok = False
