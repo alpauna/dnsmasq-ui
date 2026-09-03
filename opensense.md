@@ -165,7 +165,15 @@ CPU-bound, so the risk is not worth it right now.
   `REFUSED` ("view internal: query denied" in the named log). Found on
   2026-09-03 while checking the moved VIP. Fixed by a dnsmasq-ui-generated
   ACL of the tracked subnets' live prefixes (see README, "BIND IPv6
-  client ACL"), re-pushed automatically on prefix change.
+  client ACL"), re-pushed automatically on prefix change. The one-time
+  wiring on the three live servers was done by hand the same day (backups
+  `named.conf*.bak-2026-09-03`): the include added to `/etc/bind/named.conf`
+  ahead of `named.conf.options`, and `dnsmasq-ui-subnets-v6;` appended to
+  every `... 127.0.0.1; ::1; }` query list in `named.conf.options` and
+  `named.conf.local`. `ansible/bind9-setup.yml` now does the same on a
+  fresh host. Verified afterwards: authoritative and recursive answers
+  over IPv6 via the VIP, and link-local queries, from a global-source
+  client and from a peer node.
 
 - LAN IPv6 is not working end to end. The router's LAN interface tracks
   the WAN prefix (`2605:4a80:b004:4070::/64`), but VM 119 holds an
