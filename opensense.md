@@ -141,17 +141,24 @@ Conclusion: the guest is no longer CPU-bound. The remaining gap (4.2 to
 4.3 Gbps routed versus 5.2 Gbps bypassing the router, on IPv4 and IPv6
 alike) comes from traffic concentrating on two queues rather than six.
 
-Not yet applied, needs one more reboot (loader tunables cannot be set
-at runtime). Put these in `/boot/loader.conf.local` (OPNsense preserves
-that file across upgrades; deleting it reverts) or add them as System >
-Settings > Tunables:
+RSS was tried on 2026-09-03 and **reverted**: `/boot/loader.conf.local`
+with `net.inet.rss.enabled=1`, `net.inet.rss.bits=3`,
+`net.isr.maxthreads=-1`, `net.isr.bindthreads=1`, then a reboot. It did
+spread the load (6 netisr threads, all six cores busy) but the software
+hashing cost more than the spreading gained:
 
-```
-net.inet.rss.enabled="1"
-net.inet.rss.bits="3"
-net.isr.maxthreads="-1"
-net.isr.bindthreads="1"
-```
+| Through OPNsense, VM 119 | Multiqueue only | Multiqueue + RSS |
+|---|---|---|
+| Speedtest download | 4218 to 4291 Mbps | 3626 to 4249 Mbps |
+| Speedtest upload | 3311 to 4504 Mbps | 3848 to 4438 Mbps |
+| iperf3 LAN to VLAN 7, 4 streams | 6.92 Gbps | 5.70 Gbps |
+| iperf3 single stream | 4.09 Gbps | 3.48 Gbps |
+| Busiest core during download | 46% interrupt (2 cores active) | 62 to 73% interrupt on all 6 |
+
+So the router runs without RSS (file removed, rebooted again). Both
+reboots kept the delegated prefix, confirming "Prevent release" works.
+The remaining gap to the 5.2 Gbps line rate is not worth more router
+tuning; the practical ceiling for this VM is about 4.2 Gbps routed.
 
 Deliberately left alone: hardware checksum offload. Enabling it on
 virtio has a history of pf/vtnet checksum bugs, and the guest is not
