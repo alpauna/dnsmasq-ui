@@ -14,7 +14,7 @@
     # updating (same class of drift as the DHCPv6/RA tracking work — see
     # the project's dynamic_hosts docs). Chosen deliberately anyway since
     # this VIP only needs to be reachable on the LAN, same as the v4 one.
-    keepalive_vip6: 2605:4a80:b004:b120::230
+    keepalive_vip6: 2605:4a80:b004:4070::230
 
   tasks:
     - name: Install dnsmasq, keepalived, and dependencies

@@ -710,6 +710,7 @@ class ZoneManager:
         self._vault_key = None  # in-memory only; never persisted to disk
         self._vault_lock_notified = False  # avoid re-emailing every poll cycle for the same lock
         self._v6_vip_drift_notified = False  # avoid re-emailing every poll cycle for the same drift
+        self._v6_vip_move_attempts = {}  # target address -> epoch of last automatic move attempt (see reconcile_ipv6_vip)
         # In-memory high-water mark for mgmt.alshowto.com's raw serial --
         # see generate_bind_zone_file. A live SOA query alone races when
         # deploys happen back-to-back (e.g. acme.sh adding two challenge
@@ -2681,6 +2682,17 @@ class ZoneManager:
                 self.save_config()
             self._notify_proxmox_ipset_update(subnet_name, old_cidr, new_prefix, ipset_ok, ipset_msg)
 
+        # The IPv6 VIP lives on one of these subnets and is addressed the
+        # same way (prefix + fixed host suffix) — move it now, off the
+        # same detected change, rather than waiting for the drift check
+        # to notice a poll later. new_prefix passed explicitly, never
+        # re-read from self.config here.
+        if self.ipv6_vip_autotrack_enabled() and self.ipv6_vip_tracking_subnet() == subnet_name:
+            _, ok, message = self.reconcile_ipv6_vip(
+                new_prefix, reason=f"subnet '{subnet_name}' renumbered {old_prefix} -> {new_prefix}")
+            (logger.warning if ok else logger.error)(
+                f"IPv6 VIP auto-tracking after subnet '{subnet_name}' change: {message.splitlines()[0]}")
+
         for group_name, group in self.get_update_groups().items():
             member_targets = {}
             for domain in group.get('members', []):
@@ -3258,6 +3270,161 @@ class ZoneManager:
         if sent:
             self._v6_vip_drift_notified = True
 
+    # ---- IPv6 VIP auto-tracking -------------------------------------------
+    # The IPv6 VIP is "<tracked subnet's live /64> + a fixed host suffix"
+    # (::230), which is exactly the shape subnet-tracked ipv6_host records
+    # already have. Until 2026-09-03 the VIP was the one thing deliberately
+    # left manual (see README's IPv6 VIP section); after the LAN prefix
+    # changed twice in two weeks (ISP hands out a new /60 on every DHCPv6
+    # release) it now follows its subnet the same way tracked hosts do.
+
+    KEEPALIVED_CONF = '/etc/keepalived/keepalived.conf'
+
+    def ipv6_vip_autotrack_enabled(self):
+        """Whether the IPv6 VIP follows its subnet's live prefix on its
+        own (global.keepalive_vip6_autotrack, default on). Off restores
+        the old notification-only behaviour: drift is emailed, nothing
+        is touched."""
+        g = self.config.get('global', {})
+        return bool(g.get('keepalive_vip6')) and bool(g.get('keepalive_vip6_autotrack', True))
+
+    def ipv6_vip_tracking_subnet(self):
+        """Name of the global.subnets entry the IPv6 VIP lives on
+        (global.keepalive_vip6_subnet, default 'lan')."""
+        return self.config.get('global', {}).get('keepalive_vip6_subnet', 'lan')
+
+    def expected_ipv6_vip(self, prefix_v6=None):
+        """The address the IPv6 VIP should have right now: the tracked
+        subnet's live /64 plus the VIP's own fixed host suffix (the low
+        64 bits of the currently configured keepalive_vip6, e.g. '::230').
+        prefix_v6 overrides the subnet's recorded prefix — callers that
+        already know the new prefix pass it explicitly rather than
+        re-reading self.config mid-propagation (same reasoning as
+        _verify_subnet_ping_reachability). None if there's no VIP or no
+        known prefix."""
+        vip = self.config.get('global', {}).get('keepalive_vip6')
+        if not vip:
+            return None
+        if prefix_v6 is None:
+            prefix_v6 = self.get_subnets().get(self.ipv6_vip_tracking_subnet(), {}).get('prefix_v6')
+        if not prefix_v6:
+            return None
+        try:
+            net = ipaddress.ip_network(prefix_v6, strict=False)
+            host_bits = int(ipaddress.IPv6Address(vip)) & ((1 << 64) - 1)
+            return str(ipaddress.IPv6Address(int(net.network_address) | host_bits))
+        except ValueError as e:
+            logger.error(f"Can't compute the expected IPv6 VIP from {vip!r} + {prefix_v6!r}: {e}")
+            return None
+
+    def reconcile_ipv6_vip(self, prefix_v6=None, reason='poll', force=False):
+        """Move the IPv6 VIP to its expected address if it isn't there
+        already. Automatic callers get one attempt per target address
+        per hour — a move that keeps failing (a node down, keepalived
+        rejecting the config) would otherwise retry and email every
+        5-minute poll; force=True (the manual sync-now API) bypasses
+        that. Returns (changed, ok, message)."""
+        current = self.config.get('global', {}).get('keepalive_vip6')
+        expected = self.expected_ipv6_vip(prefix_v6)
+        if not current or not expected:
+            return False, False, "IPv6 VIP auto-tracking: no VIP configured, or no known prefix for the tracked subnet"
+        if ipaddress.IPv6Address(expected) == ipaddress.IPv6Address(current):
+            return False, True, f"IPv6 VIP {current} already matches its subnet's prefix"
+        last = self._v6_vip_move_attempts.get(expected)
+        if last and not force and time.time() - last < 3600:
+            return False, False, (f"IPv6 VIP move to {expected} was already attempted at {time.ctime(last)} — "
+                                  "not retrying automatically for an hour (fix the cause, then POST /api/vip6/sync-now)")
+        self._v6_vip_move_attempts[expected] = time.time()
+        ok, message = self.move_ipv6_vip(expected, reason=reason)
+        return True, ok, message
+
+    def move_ipv6_vip(self, new_vip, reason=''):
+        """Re-point the IPv6 VIP everywhere it lives, in this order:
+        1. keepalived.conf on every enabled server — virtual_ipaddress
+           '<old>/64' -> '<new>/64', syntax-checked with `keepalived -t`
+           before `systemctl reload keepalived`; a failed check restores
+           the backup and leaves that node exactly as it was;
+        2. every AAAA record whose value is the old VIP (the
+           dns.ad.alshowto.com hostname; PTR follows via update_record);
+        3. global.keepalive_vip6 itself, then a DNS redeploy.
+        keepalived first on purpose: the config/DNS side is only worth
+        updating once the address actually exists on the wire, and a
+        half-done keepalived rollout is visible in /api/status
+        (vip6_active per server) whereas a half-done config edit isn't.
+        The addresses are validated IPv6 literals before they go
+        anywhere near a shell, so the sed/grep expressions below can't
+        carry anything but hex digits, colons and a slash.
+        Returns (ok, message): ok is False if any server or the deploy
+        failed, but everything that could be done still was. Emails a
+        summary either way, to the same address as the drift notice."""
+        g = self.config.setdefault('global', {})
+        try:
+            new_vip = str(ipaddress.IPv6Address(new_vip))
+            old_vip = str(ipaddress.IPv6Address(g.get('keepalive_vip6')))
+        except (ValueError, TypeError) as e:
+            return False, f"Invalid IPv6 VIP: {e}"
+        if new_vip == old_vip:
+            return True, f"IPv6 VIP is already {new_vip}"
+        logger.warning(f"Moving IPv6 VIP {old_vip} -> {new_vip} ({reason})")
+
+        conf = self.KEEPALIVED_CONF
+        script = (
+            f"if grep -q '{new_vip}/64' {conf}; then echo already-updated; "
+            f"elif grep -q '{old_vip}/64' {conf}; then "
+            f"cp -a {conf} {conf}.bak-vip6 && sed -i 's#{old_vip}/64#{new_vip}/64#g' {conf} && "
+            f"if keepalived -t -f {conf} >/dev/null 2>&1; then systemctl reload keepalived && echo updated; "
+            f"else cp -a {conf}.bak-vip6 {conf}; echo 'keepalived -t rejected the edited config, backup restored'; exit 1; fi; "
+            f"else echo 'old VIP {old_vip}/64 not found in {conf}'; exit 1; fi"
+        )
+        details, all_ok = [], True
+        for name, server in self.get_servers().items():
+            if not server.get('enabled', True):
+                continue
+            ok, out = self._run_remote_root_command(server['ip'], f"sh -c {shlex.quote(script)}")
+            details.append(f"{name} ({server['ip']}): {'OK' if ok else 'FAILED'} — {out.strip()}")
+            if not ok:
+                all_ok = False
+                logger.error(f"IPv6 VIP move on {name} ({server['ip']}) failed: {out.strip()}")
+
+        record_changes = []
+        for zone in self.get_zones():
+            for record in list(zone.get('records', [])):
+                if record.get('type') == 'AAAA' and record.get('value') == old_vip:
+                    updated, msg = self.update_record(zone['name'], record['domain'], 'AAAA', new_vip)
+                    record_changes.append(f"{record['domain']}: {'OK' if updated else msg}")
+        g['keepalive_vip6'] = new_vip
+        self.save_config()
+
+        deploy = self.deploy_to_servers()
+        deploy_failed = [n for n, r in deploy.items() if not r.get('success')]
+        if deploy_failed:
+            all_ok = False
+        summary = (
+            f"IPv6 VIP {old_vip} -> {new_vip} ({reason})\n\n"
+            "keepalived:\n  " + "\n  ".join(details or ['(no enabled servers)']) + "\n\n"
+            "AAAA records:\n  " + "\n  ".join(record_changes or ['(none referenced the old VIP)']) + "\n\n"
+            f"DNS deploy: {'OK' if not deploy_failed else 'FAILED on ' + ', '.join(deploy_failed)}"
+        )
+        (logger.warning if all_ok else logger.error)("IPv6 VIP move: " + summary.replace('\n', ' | '))
+        self._notify_ipv6_vip_moved(all_ok, summary)
+        return all_ok, summary
+
+    def _notify_ipv6_vip_moved(self, ok, summary):
+        auth_config = _load_auth() or {}
+        to_addr = auth_config.get('two_factor', {}).get('email', {}).get('to')
+        status = 'moved' if ok else 'move FAILED (partially applied)'
+        if not to_addr:
+            logger.error(f"IPv6 VIP {status}, but no notification email address is configured (enable email 2FA to set one)")
+            return
+        _send_email(
+            to_addr, f"dnsmasq-ui: IPv6 VIP {status}",
+            "The tracked subnet's delegated IPv6 prefix changed and the keepalived IPv6 VIP was "
+            "re-pointed automatically (global.keepalive_vip6_autotrack).\n\n" + summary +
+            ("" if ok else "\n\nSomething didn't apply cleanly — check the entries marked FAILED. Until fixed, "
+                           "the VIP may be reachable on some nodes and not others. Re-run with "
+                           "POST /api/vip6/sync-now once the cause is addressed.") +
+            f"\n\nDashboard: {DASHBOARD_URL}/config")
+
     def _load_device_credentials(self):
         """Decrypt and return all stored device credentials as
         {key: plaintext_password}. Requires the vault to be unlocked;
@@ -3692,7 +3859,14 @@ expect eof
             if not output:
                 logger.error(f"Subnet '{name}': failed to detect IPv6 prefix via {ip} ({interface})")
                 continue
-            match = re.search(r'inet6 ([0-9a-fA-F:]+)/', output)
+            # Prefer a non-deprecated address. Right after a renumber the
+            # old prefix's address lingers on the interface as valid-but-
+            # deprecated next to the new one, and which line `ip` prints
+            # first isn't a promise — same filtering
+            # _get_local_global_ipv6_prefix already does locally.
+            lines = [l for l in output.splitlines() if 'inet6' in l]
+            preferred = [l for l in lines if 'deprecated' not in l and 'temporary' not in l] or lines
+            match = re.search(r'inet6 ([0-9a-fA-F:]+)/', '\n'.join(preferred))
             if not match:
                 logger.error(f"Subnet '{name}': no dynamic global IPv6 address found on {ip}")
                 continue
@@ -4794,6 +4968,9 @@ def api_status():
         'servers': status,
         'vip': keepalived_vip,
         'vip6': keepalived_vip6,
+        'vip6_autotrack': manager.ipv6_vip_autotrack_enabled(),
+        'vip6_subnet': manager.ipv6_vip_tracking_subnet(),
+        'vip6_expected': manager.expected_ipv6_vip(),
         'wg_enabled': wg_enabled
     })
 
@@ -4896,6 +5073,16 @@ def api_proxmox_ipset_tracking_sync_now(subnet_name):
     recreates it if a human removed it by hand."""
     success, message = manager.sync_proxmox_ipset_tracking(subnet_name)
     return jsonify({'success': success, 'message': message})
+
+@app.route('/api/vip6/sync-now', methods=['POST'])
+def api_vip6_sync_now():
+    """API: Re-point the IPv6 VIP to its tracked subnet's current live
+    prefix right now (see ZoneManager.reconcile_ipv6_vip) instead of
+    waiting for the poller — e.g. right after enabling auto-tracking on
+    a VIP that had already drifted, or to retry a move that failed."""
+    changed, ok, message = manager.reconcile_ipv6_vip(reason='manual sync-now', force=True)
+    return jsonify({'success': ok, 'changed': changed, 'message': message,
+                    'vip6': manager.config.get('global', {}).get('keepalive_vip6')})
 
 @app.route('/api/subnets', methods=['GET'])
 def api_subnets_list():
@@ -5476,7 +5663,27 @@ def _dynamic_host_poller():
                 drifted, configured, actual = manager.check_ipv6_vip_drift()
                 if drifted:
                     logger.error(f"IPv6 VIP drift: configured {configured}, active node is actually on {actual}")
-                    if not manager._v6_vip_drift_notified:
+                    handled = False
+                    if manager.ipv6_vip_autotrack_enabled():
+                        # Self-heal only when two independent signals agree
+                        # on the live prefix: this node's own eth0 address
+                        # (actual) and the subnet poll's recorded prefix_v6
+                        # (read off the subnet's primary_dns over SSH). Right
+                        # after a renumber the old prefix's address lingers
+                        # on eth0 as valid-but-deprecated, and one signal
+                        # alone could drag the VIP onto a dead prefix.
+                        subnet_name = manager.ipv6_vip_tracking_subnet()
+                        tracked = manager.get_subnets().get(subnet_name, {}).get('prefix_v6')
+                        if tracked and actual and ipaddress.ip_network(tracked) == ipaddress.ip_network(actual):
+                            changed, ok, message = manager.reconcile_ipv6_vip(actual, reason='drift detected by poller')
+                            handled = changed and ok
+                            if changed:
+                                (logger.warning if ok else logger.error)(
+                                    f"IPv6 VIP auto-tracking: {message.splitlines()[0]}")
+                        else:
+                            logger.warning(f"IPv6 VIP auto-tracking: not moving the VIP yet — subnet "
+                                           f"'{subnet_name}' prefix is {tracked}, this node sees {actual}")
+                    if not handled and not manager._v6_vip_drift_notified:
                         manager._notify_ipv6_vip_drift(configured, actual)
                 else:
                     manager._v6_vip_drift_notified = False  # a future drift should send a fresh notice

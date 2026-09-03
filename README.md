@@ -348,14 +348,27 @@ three servers and the `dnsmasq-setup.yml` template that generates it.
 ### IPv6 VIP
 
 DNS and the dashboard are also reachable over IPv6, on
-`2605:4a80:b004:b120::230` — a static address inside the LAN's currently
-delegated `/64`, not a ULA. That's a deliberate tradeoff: it's simpler and
-matches the v4 VIP's addressing style, but if the ISP ever rotates the
-delegated prefix, this address goes stale until updated (the same class of
-drift as the project's still-open DHCPv6/RA tracking work). Worth
-revisiting as a ULA (`fd00::/8`) if that ever becomes a real problem — a
-ULA would be immune to WAN prefix changes since it's never routed off the
-LAN anyway.
+`2605:4a80:b004:4070::230` (as of 2026-09-03) — the LAN's currently
+delegated `/64` plus a fixed host suffix (`::230`), not a ULA. That
+matches the v4 VIP's addressing style, but the ISP hands out a new
+delegated prefix whenever the router releases its DHCPv6 lease (it
+happened on 2026-08-23 and again on 2026-09-03), so the address is **not
+static**: it is auto-tracked. `global.keepalive_vip6` records the current
+address, `global.keepalive_vip6_subnet` (default `lan`) names the
+`global.subnets` entry it follows, and `global.keepalive_vip6_autotrack`
+(default `true`) turns the tracking on. When the subnet poll detects a
+prefix change, `ZoneManager.move_ipv6_vip` rewrites `virtual_ipaddress`
+in `keepalived.conf` on every enabled server (syntax-checked with
+`keepalived -t`, then `systemctl reload keepalived`), updates every AAAA
+record that pointed at the old VIP (`dns.ad.alshowto.com`), updates
+`keepalive_vip6`, redeploys DNS and emails a summary. `POST
+/api/vip6/sync-now` does the same on demand, and `/api/status` exposes
+`vip6_autotrack`, `vip6_subnet` and `vip6_expected` so a stale VIP is
+visible at a glance. Set `keepalive_vip6_autotrack: false` to go back to
+notification-only drift handling. A ULA (`fd00::/8`) VIP would sidestep
+renumbering entirely but needs the router to advertise a ULA prefix on
+the LAN and route it from the mgmt VLAN — more moving parts for the same
+outcome, so not done.
 
 The same tradeoff applies to anything *else* that references this DNS
 cluster from within the LAN — notably a router's RA/DHCPv6 DNS-server
@@ -382,7 +395,7 @@ vrrp_instance DNS_VIP6 {
   virtual_router_id 52
   virtual_ipaddress {
     fe80::230/64
-    2605:4a80:b004:b120::230/64
+    2605:4a80:b004:4070::230/64
   }
 }
 
@@ -406,7 +419,7 @@ needing separate v4/v6 listeners. `dnsmasq` needed no changes — it already
 listens on all local addresses.
 
 A hostname for the VIP itself is also published: `dns.ad.alshowto.com`
-resolves to `192.168.0.230` (A) and `2605:4a80:b004:b120::230` (AAAA), so
+resolves to `192.168.0.230` (A) and `2605:4a80:b004:4070::230` (AAAA), so
 scripts/clients don't need to hardcode the raw VIP addresses. The
 individual nodes' own real addresses are published too, for anything that
 specifically needs to reach one server rather than whichever is active —
@@ -424,8 +437,7 @@ the existing VIP display. Checked independently of the v4 `status` field
 them in lockstep — so a divergence (e.g. a bad `keepalived.conf` edit on
 one node) shows up in monitoring instead of being silently assumed away.
 
-Since the IPv6 VIP's address is manually managed rather than
-auto-generated, it can only go stale one way: the ISP renumbers the
+The IPv6 VIP can only go stale one way: the ISP renumbers the
 delegated prefix out from under it (the drift risk called out above). The
 background poller — already gated to run only on whichever node currently
 holds the VIP, same as the `dynamic_hosts` polling — checks this every
@@ -433,11 +445,18 @@ cycle: it reads the active node's own real RA/SLAAC `/64` (filtering
 specifically for the `dynamic` flag in `ip -6 addr show`, since the VIP
 address itself also shows up as `scope global` on the same interface and
 would otherwise be compared against itself) and compares it to the
-configured `keepalive_vip6`. A mismatch logs an error and — same
-notification-only pattern as the vault-locked email, not an
-auto-remediation — emails whatever address is configured for email 2FA,
-with a reminder to update `keepalive_vip6` in `zones.json` and
-`virtual_ipaddress` in `keepalived.conf` on all three servers by hand.
+configured `keepalive_vip6`. With auto-tracking on (the default, see the
+IPv6 VIP section) a mismatch is repaired in place, but only when this
+node's own address and the subnet poll's recorded `prefix_v6` agree on
+what the live prefix is — two independent signals, so a lingering
+valid-but-deprecated address from the old prefix can't drag the VIP onto
+a dead one. Automatic moves are attempted once per target address per
+hour; a failed move emails the per-server detail and can be retried with
+`POST /api/vip6/sync-now`. With auto-tracking off, a mismatch logs an
+error and — same notification-only pattern as the vault-locked email —
+emails whatever address is configured for email 2FA, with a reminder to
+update `keepalive_vip6` in `zones.json` and `virtual_ipaddress` in
+`keepalived.conf` on all three servers by hand.
 
 ## Configuration
 
@@ -648,7 +667,7 @@ self-configure via SLAAC, so there's no MAC to derive a suffix from —
 `mac_address` doesn't apply. `ipv6_host` covers this case instead: an
 explicit, manually-chosen 64-bit suffix combined with the subnet's live
 `prefix_v6`, the same addressing style already used for the [IPv6
-VIP](#ipv6-vip) itself (`2605:4a80:b004:b120::230` — prefix plus a chosen
+VIP](#ipv6-vip) itself (`2605:4a80:b004:4070::230` — prefix plus a chosen
 `::230`):
 
 ```json
