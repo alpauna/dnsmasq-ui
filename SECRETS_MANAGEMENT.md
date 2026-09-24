@@ -42,12 +42,12 @@ ansible-vault encrypt ansible/vault.yml
 ansible-vault view ansible/vault.yml
 ```
 
-### 3. Add to .gitignore
+### 3. Check .gitignore
+
+The repo's `.gitignore` already covers `.env`, `ansible/vault.yml`,
+`docker-compose.override.yml`, `*.pem`/`*.key` and the other secret files.
 
 ```bash
-# Add secrets patterns to your .gitignore
-cat .gitignore-secrets >> .gitignore
-
 # Verify nothing secret is staged
 git status
 

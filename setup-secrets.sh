@@ -74,12 +74,6 @@ else
     success "Created .gitignore with .env"
 fi
 
-# Also add the secrets patterns
-if [ ! grep -q "ansible/vault.yml" "$SCRIPT_DIR/.gitignore" 2>/dev/null ]; then
-    cat "$SCRIPT_DIR/.gitignore-secrets" >> "$SCRIPT_DIR/.gitignore" 2>/dev/null || true
-    success "Added secret patterns to .gitignore"
-fi
-
 # Step 3: Set up Ansible Vault
 echo ""
 echo "Step 3: Ansible Vault Setup"
