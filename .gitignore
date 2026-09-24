@@ -34,29 +34,60 @@ ENV/
 
 # OS
 .DS_Store
+
+# Environment files
 .env
 .env.local
+.env.*.local
+.env.*.vault
+smtp.env
+proxmox.env
+acme.env
 
 # Secrets (WireGuard keys, credentials)
 wireguard-keys.json
 wireguard-keys.json.bak
 wireguard-keys-docker.json
 wireguard-keys-docker.json.bak
-servers.json
 device-credentials.json
 device-credentials.json.bak
 auth.json
 auth.json.bak
-smtp.env
-proxmox.env
-acme.env
+
+# Ansible Vault files
+ansible/vault.yml
+ansible/vault.yml.key
+ansible/*.vault
+!ansible/.vault-example
+
+# SSH keys
+*.pem
+*.key
+*.pub
+.ssh/
+
+# API keys and tokens
+.api_keys
+tokens.txt
+api-credentials.json
+proxmox-credentials.txt
+proxmox-api-token.txt
+
+# CI/CD secrets
+.github/workflows/secrets.yml
+gitlab-ci-secrets.yml
+.circleci/secrets.yml
+
+# Docker secrets (the .example override is tracked)
+docker-compose.override.yml
+.dockercfg
+.docker/config.json
+
+# Terraform/Infrastructure secrets
+terraform/terraform.tfvars
+terraform/*.auto.tfvars
+.terraform/
 
 # Logs
 *.log
 logs/
-
-# Docker
-.dockerignore
-
-# Git
-.git/
